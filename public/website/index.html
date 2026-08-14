@@ -10,8 +10,20 @@
   <link rel="alternate" type="text/plain" href="https://intentaiops.top/llms.txt" title="Intent AI Ops overview for language models">
   <meta property="og:title" content="Intent AI Ops — AI-powered server administration">
   <meta property="og:description" content="Manage Linux, FreeBSD, macOS, Windows and Kubernetes hosts with natural-language tasks, system SSH, reviewed plans and explicit approval.">
+  <meta property="og:site_name" content="Intent AI Ops">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://intentaiops.top/">
+  <meta property="og:image" content="https://intentaiops.top/logo-md.png">
+  <meta property="og:image:secure_url" content="https://intentaiops.top/logo-md.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="800">
+  <meta property="og:image:height" content="800">
+  <meta property="og:image:alt" content="Intent AI Ops logo">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Intent AI Ops — AI-powered server administration">
+  <meta name="twitter:description" content="Manage servers with natural-language tasks, reviewed plans, explicit approval, and system SSH.">
+  <meta name="twitter:image" content="https://intentaiops.top/logo-md.png">
+  <meta name="twitter:image:alt" content="Intent AI Ops logo">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='7' y='10' width='50' height='47' rx='22' fill='%230d151b' stroke='%2314c86e' stroke-width='3'/%3E%3Crect x='14' y='20' width='36' height='26' rx='11' fill='%23031017' stroke='%2365717a'/%3E%3Cpath d='M21 35c1-6 7-6 8 0m6 0c1-6 7-6 8 0' fill='none' stroke='%2354f590' stroke-linecap='round' stroke-width='3'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -76,23 +88,23 @@
 
       <div class="platforms" role="tablist" aria-label="Preview Intent AI Ops by platform">
         <button class="platform-tab is-active" id="platform-linux" type="button" role="tab" aria-selected="true" aria-controls="platform-preview" data-platform="linux" tabindex="0">
-          <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/linux/linux-original.svg" alt="" width="18" height="18">
+          <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/linux/linux-original.svg" alt="Linux logo" width="18" height="18">
           Linux
         </button>
         <button class="platform-tab" id="platform-freebsd" type="button" role="tab" aria-selected="false" aria-controls="platform-preview" data-platform="freebsd" tabindex="-1">
-          <img src="https://cdn.jsdelivr.net/npm/simple-icons@16.28.0/icons/freebsd.svg" alt="" width="18" height="18">
+          <img src="https://cdn.jsdelivr.net/npm/simple-icons@16.28.0/icons/freebsd.svg" alt="FreeBSD logo" width="18" height="18">
           FreeBSD
         </button>
         <button class="platform-tab" id="platform-macos" type="button" role="tab" aria-selected="false" aria-controls="platform-preview" data-platform="macos" tabindex="-1">
-          <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/apple/apple-original.svg" alt="" width="18" height="18">
+          <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/apple/apple-original.svg" alt="Apple logo for macOS" width="18" height="18">
           macOS
         </button>
         <button class="platform-tab" id="platform-windows" type="button" role="tab" aria-selected="false" aria-controls="platform-preview" data-platform="windows" tabindex="-1">
-          <img src="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/icons/windows.svg" alt="" width="18" height="18" crossorigin="anonymous" referrerpolicy="no-referrer">
+          <img src="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/icons/windows.svg" alt="Windows logo" width="18" height="18" crossorigin="anonymous" referrerpolicy="no-referrer">
           Windows
         </button>
         <button class="platform-tab" id="platform-kubernetes" type="button" role="tab" aria-selected="false" aria-controls="platform-preview" data-platform="kubernetes" tabindex="-1">
-          <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/kubernetes/kubernetes-original.svg" alt="" width="18" height="18">
+          <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/kubernetes/kubernetes-original.svg" alt="Kubernetes logo" width="18" height="18">
           Kubernetes
         </button>
       </div>
@@ -140,7 +152,97 @@
         </div>
       </div>
     </section>
+
+    <section class="content-section intro-section" aria-labelledby="intro-title">
+      <p class="section-kicker">Operations with a review step</p>
+      <h2 id="intro-title">Describe the outcome. Stay in control of every command.</h2>
+      <p class="section-lead">Intent AI Ops is an open-source interactive CLI for administrators who want the speed of natural-language automation without handing an AI unrestricted access to their infrastructure. It runs on your administration computer, connects with the system OpenSSH tools you already use, and turns a request into a structured, inspectable plan.</p>
+
+      <div class="step-grid">
+        <article class="step-card">
+          <span class="step-number" aria-hidden="true">01</span>
+          <h3>Connect your targets</h3>
+          <p>Add a saved or temporary SSH host using a command that already works for you. Kubernetes clusters use a direct API workflow with a vault-encrypted kubeconfig, so they do not need an SSH server or a separate plugin on every node.</p>
+        </article>
+        <article class="step-card">
+          <span class="step-number" aria-hidden="true">02</span>
+          <h3>Ask in plain language</h3>
+          <p>Request an outcome such as installing nginx, checking host health, applying current-release updates, or deploying a supported application. Intent AI Ops gathers relevant inventory and asks your local Codex CLI to prepare the task.</p>
+        </article>
+        <article class="step-card">
+          <span class="step-number" aria-hidden="true">03</span>
+          <h3>Review, approve, execute</h3>
+          <p>Inspect the proposed commands, warnings, dependencies, affected paths, and revert actions before anything runs. Approve the complete plan, review commands individually, or cancel it. Conservative approval defaults keep the operator in charge.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="content-section feature-section" aria-labelledby="features-title">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">Built for real administration</p>
+          <h2 id="features-title">One terminal for routine work across your estate</h2>
+        </div>
+        <p>Use the same workflow for a single machine or a group of hosts. Each target keeps an independent result, so a failed host can be diagnosed, reverted, and retried without rerunning work that already succeeded elsewhere.</p>
+      </div>
+
+      <div class="feature-grid">
+        <article>
+          <i data-lucide="server-cog" aria-hidden="true"></i>
+          <h3>Cross-platform by design</h3>
+          <p>Manage Linux, FreeBSD, macOS, Windows, and Kubernetes targets. Eligibility is based on the detected operating system, distribution, architecture, service manager, virtualization, container environment, and runtime policy—not on a one-size-fits-all script.</p>
+        </article>
+        <article>
+          <i data-lucide="list-checks" aria-hidden="true"></i>
+          <h3>Verified common tasks</h3>
+          <p>Choose cataloged routes for host diagnostics, maintenance, runtime setup, static sites, and popular applications including WordPress, Drupal, Joomla, Moodle, n8n, Ghost, and more. Unsupported choices stay hidden when a target is not eligible.</p>
+        </article>
+        <article>
+          <i data-lucide="history" aria-hidden="true"></i>
+          <h3>History, retries, and reverts</h3>
+          <p>Per-host SQLite history records requests, plans, progress, command output, errors, and rollback steps. Retry with earlier failure evidence and optional correction instructions, or run the saved revert plan without overwriting the original record.</p>
+        </article>
+        <article>
+          <i data-lucide="square-terminal" aria-hidden="true"></i>
+          <h3>System SSH, not a hidden tunnel</h3>
+          <p>Connections use your local <code>ssh</code> and <code>scp</code> binaries and their familiar configuration. When automation is not the right tool, open a real interactive SSH shell and continue the investigation manually.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="content-section security-section" aria-labelledby="security-title">
+      <div class="security-copy">
+        <p class="section-kicker">Security boundaries that make sense</p>
+        <h2 id="security-title">Your credentials are not part of the prompt.</h2>
+        <p>Intent AI Ops keeps SSH details and saved credentials in a strong local vault. Saving an SSH password or key passphrase is optional and off by default, while one-time sudo passwords are never stored. Sensitive values are removed from inventory, diagnostics, logs, and task history before context reaches Codex.</p>
+        <p>The AI does not receive your vault, SSH credentials, private keys, tokens, connection strings, or generated application passwords. Codex also runs locally through your authenticated CLI, so Intent AI Ops itself does not require a separate OpenAI API key.</p>
+      </div>
+      <ul class="security-list">
+        <li><i data-lucide="check" aria-hidden="true"></i><span><strong>No per-host AI agent.</strong> Remote execution uses the signed Intent AI Ops Netdata plugin.</span></li>
+        <li><i data-lucide="check" aria-hidden="true"></i><span><strong>Explicit approval.</strong> Commands are displayed before execution and can be cancelled.</span></li>
+        <li><i data-lucide="check" aria-hidden="true"></i><span><strong>Auditable outcomes.</strong> Results and recovery information remain attached to each host.</span></li>
+        <li><i data-lucide="check" aria-hidden="true"></i><span><strong>Apache 2.0 licensed.</strong> Inspect the implementation and contribute on GitHub.</span></li>
+      </ul>
+    </section>
+
+    <section class="content-section cta-section" aria-labelledby="start-title">
+      <p class="section-kicker">Get started</p>
+      <h2 id="start-title">Bring an SSH connection and your signed-in Codex CLI.</h2>
+      <p>Install Intent AI Ops on the computer you administer from. The bootstrap installer provides Node.js 24 when needed. On first launch, create a local vault, add a host, inspect its capabilities, and try a consultation by prefixing a question with <code>?</code>—consultations never propose, approve, or execute commands.</p>
+      <div class="cta-actions">
+        <a class="button button-primary" href="https://github.com/cryptofuture/intentaiops#usage" target="_blank" rel="noopener noreferrer">
+          Read the usage guide
+          <i data-lucide="arrow-up-right" aria-hidden="true"></i>
+        </a>
+        <a class="text-link" href="https://github.com/cryptofuture/intentaiops" target="_blank" rel="noopener noreferrer">Explore the source on GitHub <span aria-hidden="true">→</span></a>
+      </div>
+    </section>
   </main>
+
+  <footer class="site-footer">
+    <p>Intent AI Ops is open-source software for reviewable, auditable, and reversible server administration.</p>
+    <a href="https://github.com/cryptofuture/intentaiops/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache License 2.0</a>
+  </footer>
 
   <script src="https://unpkg.com/lucide@1.31.0/dist/umd/lucide.min.js" integrity="sha384-/ApD3KXMqTmTxEJjuldaZDgdJj7/Hox2LRuKqV3rC7Bu/wE4obLaJRjF1rLHNP57" crossorigin="anonymous"></script>
   <script src="script.js"></script>
