@@ -37,7 +37,8 @@ button {
 
 a:focus-visible,
 button:focus-visible,
-code:focus-visible {
+code:focus-visible,
+summary:focus-visible {
   outline: 3px solid rgb(20 200 110 / 30%);
   outline-offset: 3px;
 }
@@ -428,7 +429,7 @@ h1 span {
 .terminal-window {
   overflow: hidden;
   border: 1px solid #dde1e5;
-  border-radius: 14px;
+  border-radius: 14px 14px 0 0;
   background: #fff;
   box-shadow: 0 12px 30px rgb(0 0 0 / 8%);
 }
@@ -587,6 +588,57 @@ h1 span {
   background: #b8bec2;
 }
 
+.site-details {
+  width: min(1120px, 100%);
+  margin: 0 auto;
+}
+
+.site-details > summary {
+  width: min(1010px, 100%);
+  min-height: 48px;
+  margin: 0 auto;
+  padding: 0 18px;
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 14px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: #263038;
+  background: #f6f7f7;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 6%);
+  font-size: 14px;
+  font-weight: 650;
+  list-style: none;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+
+.site-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.site-details > summary:hover {
+  border-color: rgb(20 200 110 / 55%);
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+}
+
+.site-details > summary svg {
+  width: 17px;
+  height: 17px;
+  transition: transform 160ms ease;
+}
+
+.site-details[open] > summary svg {
+  transform: rotate(180deg);
+}
+
+.site-details-content {
+  display: flow-root;
+}
+
 .content-section {
   width: min(1120px, 100%);
   margin: 0 auto;
@@ -594,7 +646,7 @@ h1 span {
 }
 
 .intro-section {
-  padding-top: 112px;
+  padding-top: 82px;
   text-align: center;
 }
 
@@ -933,7 +985,7 @@ h1 span {
   .intro-section,
   .feature-section,
   .cta-section {
-    padding-top: 82px;
+    padding-top: 72px;
   }
 
   .step-grid,
@@ -978,6 +1030,10 @@ h1 span {
     align-items: flex-start;
     flex-direction: column;
     gap: 10px;
+  }
+
+  .site-details {
+    margin-top: 0;
   }
 }
 
@@ -1034,6 +1090,10 @@ h1 span {
   .security-section {
     padding: 32px 22px;
   }
+
+  .site-details > summary {
+    width: 100%;
+  }
 }
 
 @media (max-width: 430px) {
@@ -1057,7 +1117,9 @@ h1 span {
   }
 
   .button,
-  .install-command {
+  .install-command,
+  .site-details > summary,
+  .site-details > summary svg {
     transition: none;
   }
 }
