@@ -1,0 +1,39 @@
+# Intent AI Ops
+
+> Intent AI Ops is an open-source CLI for managing one or many hosts with natural-language instructions, reviewed command plans, explicit approval, and system OpenSSH.
+
+Intent AI Ops supports administration workflows across Linux, FreeBSD, macOS, Windows, and Kubernetes. It runs Codex locally, does not require a separate OpenAI API key, and does not install a separate AI agent on each managed host. Sensitive credentials are encrypted locally and redacted before any context is sent to AI.
+
+## Primary links
+
+- [Project website](https://intentaiops.top/): Product overview, supported platforms, and quick install command.
+- [GitHub repository](https://github.com/cryptofuture/intentaiops): Source code, issues, documentation, and license.
+- [Full agent reference](https://intentaiops.top/llms-full.txt): Detailed capabilities, security model, installation, task workflow, and platform support.
+- [Apache License 2.0](https://github.com/cryptofuture/intentaiops/blob/main/LICENSE): Project license.
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.sh | sh
+```
+
+## Key facts
+
+- Interface: interactive Node.js CLI.
+- AI integration: the locally installed and authenticated Codex CLI.
+- Connections: the system `ssh` and `scp` binaries; not a JavaScript SSH implementation.
+- Execution: complete plans are shown before conservative approval prompts.
+- Security: SSH credentials, vault data, tokens, sudo passwords, and generated application credentials are not sent to AI.
+- History: per-host task plans, results, retries, and saved revert plans are retained without secret credentials.
+- Multi-host work: one natural-language task can run as separate, parallel, auditable tasks on selected hosts.
+- Kubernetes: choose **Add Kubernetes cluster**, then paste hidden kubeconfig YAML or provide its local path. After the direct API test and encrypted save, use **Browse Kubernetes clusters** to activate the Stage 2 gateway; SSH and per-node plugins are not required.
+
+## Supported targets
+
+- Linux
+- FreeBSD
+- macOS
+- Windows
+- Kubernetes
+
+For the authoritative and current platform/application matrix, use the repository README and catalog source. Eligibility depends on the detected platform, OS version, distro, service manager, architecture, virtualization, runtime policy, and Docker/Podman preference.

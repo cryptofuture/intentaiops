@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Intent AI Ops — AI-powered server administration</title>
+  <meta name="description" content="Manage Linux, FreeBSD, macOS, Windows and Kubernetes hosts with natural-language tasks, system SSH, reviewed plans and explicit approval.">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <link rel="canonical" href="https://intentaiops.top/">
+  <link rel="alternate" type="text/plain" href="https://intentaiops.top/llms.txt" title="Intent AI Ops overview for language models">
+  <meta property="og:title" content="Intent AI Ops — AI-powered server administration">
+  <meta property="og:description" content="Manage Linux, FreeBSD, macOS, Windows and Kubernetes hosts with natural-language tasks, system SSH, reviewed plans and explicit approval.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://intentaiops.top/">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='7' y='10' width='50' height='47' rx='22' fill='%230d151b' stroke='%2314c86e' stroke-width='3'/%3E%3Crect x='14' y='20' width='36' height='26' rx='11' fill='%23031017' stroke='%2365717a'/%3E%3Cpath d='M21 35c1-6 7-6 8 0m6 0c1-6 7-6 8 0' fill='none' stroke='%2354f590' stroke-linecap='round' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="./" aria-label="Intent AI Ops home">
+      <svg class="brand-mark" viewBox="0 0 224 74" role="img" aria-labelledby="brand-title brand-description">
+        <title id="brand-title">Intent AI Ops</title>
+        <desc id="brand-description">A friendly robot head beside the words Intent AI Ops</desc>
+        <g class="brand-robot">
+          <path d="M36 13V7m-3 0h6" class="robot-line"/>
+          <circle cx="36" cy="5" r="2.5" class="robot-accent"/>
+          <rect x="12" y="17" width="48" height="43" rx="22" class="robot-shell"/>
+          <rect x="17" y="22" width="38" height="31" rx="13" class="robot-face"/>
+          <path d="M26 38c1-6 7-6 8 0m4 0c1-6 7-6 8 0" class="robot-eyes"/>
+          <path d="M18 27H12a6 6 0 0 0-6 6v10a6 6 0 0 0 6 6h4m38-22h6a6 6 0 0 1 6 6v10a6 6 0 0 1-6 6h-4" class="robot-headphones"/>
+          <path d="M20 55c10 7 23 7 32 0" class="robot-accent-line"/>
+        </g>
+        <g class="brand-type">
+          <text x="78" y="35">INTENT</text>
+          <text x="92" y="57" class="brand-type-accent">AI OPS</text>
+        </g>
+      </svg>
+    </a>
+    <a class="header-link" href="https://github.com/cryptofuture/intentaiops" target="_blank" rel="noopener noreferrer">
+      GitHub
+      <i data-lucide="external-link" aria-hidden="true"></i>
+    </a>
+  </header>
+
+  <main>
+    <section class="hero" aria-labelledby="hero-title">
+      <p class="eyebrow">AI-powered server administration</p>
+      <h1 id="hero-title">
+        Manage any server like a pro,<br>
+        with <span>AI by your side.</span>
+      </h1>
+      <p class="description">Natural-language tasks across Linux, FreeBSD, macOS, Windows and Kubernetes. Review the plan, approve, and execute securely through your system SSH.</p>
+
+      <div class="actions">
+        <a class="button button-primary" href="https://github.com/cryptofuture/intentaiops" target="_blank" rel="noopener noreferrer">
+          <i data-lucide="github" aria-hidden="true"></i>
+          View on GitHub
+        </a>
+        <button class="button button-install" id="quick-install" type="button">
+          <i class="quick-default" data-lucide="terminal" aria-hidden="true"></i>
+          <i class="quick-success" data-lucide="check" aria-hidden="true"></i>
+          <span class="quick-install-label">Quick Install</span>
+        </button>
+      </div>
+
+      <div class="install-command" id="install-command">
+        <span class="prompt" id="install-prompt" aria-hidden="true">$</span>
+        <code id="command-text" tabindex="0">curl -fsSL https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.sh | sh</code>
+        <div class="install-explanation" id="install-explanation" hidden></div>
+        <button class="copy-button" id="copy-command" type="button" aria-label="Copy installation command" title="Copy installation command">
+          <i class="copy-default" data-lucide="copy" aria-hidden="true"></i>
+          <i class="copy-success" data-lucide="check" aria-hidden="true"></i>
+        </button>
+      </div>
+      <span class="sr-only" id="copy-status" role="status" aria-live="polite"></span>
+
+      <div class="platforms" role="tablist" aria-label="Preview Intent AI Ops by platform">
+        <button class="platform-tab is-active" id="platform-linux" type="button" role="tab" aria-selected="true" aria-controls="platform-preview" data-platform="linux" tabindex="0">
+          <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/linux/linux-original.svg" alt="" width="18" height="18">
+          Linux
+        </button>
+        <button class="platform-tab" id="platform-freebsd" type="button" role="tab" aria-selected="false" aria-controls="platform-preview" data-platform="freebsd" tabindex="-1">
+          <img src="https://cdn.jsdelivr.net/npm/simple-icons@16.28.0/icons/freebsd.svg" alt="" width="18" height="18">
+          FreeBSD
+        </button>
+        <button class="platform-tab" id="platform-macos" type="button" role="tab" aria-selected="false" aria-controls="platform-preview" data-platform="macos" tabindex="-1">
+          <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/apple/apple-original.svg" alt="" width="18" height="18">
+          macOS
+        </button>
+        <button class="platform-tab" id="platform-windows" type="button" role="tab" aria-selected="false" aria-controls="platform-preview" data-platform="windows" tabindex="-1">
+          <img src="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/icons/windows.svg" alt="" width="18" height="18" crossorigin="anonymous" referrerpolicy="no-referrer">
+          Windows
+        </button>
+        <button class="platform-tab" id="platform-kubernetes" type="button" role="tab" aria-selected="false" aria-controls="platform-preview" data-platform="kubernetes" tabindex="-1">
+          <img src="https://cdn.jsdelivr.net/gh/devicons/devicon@v2.17.0/icons/kubernetes/kubernetes-original.svg" alt="" width="18" height="18">
+          Kubernetes
+        </button>
+      </div>
+
+      <div class="product-shot" id="platform-preview" role="tabpanel" aria-labelledby="platform-linux" tabindex="0">
+        <div class="terminal-window">
+          <div class="terminal-toolbar">
+            <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="terminal-title" id="terminal-title">Linux — Intent AI Ops</span>
+            <i data-lucide="square-terminal" aria-hidden="true"></i>
+          </div>
+          <div class="terminal-screen">
+            <div class="terminal-brand">Intent AI Ops</div>
+            <div class="terminal-rule"></div>
+            <div class="terminal-summary" id="terminal-summary"></div>
+            <div class="terminal-rule"></div>
+            <div class="terminal-dashboard">
+              <section class="terminal-pane actions-pane">
+                <h2>ACTIONS <span>[current]</span></h2>
+                <p class="terminal-selected">&gt; Browse/search hosts</p>
+                <p>Run one task on multiple hosts</p>
+                <p>Install/update plugin on multiple hosts</p>
+                <p>Browse Kubernetes clusters</p>
+                <p>Multi-host run history</p>
+                <p>Add host</p>
+                <p>Temporarily add host</p>
+                <p>Add Kubernetes cluster</p>
+                <p>Set default administrator email</p>
+                <p>Change vault passphrase</p>
+                <p>Quit</p>
+              </section>
+              <section class="terminal-pane hosts-pane">
+                <h2>HOSTS</h2>
+                <p class="terminal-search">Search: <span id="terminal-search-count"></span></p>
+                <div id="terminal-hosts"></div>
+              </section>
+              <section class="terminal-pane details-pane">
+                <h2>HOST DETAILS</h2>
+                <dl id="terminal-details"></dl>
+              </section>
+            </div>
+            <div class="terminal-rule"></div>
+            <div class="terminal-keys"><b>Tab</b> pane <i></i><b>Up/Down</b> select <i></i><b>Enter</b> open <i></i><b>/</b> search <i></i><b>Esc</b> back <i></i><b>q</b> quit</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/lucide@1.31.0/dist/umd/lucide.min.js" integrity="sha384-/ApD3KXMqTmTxEJjuldaZDgdJj7/Hox2LRuKqV3rC7Bu/wE4obLaJRjF1rLHNP57" crossorigin="anonymous"></script>
+  <script src="script.js"></script>
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "Intent AI Ops",
+      "description": "A CLI for managing Linux, FreeBSD, macOS, Windows and Kubernetes hosts with natural-language tasks, reviewed plans and explicit approval.",
+      "url": "https://intentaiops.top/",
+      "codeRepository": "https://github.com/cryptofuture/intentaiops",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Linux, macOS, Windows",
+      "license": "https://www.apache.org/licenses/LICENSE-2.0",
+      "isAccessibleForFree": true
+    }
+  </script>
+</body>
+</html>

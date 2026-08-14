@@ -1,0 +1,173 @@
+# Intent AI Ops — full agent reference
+
+> Intent AI Ops is an open-source interactive CLI for administering one or many hosts with natural-language tasks. It uses system OpenSSH, asks the local Codex CLI to prepare structured plans, displays every command for approval, and executes approved work through a signed Netdata Stage 2 plugin.
+
+Canonical website: https://intentaiops.top/
+Source repository: https://github.com/cryptofuture/intentaiops
+License: Apache License 2.0
+Copyright: 2026 Intent AI Ops <admin@intentaiops.top>
+
+## What it does
+
+Intent AI Ops provides a low-learning-curve interface for ad-hoc system administration and DevOps work. Users describe outcomes in natural language instead of first writing an Ansible playbook or Salt state tree. Multi-host runs create independent per-host tasks, results, and rollback records.
+
+Core capabilities:
+
+- Manage Linux, FreeBSD, macOS, Windows, and Kubernetes targets from one CLI.
+- Plan and execute tasks on one host or several hosts in parallel.
+- Inspect platform, monitoring, privileges, Netdata, Stage 2, and Docker/Podman readiness.
+- Run verified, platform-aware common tasks with reviewed apply and revert plans.
+- Use Netdata for inventory and monitoring, with optional Netdata Cloud claiming.
+- Save plans, progress, results, retries, and rollback plans in per-host task history.
+- Retry failed tasks using prior failure evidence and optional correction instructions.
+- Open a real interactive shell through the system SSH binary.
+
+## Trust and execution model
+
+Intent AI Ops runs Codex on the administration computer. It does not install a separate AI agent on each controlled host and does not require a separate OpenAI API key beyond the user's authenticated Codex CLI.
+
+The software uses the operating system's `ssh` and `scp` binaries. Codex does not receive the SSH connection, SSH password, private key, key passphrase, vault passphrase, sudo password, plugin authentication token, Netdata claim token, or generated application credentials. Sensitive values are encrypted locally or generated on the target, and diagnostic/task context is redacted before it reaches AI.
+
+Every executable command remains visible before approval. Users can approve the complete displayed plan, review commands one at a time, or cancel. Saved revert commands are shown separately and are also approval-gated before execution.
+
+Temporary hosts disappear from the current configuration when Intent AI Ops exits. Their task history can be reattached when the same machine is added again through its stable host fingerprint.
+
+## Requirements and installation
+
+Administration-computer requirements:
+
+- System `ssh` and `scp` executables.
+- An installed and authenticated Codex CLI.
+- Working SSH access to host targets, or Kubernetes API access for cluster targets.
+- Administrator/root, sudo, or doas access when Stage 2 installation or privileged work requires it.
+
+Unix bootstrap (also installs a suitable Node.js version when required):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.sh | sh
+```
+
+Windows PowerShell bootstrap:
+
+```powershell
+irm https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.ps1 | iex
+```
+
+With Node.js 24.7 or newer and npm already present:
+
+```sh
+npm install --global https://raw.githubusercontent.com/cryptofuture/intentaiops/main/dist/intent-ai-ops.tgz
+```
+
+Start the CLI with:
+
+```sh
+intentaiops
+```
+
+Data is stored in `~/.intentaiops`. An existing `~/.webminai` vault is reused automatically. A different absolute data root can be selected with `intentaiops --data-root /path`.
+
+### Adding a Kubernetes cluster
+
+1. On the main dashboard, choose **Add Kubernetes cluster** and enter a cluster name.
+2. Choose **Paste kubeconfig YAML (hidden)** or **Read kubeconfig from a local path**. The kubeconfig must embed its CA and either client certificates or a token; external auth commands are intentionally rejected.
+3. Intent AI Ops tests the current context, API version, and node access, then saves the kubeconfig vault-encrypted after confirmation.
+4. Choose **Browse Kubernetes clusters**, open the cluster, and choose **Activate/update Stage 2 gateway**.
+
+This is a direct Kubernetes API connection. It does not use SSH and does not install a separate plugin on every cluster node.
+
+## Task workflow
+
+1. Add a saved or temporary host using an SSH command that already works.
+2. Connect and activate Stage 2, or install/update only its plugin when Netdata already exists.
+3. Choose a verified application task or describe an AI-assisted task naturally.
+4. Review the complete plan, warnings, modified paths, commands, dependencies, and revert commands.
+5. Approve all displayed commands, review them individually, or cancel.
+6. Inspect the persisted task result and use retry or revert when needed.
+
+Prefix a request with `?` to consult Codex without proposing, approving, or executing commands. For example:
+
+```text
+? Why is host memory usage increasing, and what should I inspect first?
+```
+
+Task history records requests, Codex progress, plans, output, errors, retries, and reverts. Retries create new records rather than mutating the original task. Secret credentials are not stored in task history.
+
+## Platform and runtime policy
+
+Supported target families are Linux, FreeBSD, macOS, Windows, and Kubernetes. Common-task visibility is resolved from the actual platform and eligibility requirements; support is not inferred only from whether Docker is currently installed.
+
+Default runtime preferences:
+
+- Linux server or VM: Docker Compose is preferred when eligible; Docker setup can be offered when missing.
+- Linux container: native installation is preferred and nested Docker remains disabled automatically.
+- Windows: Docker Desktop with WSL 2 for Linux-container application routes.
+- macOS: Docker Compose through Colima.
+- FreeBSD outside a jail: Podman Suite and Podman Compose when eligible.
+- Kubernetes: Kubernetes API workloads; no Netdata/plugin agent is required on every node.
+
+Users can explicitly disable Docker/Podman preference. That selects reviewed native routes and hides candidates that require a container runtime. Native Linux web stacks prefer nginx and PHP-FPM Unix sockets.
+
+## Verified application catalog
+
+The current catalog includes platform-dependent routes for:
+
+- WordPress
+- WooCommerce
+- Joomla
+- Drupal
+- PrestaShop
+- Moodle
+- Nextcloud
+- Magento Open Source
+- n8n
+- Ghost
+- Mattermost
+- Odoo Community
+- Jellyfin
+- Home Assistant
+- Intent AI Ops CLI installation
+
+Not every application is eligible on every target. The repository README and common-task catalog are the authoritative sources for the current matrix. Eligibility can depend on distro, OS version, service manager, architecture, virtualization, package sources, container/jail status, and runtime preference.
+
+Additional verified administration tasks include host health reports, current-release system updates without automatic reboot, runtime setup, nginx static sites, and platform-specific maintenance utilities.
+
+## Verified knowledge and AI planning
+
+An AI semantic router distinguishes four cases:
+
+- Exact verified task: execute the matching deterministic common task.
+- Foundation-assisted planning: combine applicable reviewed deployment foundations with a smaller application-specific AI plan.
+- Context-only reuse: provide verified stack/application knowledge while planning a modification to an existing deployment, without reinstalling it.
+- Ordinary planning: use normal AI planning when no verified catalog task or foundation applies.
+
+Foundation and catalog identifiers returned by AI are validated locally. Verified foundation commands cannot be overwritten by AI-generated commands. Generated credentials remain on the host; AI receives only credential paths and required names.
+
+## Administrator email
+
+The vault can hold one global administrator email. Relevant installers use it when an application requires an initial administrator or contact address. It is not host metadata, an SSH identity, or a Netdata identity. When absent, Intent AI Ops uses the deliberately non-deliverable fallback `intentaiops@example.invalid`.
+
+## Development and contribution
+
+Primary verification commands:
+
+```sh
+npm test
+npm run lint
+npm run typecheck
+npm run test:package-install
+```
+
+Verified candidates are exercised on disposable Linux distro containers, FreeBSD VMs, Windows and macOS hosts, and Kubernetes labs. Promotion checks apply, health verification, restart recovery, revert, and baseline comparison.
+
+Contributions should remain narrow: one feature, software candidate, or platform-support addition per pull request. Preserve approval, rollback, history compatibility, system OpenSSH, and secret-redaction guarantees.
+
+## Authoritative links
+
+- Website: https://intentaiops.top/
+- Repository: https://github.com/cryptofuture/intentaiops
+- Human README: https://github.com/cryptofuture/intentaiops/blob/main/README.md
+- Detailed AI agent reference: https://github.com/cryptofuture/intentaiops/blob/main/AI_AGENT_REFERENCE.md
+- Common-task validation plan: https://github.com/cryptofuture/intentaiops/blob/main/top-20-cross-platform-codex-tasks.md
+- Issues: https://github.com/cryptofuture/intentaiops/issues
+- License: https://github.com/cryptofuture/intentaiops/blob/main/LICENSE

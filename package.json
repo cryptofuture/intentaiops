@@ -1,0 +1,79 @@
+{
+  "name": "intent-ai-ops",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": "./src/index.js",
+  "bin": {
+    "intentaiops": "./bin/intentaiops.js",
+    "intentops": "./bin/intentops.js",
+    "webminai": "./bin/webminai.js",
+    "weminai": "./bin/webminai.js"
+  },
+  "description": "Manage one or many hosts with reviewable natural-language AI operations.",
+  "homepage": "https://intentaiops.top",
+  "author": "Intent AI Ops <admin@intentaiops.top>",
+  "license": "Apache-2.0",
+  "files": [
+    "LICENSE",
+    "NOTICE",
+    "bin",
+    "dist/SHA256SUMS",
+    "dist/webminai.plugin",
+    "dist/webminai.plugin-*",
+    "plugin",
+    "remote",
+    "schemas",
+    "scripts/install-better-sqlite3.js",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.7.0"
+  },
+  "scripts": {
+    "build:plugin": "sh scripts/build-native-plugin.sh linux",
+    "build:plugin:freebsd": "sh scripts/build-native-plugin.sh freebsd",
+    "build:plugin:macos": "sh scripts/build-native-plugin.sh macos",
+    "build:plugin:kubernetes": "sh scripts/build-native-plugin.sh kubernetes",
+    "build:plugin:windows": "sh scripts/build-native-plugin.sh windows",
+    "build:checksums": "sh scripts/dist-checksums.sh write",
+    "build:package": "node scripts/build-package-tarball.js",
+    "benchmark:vault-kdf": "node scripts/benchmark-vault-kdf.js",
+    "check:checksums": "sh scripts/dist-checksums.sh verify",
+    "check:plugin:freebsd": "sh scripts/build-native-plugin.sh freebsd-compat",
+    "cli": "node bin/intentaiops.js",
+    "lint": "standard",
+    "typecheck": "tsc -p tsconfig.contracts.json",
+    "test:package-install": "npm run build:package && node scripts/validate-package-install.js",
+    "test:package-install:remote": "npm run build:package && node scripts/validate-package-install-remote.js",
+    "test": "npm run build:plugin && npm run build:plugin:kubernetes && node --test",
+    "test:multi-host": "node scripts/validate-multi-host-nginx.js",
+    "test:top20-linux": "node scripts/validate-top20-linux.js",
+    "test:woocommerce-linux": "node scripts/validate-woocommerce-linux.js",
+    "test:joomla-linux": "node scripts/validate-joomla-linux.js",
+    "test:drupal-linux": "node scripts/validate-joomla-linux.js --drupal",
+    "test:prestashop-linux": "node scripts/validate-joomla-linux.js --prestashop",
+    "test:moodle-linux": "node scripts/validate-joomla-linux.js --moodle",
+    "test:wordpress-docker-disabled": "node scripts/validate-wordpress-docker-disabled.js",
+    "test:linux-substrate": "node scripts/validate-linux-deployment-substrate.js",
+    "test:kubernetes-stage2": "node scripts/validate-kubernetes-stage2.js all",
+    "test:kubernetes-common-tasks": "node scripts/validate-kubernetes-common-tasks.js all",
+    "test:windows-brave": "node scripts/validate-windows-brave.js",
+    "verify": "npm run lint && npm run typecheck && npm run check:plugin:freebsd && npm test && npm run test:package-install && npm run check:checksums",
+    "verify:sqlite": "node scripts/install-better-sqlite3.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "standard": "^17.1.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "js-yaml": "^4.3.1"
+  },
+  "optionalDependencies": {
+    "@node-rs/argon2": "^2.1.0"
+  }
+}

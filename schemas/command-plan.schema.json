@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "changeOverview", "modifiedFiles", "assumptions", "commands", "revertCommands", "warnings", "requiresConfirmation"],
+  "properties": {
+    "summary": { "type": "string", "minLength": 1 },
+    "changeOverview": { "type": "string", "minLength": 1 },
+    "modifiedFiles": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "type": "string", "pattern": "^(?:/[^\\r\\n]*|[A-Za-z]:[\\\\/][^\\r\\n]*)$" }
+    },
+    "assumptions": { "type": "array", "items": { "type": "string" } },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "requiresConfirmation": { "type": "boolean" },
+    "commands": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "command", "purpose", "risk", "timeoutMs", "requiresSudo", "phase", "diagnostic", "dependsOn"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+          "command": { "type": "string", "minLength": 1, "maxLength": 32768 },
+          "purpose": { "type": "string", "minLength": 1 },
+          "risk": { "enum": ["read", "change", "destructive"] },
+          "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+          "requiresSudo": { "type": "boolean" },
+          "phase": { "anyOf": [{ "type": "string", "enum": ["preflight", "baseline", "acquire", "packages", "secrets", "database", "configure", "initialize", "services", "health", "verify", "cleanup"] }, { "type": "null" }] },
+          "diagnostic": {
+            "anyOf": [{
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "target"],
+              "properties": {
+                "kind": { "enum": ["package", "service", "http", "database", "compose", "filesystem"] },
+                "target": { "type": "string", "minLength": 1, "maxLength": 512 }
+              }
+            }, { "type": "null" }]
+          },
+          "dependsOn": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
+          }
+        }
+      }
+    },
+    "revertCommands": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "command", "purpose", "risk", "timeoutMs", "requiresSudo", "phase", "diagnostic", "dependsOn"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+          "command": { "type": "string", "minLength": 1, "maxLength": 32768 },
+          "purpose": { "type": "string", "minLength": 1 },
+          "risk": { "enum": ["read", "change", "destructive"] },
+          "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
+          "requiresSudo": { "type": "boolean" },
+          "phase": { "anyOf": [{ "type": "string", "enum": ["preflight", "baseline", "acquire", "packages", "secrets", "database", "configure", "initialize", "services", "health", "verify", "cleanup"] }, { "type": "null" }] },
+          "diagnostic": {
+            "anyOf": [{
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "target"],
+              "properties": {
+                "kind": { "enum": ["package", "service", "http", "database", "compose", "filesystem"] },
+                "target": { "type": "string", "minLength": 1, "maxLength": 512 }
+              }
+            }, { "type": "null" }]
+          },
+          "dependsOn": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
+          }
+        }
+      }
+    }
+  }
+}
