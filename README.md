@@ -9,7 +9,11 @@
 <p align="center">
   Manage one or many hosts like a system administrator or DevOps engineer, using natural-language instructions.
 </p>
-
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=i01pbFc0i7A">
+    Watch the Intent AI Ops usage example on YouTube
+  </a>
+</p>
 <p align="center">
   <img src="public/screenshot.png" alt="Intent AI Ops host-management CLI" width="100%">
 </p>
