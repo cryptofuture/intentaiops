@@ -162,6 +162,7 @@ test('help stays ordinary output and non-TTY behavior stays unchanged', async ()
   const help = terminal({ isTTY: false })
   await runCli({ argv: ['--help'], input: help.input, output: help.output })
   assert.match(help.output.text, /^Usage: intentaiops/m)
+  assert.match(help.output.text, /intentaiops --update/m)
   assert.match(help.output.text, /\[--debug\|--no-debug\]/m)
   assert.match(help.output.text, /Debug tracing is enabled by default/m)
   assert.match(help.output.text, /https:\/\/intentaiops\.top/m)
@@ -169,6 +170,20 @@ test('help stays ordinary output and non-TTY behavior stays unchanged', async ()
 
   const nonTty = terminal({ isTTY: false })
   await assert.rejects(runCli({ input: nonTty.input, output: nonTty.output }), /requires a TTY/)
+})
+
+test('self-update runs before TTY and vault initialization', async () => {
+  const io = terminal({ isTTY: false })
+  let updates = 0
+  await runCli({
+    argv: ['--update'],
+    input: io.input,
+    output: io.output,
+    selfUpdate: async () => { updates++ }
+  })
+  assert.equal(updates, 1)
+  assert.match(io.output.text, /Updating Intent AI Ops/u)
+  assert.match(io.output.text, /updated successfully/u)
 })
 
 test('default data root prefers the new directory and reuses a legacy vault', async () => {

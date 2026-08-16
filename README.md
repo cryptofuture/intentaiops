@@ -139,7 +139,13 @@ npm link
 intentaiops
 ```
 
-Run the same installation again to update, then start with `intentaiops`. Data is stored in `~/.intentaiops`; an existing `~/.webminai` vault is reused automatically. Select another directory with:
+Update an installation from the official repository, then start the new version:
+
+```sh
+intentaiops --update
+```
+
+The updater downloads the package and its published SHA-256 checksum, verifies the archive, runs the same platform bootstrap used for installation with that verified archive, replaces the local Intent AI Ops package, and exits. It does not update or reinstall Stage 2 plugins on managed hosts. You can also rerun the original installation command manually. Data is stored in `~/.intentaiops`; an existing `~/.webminai` vault is reused automatically. Select another directory with:
 
 ```sh
 intentaiops --data-root /absolute/path

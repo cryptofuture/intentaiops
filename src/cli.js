@@ -23,6 +23,7 @@ import { validateServerId } from './server-id.js'
 import { SettingsStore } from './settings-store.js'
 import { Stage2Service } from './stage2-service.js'
 import { SystemSsh } from './system-ssh.js'
+import { updateIntentAiOps } from './self-update.js'
 import { TerminalUi } from './terminal-ui.js'
 import { FALLBACK_ADMIN_EMAIL, normalizeAdminEmailPreset } from './application-defaults.js'
 import { CLI_NAME, DATA_DIRECTORY_NAME, LEGACY_DATA_DIRECTORY_NAME, PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_URL } from './product.js'
@@ -54,19 +55,25 @@ import {
 
 const VAULT_PASSPHRASE_GUIDANCE = 'Use at least 12 characters; prefer five or more random words or 20+ password-manager-generated characters.'
 
-export async function runCli ({ argv = process.argv.slice(2), input, output } = {}) {
+export async function runCli ({ argv = process.argv.slice(2), input, output, selfUpdate = updateIntentAiOps } = {}) {
   const cliOptions = parseArguments(argv)
   const ui = new TerminalUi({ input, output })
   try {
-    return await runCliSession({ cliOptions, ui })
+    return await runCliSession({ cliOptions, ui, selfUpdate })
   } finally {
     ui.dispose()
   }
 }
 
-async function runCliSession ({ cliOptions, ui }) {
+async function runCliSession ({ cliOptions, ui, selfUpdate }) {
   if (cliOptions.help) {
     printHelp(ui)
+    return
+  }
+  if (cliOptions.update) {
+    ui.info(`Updating ${PRODUCT_NAME} from the official repository...`)
+    await selfUpdate()
+    ui.success(`${PRODUCT_NAME} was updated successfully. Run ${CLI_NAME} again to start the new version.`)
     return
   }
   if (!ui.input.isTTY || !ui.output.isTTY) {
@@ -2456,6 +2463,7 @@ function parseArguments (argv) {
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]
     if (argument === '--help' || argument === '-h') options.help = true
+    else if (argument === '--update') options.update = true
     else if (argument === '--debug') options.debug = true
     else if (argument === '--no-debug') options.debug = false
     else if (argument === '--data-root') {
@@ -2467,10 +2475,12 @@ function parseArguments (argv) {
 }
 
 function printHelp (ui) {
-  ui.output.write(`Usage: ${CLI_NAME} [--debug|--no-debug] [--data-root DIRECTORY]\n\n`)
+  ui.output.write(`Usage: ${CLI_NAME} --update\n`)
+  ui.output.write(`       ${CLI_NAME} [--debug|--no-debug] [--data-root DIRECTORY]\n\n`)
   ui.output.write('Interactive AI-assisted administration over system OpenSSH and Netdata.\n')
   ui.output.write(`${PRODUCT_URL}\n`)
-  ui.output.write('\nDebug tracing is enabled by default. Use --no-debug to suppress it.\n')
+  ui.output.write(`\nUse --update to install the latest ${PRODUCT_NAME} package, then exit.\n`)
+  ui.output.write('Debug tracing is enabled by default. Use --no-debug to suppress it.\n')
 }
 
 function renderDebugEvent (ui, { phase, message }) {

@@ -78,7 +78,7 @@ npm install --global https://github.com/cryptofuture/intentaiops/archive/refs/he
 intentaiops
 ```
 
-Run the same install command to update. For development from a checkout, use `npm install` and `npm run cli`. New installations keep data under `~/.intentaiops`; an existing `~/.webminai` vault is detected and reused automatically. To choose another location:
+Run `intentaiops --update` to download the current package and published SHA-256 checksum, verify the archive, execute the platform bootstrap with that verified local archive, replace the local package, and exit. This updates the administration CLI only; remote Stage 2 plugins retain their existing lifecycle. The original install command remains a manual update alternative. For development from a checkout, use `npm install` and `npm run cli`. New installations keep data under `~/.intentaiops`; an existing `~/.webminai` vault is detected and reused automatically. To choose another location:
 
 ```sh
 intentaiops --data-root /srv/webminai-data
