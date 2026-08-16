@@ -29,7 +29,7 @@ export function validateDiagnostic (diagnostic) {
   } else if (diagnostic.kind === 'filesystem' || diagnostic.kind === 'compose') {
     if (typeof target !== 'string' || !/^\/[A-Za-z0-9_./@+-]+$/u.test(target) || target.includes('..')) throw new TypeError('diagnostic path must be an absolute safe path')
   } else if (typeof target !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9+_.:@/%=-]{0,191}$/u.test(target)) {
-    throw new TypeError('diagnostic target is invalid')
+    throw new TypeError(`${diagnostic.kind} diagnostic target must be one identifier without spaces or shell syntax; split the command or use a null diagnostic when no single target applies`)
   }
 }
 

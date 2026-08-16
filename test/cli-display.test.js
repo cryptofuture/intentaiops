@@ -162,6 +162,8 @@ test('help stays ordinary output and non-TTY behavior stays unchanged', async ()
   const help = terminal({ isTTY: false })
   await runCli({ argv: ['--help'], input: help.input, output: help.output })
   assert.match(help.output.text, /^Usage: intentaiops/m)
+  assert.match(help.output.text, /\[--debug\|--no-debug\]/m)
+  assert.match(help.output.text, /Debug tracing is enabled by default/m)
   assert.match(help.output.text, /https:\/\/intentaiops\.top/m)
   assert.equal(hasSgr(help.output.text), false)
 

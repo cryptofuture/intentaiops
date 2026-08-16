@@ -2467,7 +2467,7 @@ function parseArguments (argv) {
 }
 
 function printHelp (ui) {
-  ui.output.write(`Usage: ${CLI_NAME} [--no-debug] [--data-root DIRECTORY]\n\n`)
+  ui.output.write(`Usage: ${CLI_NAME} [--debug|--no-debug] [--data-root DIRECTORY]\n\n`)
   ui.output.write('Interactive AI-assisted administration over system OpenSSH and Netdata.\n')
   ui.output.write(`${PRODUCT_URL}\n`)
   ui.output.write('\nDebug tracing is enabled by default. Use --no-debug to suppress it.\n')

@@ -92,6 +92,18 @@ test('plan policy is deterministic and requires preceding dependencies', () => {
   assert.equal(validateCommandPlan(protectedExclusion, ROOT_POLICY).revertCommands.length, 1)
 })
 
+test('multi-package diagnostics identify the rejected command and target', () => {
+  const invalid = plan()
+  invalid.commands[1].diagnostic = { kind: 'package', target: 'mc htop' }
+  assert.throws(
+    () => validateCommandPlan(invalid, ROOT_POLICY),
+    /command install has invalid package diagnostic target "mc htop".*one identifier without spaces/u
+  )
+
+  invalid.commands[1].diagnostic = null
+  assert.equal(validateCommandPlan(invalid, ROOT_POLICY).commands[1].diagnostic, null)
+})
+
 test('rejected commands block their dependants', async () => {
   const executed = []
   const results = await executeApprovedPlan({

@@ -80,7 +80,13 @@ function validateCommandItems (commands, { policy, maxTimeoutMs, maxJobTimeoutMs
     }
     if (item.phase !== undefined && item.phase !== null && !isDeploymentPhase(item.phase)) throw new TypeError(`command ${item.id} has an invalid deployment phase`)
     validateCommandSource(item.source, item.id)
-    validateDiagnostic(item.diagnostic)
+    try {
+      validateDiagnostic(item.diagnostic)
+    } catch (error) {
+      const kind = typeof item.diagnostic?.kind === 'string' ? item.diagnostic.kind : 'safe'
+      const target = typeof item.diagnostic?.target === 'string' ? JSON.stringify(item.diagnostic.target) : 'undefined'
+      throw new TypeError(`command ${item.id} has invalid ${kind} diagnostic target ${target}: ${error.message}`, { cause: error })
+    }
     const timeoutLimit = item.executionMode === 'job' ? maxJobTimeoutMs : maxTimeoutMs
     if (!Number.isInteger(item.timeoutMs) || item.timeoutMs < 1000 || item.timeoutMs > timeoutLimit) {
       throw new TypeError(`command ${item.id} has an invalid timeout`)
