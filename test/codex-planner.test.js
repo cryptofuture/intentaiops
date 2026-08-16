@@ -903,6 +903,73 @@ test('Codex planner allows two deterministic correction passes before accepting 
   ])
 })
 
+test('Codex planner corrects a multi-package diagnostic with actionable feedback', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'webminai-server-test-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  let calls = 0
+  let correctedPrompt = ''
+  const planner = new CodexPlanner({
+    runner: async (binary, args, options) => {
+      calls++
+      if (calls === 2) correctedPrompt = options.input
+      const output = JSON.stringify({
+        summary: 'Install mc and htop and show uptime',
+        changeOverview: 'Install two packages and show the existing uptime metric',
+        modifiedFiles: ['/usr/bin/mc', '/usr/bin/htop'],
+        assumptions: [],
+        warnings: [],
+        requiresConfirmation: true,
+        commands: [{
+          id: 'install_packages',
+          command: 'DEBIAN_FRONTEND=noninteractive apt-get install -y mc htop',
+          purpose: 'Install mc and htop',
+          risk: 'change',
+          timeoutMs: 300000,
+          requiresSudo: true,
+          phase: 'packages',
+          diagnostic: calls === 1 ? { kind: 'package', target: 'mc htop' } : null,
+          dependsOn: []
+        }, {
+          id: 'show_uptime',
+          command: "curl --fail --silent --show-error 'http://127.0.0.1:19999/api/v3/data?contexts=system.uptime&after=-60&points=1'",
+          purpose: 'Show server uptime',
+          risk: 'read',
+          timeoutMs: 30000,
+          requiresSudo: false,
+          phase: 'verify',
+          diagnostic: { kind: 'http', target: 'http://127.0.0.1:19999/api/v3/data' },
+          dependsOn: ['install_packages']
+        }],
+        revertCommands: [{
+          id: 'remove_packages',
+          command: 'DEBIAN_FRONTEND=noninteractive apt-get remove -y mc htop',
+          purpose: 'Remove the requested packages',
+          risk: 'change',
+          timeoutMs: 300000,
+          requiresSudo: true,
+          phase: 'cleanup',
+          diagnostic: null,
+          dependsOn: []
+        }]
+      })
+      return { code: 0, stdout: output, stderr: '' }
+    }
+  })
+
+  const planned = await planner.plan({
+    serverDirectory,
+    request: 'install mc and htop and show server uptime',
+    taskId: 167,
+    inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+    policy: { executionIdentity: 'root' }
+  })
+
+  assert.equal(calls, 2)
+  assert.equal(planned.commands[0].diagnostic, null)
+  assert.match(correctedPrompt, /command install_packages has invalid package diagnostic target "mc htop"/u)
+  assert.match(correctedPrompt, /must be exactly one identifier without spaces or prose/u)
+})
+
 test('Codex planner accepts a database restart and readiness probe before WordPress database creation', async t => {
   const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'webminai-server-test-'))
   t.after(() => rm(serverDirectory, { recursive: true, force: true }))

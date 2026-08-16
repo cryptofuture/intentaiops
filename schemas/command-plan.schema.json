@@ -1,6 +1,40 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "$defs": {
+    "diagnostic": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "target"],
+          "properties": {
+            "kind": { "enum": ["package", "service", "database"] },
+            "target": { "type": "string", "minLength": 1, "maxLength": 192, "pattern": "^[A-Za-z0-9][A-Za-z0-9+_.:@/%=-]{0,191}$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "target"],
+          "properties": {
+            "kind": { "enum": ["compose", "filesystem"] },
+            "target": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^/[A-Za-z0-9_./@+-]+$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "target"],
+          "properties": {
+            "kind": { "enum": ["http"] },
+            "target": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^https?://(?:127\\.0\\.0\\.1|localhost|\\[::1\\])(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$" }
+          }
+        },
+        { "type": "null" }
+      ]
+    }
+  },
   "additionalProperties": false,
   "required": ["summary", "changeOverview", "modifiedFiles", "assumptions", "commands", "revertCommands", "warnings", "requiresConfirmation"],
   "properties": {
@@ -29,17 +63,7 @@
           "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
           "requiresSudo": { "type": "boolean" },
           "phase": { "anyOf": [{ "type": "string", "enum": ["preflight", "baseline", "acquire", "packages", "secrets", "database", "configure", "initialize", "services", "health", "verify", "cleanup"] }, { "type": "null" }] },
-          "diagnostic": {
-            "anyOf": [{
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind", "target"],
-              "properties": {
-                "kind": { "enum": ["package", "service", "http", "database", "compose", "filesystem"] },
-                "target": { "type": "string", "minLength": 1, "maxLength": 512 }
-              }
-            }, { "type": "null" }]
-          },
+          "diagnostic": { "$ref": "#/$defs/diagnostic" },
           "dependsOn": {
             "type": "array",
             "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
@@ -62,17 +86,7 @@
           "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 300000 },
           "requiresSudo": { "type": "boolean" },
           "phase": { "anyOf": [{ "type": "string", "enum": ["preflight", "baseline", "acquire", "packages", "secrets", "database", "configure", "initialize", "services", "health", "verify", "cleanup"] }, { "type": "null" }] },
-          "diagnostic": {
-            "anyOf": [{
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["kind", "target"],
-              "properties": {
-                "kind": { "enum": ["package", "service", "http", "database", "compose", "filesystem"] },
-                "target": { "type": "string", "minLength": 1, "maxLength": 512 }
-              }
-            }, { "type": "null" }]
-          },
+          "diagnostic": { "$ref": "#/$defs/diagnostic" },
           "dependsOn": {
             "type": "array",
             "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }

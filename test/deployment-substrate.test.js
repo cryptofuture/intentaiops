@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -29,7 +29,17 @@ test('reviewed deployment phases keep application-specific commands out of found
 test('safe diagnostics permit loopback but reject external HTTP and shell metacharacters', () => {
   assert.match(buildSafeDiagnosticCommand({ kind: 'http', target: 'http://127.0.0.1:8080/health' }), /curl/u)
   assert.throws(() => buildSafeDiagnosticCommand({ kind: 'http', target: 'https://example.com/' }), /loopback/u)
-  assert.throws(() => buildSafeDiagnosticCommand({ kind: 'service', target: 'nginx;id' }), /invalid/u)
+  assert.throws(() => buildSafeDiagnosticCommand({ kind: 'service', target: 'nginx;id' }), /without spaces or shell syntax/u)
+  assert.throws(() => buildSafeDiagnosticCommand({ kind: 'package', target: 'mc htop' }), /one identifier without spaces/u)
+  assert.throws(() => buildSafeDiagnosticCommand({ kind: 'package', target: 'recorded task-added packages' }), /one identifier without spaces/u)
+  assert.throws(() => buildSafeDiagnosticCommand({ kind: 'filesystem', target: '/var/lib/../root' }), /absolute safe path/u)
+})
+
+test('command-plan schema avoids unsupported regex lookarounds', () => {
+  const schema = JSON.parse(readFileSync(new URL('../schemas/command-plan.schema.json', import.meta.url), 'utf8'))
+  const patterns = schema.$defs.diagnostic.anyOf.flatMap(variant => Object.values(variant.properties ?? {}).map(property => property.pattern).filter(Boolean))
+  assert.ok(patterns.length > 0)
+  for (const pattern of patterns) assert.doesNotMatch(pattern, /\(\?[=!<]/u)
 })
 
 test('scorecards persist phase outcomes and canary scheduling prioritizes unresolved information', () => {
