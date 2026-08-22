@@ -35,6 +35,12 @@ No separate AI agent is installed on each controlled host. Detailed technical an
 
 Multi-host tasks occupy some of the same territory as Ansible or Salt: one operation can target many machines and each host keeps an independent result. Intent AI Ops is not a replacement for declarative configuration management, but its initial learning curve is lower for ad-hoc work—you can describe the desired outcome in ordinary language instead of first writing a playbook or state tree. Commands are still shown before execution.
 
+## Product & Investor Briefings
+
+- [Intent AI Ops Presentation](https://docs.google.com/presentation/d/1w4rTsG3wYAxsDPKX6ervhBBlz102MvCqKcgHplh0rOY/edit?usp=sharing)
+- [Intent AI Презентация на русском языке](https://docs.google.com/presentation/d/19EOd5NY-RosAMdxKdQyixe5fQwog5mgVfUKYOnqRZfQ/edit?usp=sharing)
+- [Intent AI Ops 演示文稿 — 中文（自动翻译）](https://docs.google.com/presentation/d/1GRATW06DB4FvynuFRn2-7-Tvwa7JVW9hquM9e3prIBk/edit?usp=sharing)
+
 ## Current verified common tasks
 
 Application routes currently in the catalog:

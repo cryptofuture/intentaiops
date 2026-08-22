@@ -8,6 +8,9 @@ Intent AI Ops supports administration workflows across Linux, FreeBSD, macOS, Wi
 
 - [Project website](https://intentaiops.top/): Product overview, supported platforms, and quick install command.
 - [GitHub repository](https://github.com/cryptofuture/intentaiops): Source code, issues, documentation, and license.
+- [Intent AI Ops Presentation](https://docs.google.com/presentation/d/1w4rTsG3wYAxsDPKX6ervhBBlz102MvCqKcgHplh0rOY/edit?usp=sharing): English product and investor briefing.
+- [Intent AI Презентация на русском языке](https://docs.google.com/presentation/d/19EOd5NY-RosAMdxKdQyixe5fQwog5mgVfUKYOnqRZfQ/edit?usp=sharing): Russian product and investor briefing.
+- [Intent AI Ops 演示文稿 — 中文（自动翻译）](https://docs.google.com/presentation/d/1GRATW06DB4FvynuFRn2-7-Tvwa7JVW9hquM9e3prIBk/edit?usp=sharing): Automatically translated Chinese product and investor briefing.
 - [Full agent reference](https://intentaiops.top/llms-full.txt): Detailed capabilities, security model, installation, task workflow, and platform support.
 - [Apache License 2.0](https://github.com/cryptofuture/intentaiops/blob/main/LICENSE): Project license.
 

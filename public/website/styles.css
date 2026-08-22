@@ -138,7 +138,6 @@ summary:focus-visible {
 }
 
 .header-link {
-  margin-top: 23px;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -147,6 +146,76 @@ summary:focus-visible {
   font-weight: 650;
   line-height: 1;
   text-decoration: none;
+}
+
+.header-nav {
+  position: relative;
+  margin-top: 23px;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+
+.briefings-menu {
+  position: relative;
+}
+
+.briefings-menu summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.briefings-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.briefings-menu summary svg {
+  transition: transform 160ms ease;
+}
+
+.briefings-menu[open] summary svg {
+  transform: rotate(180deg);
+}
+
+.briefings-label-short {
+  display: none;
+}
+
+.briefings-menu-panel {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 14px);
+  right: 0;
+  width: min(340px, calc(100vw - 32px));
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 18px 50px rgb(25 35 42 / 14%);
+}
+
+.briefings-menu-panel a {
+  padding: 12px 14px;
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.briefings-menu-panel a:hover {
+  background: var(--accent-soft);
+}
+
+.briefings-menu-panel strong {
+  color: var(--accent-dark);
+  font-size: 13px;
+}
+
+.briefings-menu-panel span {
+  color: var(--secondary);
+  font-size: 14px;
+  line-height: 1.35;
 }
 
 .header-link:hover {
@@ -911,8 +980,20 @@ h1 span {
   }
 
   .header-link {
-    margin-top: 22px;
     font-size: 15px;
+  }
+
+  .header-nav {
+    margin-top: 22px;
+    gap: 18px;
+  }
+
+  .briefings-label-long {
+    display: none;
+  }
+
+  .briefings-label-short {
+    display: inline;
   }
 
   main {
@@ -1048,7 +1129,17 @@ h1 span {
   }
 
   .header-link {
+    font-size: 13px;
+  }
+
+  .header-nav {
     margin-top: 15px;
+    gap: 12px;
+  }
+
+  .header-link svg {
+    width: 15px;
+    height: 15px;
   }
 
   .terminal-toolbar {

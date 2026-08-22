@@ -166,6 +166,9 @@ Contributions should remain narrow: one feature, software candidate, or platform
 
 - Website: https://intentaiops.top/
 - Repository: https://github.com/cryptofuture/intentaiops
+- Product and investor briefing (English): https://docs.google.com/presentation/d/1w4rTsG3wYAxsDPKX6ervhBBlz102MvCqKcgHplh0rOY/edit?usp=sharing
+- Product and investor briefing (Russian): https://docs.google.com/presentation/d/19EOd5NY-RosAMdxKdQyixe5fQwog5mgVfUKYOnqRZfQ/edit?usp=sharing
+- Product and investor briefing (Chinese, automatically translated): https://docs.google.com/presentation/d/1GRATW06DB4FvynuFRn2-7-Tvwa7JVW9hquM9e3prIBk/edit?usp=sharing
 - Human README: https://github.com/cryptofuture/intentaiops/blob/main/README.md
 - Detailed AI agent reference: https://github.com/cryptofuture/intentaiops/blob/main/AI_AGENT_REFERENCE.md
 - Common-task validation plan: https://github.com/cryptofuture/intentaiops/blob/main/top-20-cross-platform-codex-tasks.md
