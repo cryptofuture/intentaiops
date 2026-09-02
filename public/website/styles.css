@@ -322,6 +322,18 @@ h1 span {
   background: #20252b;
 }
 
+.button-video {
+  border: 1px solid #c94242;
+  color: #fff;
+  background: #c94242;
+  box-shadow: 0 3px 10px rgb(160 45 45 / 14%);
+}
+
+.button-video:hover {
+  border-color: #b53535;
+  background: #b53535;
+}
+
 .button-install {
   border: 1px solid var(--accent);
   color: #07150d;
@@ -958,6 +970,7 @@ h1 span {
 
 .site-footer p {
   margin: 0;
+  flex: 1;
 }
 
 .site-footer a {
@@ -965,6 +978,12 @@ h1 span {
   color: #3f474e;
   font-weight: 600;
   text-underline-offset: 3px;
+}
+
+.site-footer img {
+  width: auto;
+  max-width: 100%;
+  display: block;
 }
 
 @media (max-width: 700px) {
