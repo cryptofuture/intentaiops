@@ -161,6 +161,10 @@ The first run creates a vault and asks for a passphrase of at least 12 character
 
 The dashboard also lets you set one global administrator email. Verified application installers use it where software requires an initial administrator or contact address—for example, the WordPress administrator account, WooCommerce store contact, or another application's setup email. Relevant AI-planned tasks receive the same preference. The value is vault encrypted and is never used as an SSH username, host identifier, or Netdata identity. If no email is configured, Intent AI Ops uses the intentionally non-deliverable `intentaiops@example.invalid` fallback.
 
+Choose **Set Codex model** on the dashboard to use `gpt-5.6-luna`, `gpt-5.6-terra`, or `gpt-5.6-sol` with `low` or `medium` reasoning. The default is `gpt-5.6-luna` with `medium` reasoning, and the selection is saved in `settings.json` for subsequent tasks.
+
+Choose **Controls** to configure wrapping menu navigation, optional `j`/`k` navigation, number shortcuts, shortcut hints, and automatic/color/monochrome output. These preferences are also saved in `settings.json`.
+
 ## SSH and secret protection
 
 - **Codex runs locally.** Intent AI Ops uses your signed-in Codex CLI directly, so it needs no separate OpenAI API key.

@@ -2,7 +2,7 @@ import { parseSshConnection } from './connection.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
 import { PRODUCT_NAME } from './product.js'
 
-export function mainActionOptions ({ hostCount, clusterCount = 0, recentServerId }) {
+export function mainActionOptions ({ hostCount, clusterCount = 0, recentServerId, codex = {} }) {
   const actions = []
   if (recentServerId) actions.push({ label: `Reconnect to ${recentServerId}`, value: `host:${recentServerId}` })
   if (hostCount > 0) actions.push({ label: `Browse/search hosts (${hostCount})`, value: 'browse-hosts', focusRows: true })
@@ -13,6 +13,8 @@ export function mainActionOptions ({ hostCount, clusterCount = 0, recentServerId
   actions.push({ label: 'Add host', value: 'add' })
   actions.push({ label: 'Temporarily add host (removed on exit)', value: 'add-temporary' })
   actions.push({ label: 'Add Kubernetes cluster', value: 'add-kubernetes' })
+  actions.push({ label: `Set Codex model (${codex.model ?? 'gpt-5.6-luna'} / ${codex.reasoningEffort ?? 'medium'})`, value: 'codex-settings' })
+  actions.push({ label: 'Controls', value: 'controls' })
   actions.push({ label: 'Set default administrator email', value: 'application-defaults' })
   actions.push({ label: 'Change vault passphrase', value: 'change-passphrase' })
   actions.push({ label: 'Quit', value: 'quit' })

@@ -51,7 +51,10 @@ test('host session factory owns credential fallback, fingerprint registration, a
     onWarning: warning => warnings.push(warning)
   })
   const opened = await factory.open({
-    settings: { servers: { prod: { historyId: 'legacy' } } },
+    settings: {
+      servers: { prod: { historyId: 'legacy' } },
+      codex: { model: 'gpt-5.6-terra', reasoningEffort: 'low' }
+    },
     passphrase: 'test-passphrase',
     serverId: 'prod'
   })
@@ -60,6 +63,8 @@ test('host session factory owns credential fallback, fingerprint registration, a
   assert.match(warnings[0], /credential rejected/u)
   assert.equal(opened.server.historyId, 'host-sha256-stable')
   assert.equal(opened.admin.ssh, setup.session.ssh)
+  assert.equal(opened.admin.planner.model, 'gpt-5.6-terra')
+  assert.equal(opened.admin.planner.reasoningEffort, 'low')
   assert.equal(opened.stage2.ssh, setup.session.ssh)
   assert.deepEqual(setup.calls.find(call => call.alias).alias, ['prod', 'host-sha256-stable'])
 })

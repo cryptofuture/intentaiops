@@ -6,6 +6,12 @@ import test from 'node:test'
 import { CodexPlanner } from '../src/codex-planner.js'
 import { listCommonTasks } from '../src/common-tasks.js'
 
+test('Codex planner rejects unsupported model settings', () => {
+  assert.throws(() => new CodexPlanner({ model: 'gpt-5.5' }), /unsupported Codex model/u)
+  assert.throws(() => new CodexPlanner({ model: 'gpt-6-astra' }), /unsupported Codex model/u)
+  assert.throws(() => new CodexPlanner({ reasoningEffort: 'high' }), /unsupported Codex reasoning effort/u)
+})
+
 test('Codex semantically routes requests against the verified Linux catalog', async t => {
   const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'webminai-routing-test-'))
   t.after(() => rm(serverDirectory, { recursive: true, force: true }))

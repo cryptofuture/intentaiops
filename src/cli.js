@@ -8,6 +8,7 @@ import { VaultAuthenticationError } from './crypto-vault.js'
 import { resolveDockerPolicy } from './docker-policy.js'
 import { formatDiagnosticError, redactDiagnosticText } from './error-details.js'
 import { HostSessionFactory } from './host-session-factory.js'
+import { CODEX_MODELS, CODEX_REASONING_EFFORTS, normalizeCodexSettings } from './codex-planner.js'
 import { KubernetesClient } from './kubernetes-client.js'
 import { KubernetesNetdataClient } from './kubernetes-netdata-client.js'
 import { KubernetesStage2Service } from './kubernetes-stage2-service.js'
@@ -28,6 +29,7 @@ import { TerminalUi } from './terminal-ui.js'
 import { FALLBACK_ADMIN_EMAIL, normalizeAdminEmailPreset } from './application-defaults.js'
 import { CLI_NAME, DATA_DIRECTORY_NAME, LEGACY_DATA_DIRECTORY_NAME, PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_URL } from './product.js'
 import { hostHealthProfile, isHostHealthTask } from './host-health-task.js'
+import { normalizeTerminalControls } from './terminal-controls.js'
 import {
   buildDashboardHostRow,
   configuredHostDetailLines,
@@ -85,6 +87,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
   const baseSsh = new SystemSsh()
   const unlocked = await unlock(ui, settingsStore)
   const settings = unlocked.settings
+  ui.setControls(settings.controls)
   const directoryAliases = new Map(Object.entries(settings.servers).map(([serverId, server]) => [serverId, server.historyId ?? serverId]))
   const workspace = new ServerWorkspace(dataRoot, { directoryAliases })
   let passphrase = unlocked.passphrase
@@ -123,7 +126,8 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
     const menuOptions = mainActionOptions({
       hostCount: serverIds.length,
       clusterCount: clusterIds.length,
-      recentServerId: recentServerId && settings.servers[recentServerId] ? recentServerId : null
+      recentServerId: recentServerId && settings.servers[recentServerId] ? recentServerId : null,
+      codex: settings.codex
     })
     const selection = await ui.searchableSplitChoose({
       title: '',
@@ -134,6 +138,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
           { text: `${serverIds.length - activeHosts} inactive`, style: serverIds.length - activeHosts > 0 ? 'warning' : 'muted' }
         ]),
         `Kubernetes clusters: ${clusterIds.length}`,
+        `Codex: ${settings.codex.model} / ${settings.codex.reasoningEffort} reasoning`,
         applicationDefaults.adminEmail
           ? `Default administrator email: ${applicationDefaults.adminEmail}`
           : ui.styleToken(`Default administrator email: ${FALLBACK_ADMIN_EMAIL}`, FALLBACK_ADMIN_EMAIL, 'warning')
@@ -158,6 +163,14 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
     }
     if (selected === 'application-defaults') {
       context.applicationDefaults = await setApplicationDefaults({ context })
+      continue
+    }
+    if (selected === 'codex-settings') {
+      await setCodexSettings({ context })
+      continue
+    }
+    if (selected === 'controls') {
+      await setTerminalControls({ context })
       continue
     }
     if (selected === 'add') {
@@ -205,6 +218,58 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
       if (action !== 'switch') break
       serverId = await chooseHost(ui, serverIds, settings, serverId)
     }
+  }
+}
+
+async function setCodexSettings ({ context }) {
+  const { ui, settingsStore, settings } = context
+  const current = normalizeCodexSettings(settings.codex)
+  ui.clear()
+  ui.banner('Codex model')
+  const model = await ui.choose('Model', [
+    ...CODEX_MODELS.map(value => ({
+      value,
+      label: `${value}${value === current.model ? ' (current)' : ''}`
+    })),
+    { value: null, label: 'Back without changes' }
+  ])
+  if (!model) return
+  const reasoningEffort = await ui.choose('Reasoning effort', [
+    ...CODEX_REASONING_EFFORTS.map(value => ({
+      value,
+      label: `${value}${value === current.reasoningEffort ? ' (current)' : ''}`
+    })),
+    { value: null, label: 'Back without changes' }
+  ])
+  if (!reasoningEffort) return
+  await settingsStore.setCodexSettings({ settings, model, reasoningEffort })
+  ui.success(`Codex set to ${model} with ${reasoningEffort} reasoning.`)
+  await ui.pause()
+}
+
+async function setTerminalControls ({ context }) {
+  const { ui, settingsStore, settings } = context
+  for (;;) {
+    const controls = normalizeTerminalControls(settings.controls)
+    const selected = await ui.choose('Controls', [
+      { value: 'wrapNavigation', label: `Wrap menu navigation: ${controls.wrapNavigation ? 'on' : 'off'}` },
+      { value: 'vimKeys', label: `Vim navigation (j/k): ${controls.vimKeys ? 'on' : 'off'}` },
+      { value: 'numberShortcuts', label: `Number shortcuts: ${controls.numberShortcuts ? 'on' : 'off'}` },
+      { value: 'shortcutHints', label: `Shortcut hints: ${controls.shortcutHints ? 'shown' : 'hidden'}` },
+      { value: 'colorMode', label: `Color mode: ${controls.colorMode}` },
+      { value: null, label: 'Back' }
+    ])
+    if (!selected) return
+    const updated = { ...controls }
+    if (selected === 'colorMode') {
+      updated.colorMode = await ui.choose('Color mode', [
+        { value: 'auto', label: 'Automatic' },
+        { value: 'color', label: 'Always use color' },
+        { value: 'monochrome', label: 'Monochrome' }
+      ])
+    } else updated[selected] = !updated[selected]
+    await settingsStore.setTerminalControls({ settings, controls: updated })
+    ui.setControls(settings.controls)
   }
 }
 

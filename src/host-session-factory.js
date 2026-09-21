@@ -49,7 +49,7 @@ export class HostSessionFactory {
         settings: this.settingsStore,
         workspace: this.workspace,
         stage2,
-        planner: new CodexPlanner()
+        planner: new CodexPlanner(settings.codex)
       })
       return { serverId, server, session, ssh: session.ssh, stage2, admin }
     } catch (error) {

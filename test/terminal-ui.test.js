@@ -33,6 +33,23 @@ test('terminal choices support left and right selection', async () => {
   assert.equal(input.isPaused(), true)
 })
 
+test('terminal controls apply Vim keys, bounded navigation, number shortcuts, and hints', async () => {
+  const { input, output } = terminalPair()
+  const ui = new TerminalUi({ input, output })
+  ui.setControls({ wrapNavigation: false, vimKeys: true, numberShortcuts: false, colorMode: 'monochrome', shortcutHints: false })
+  const choosing = ui.choose('History', [
+    { label: 'New', value: 'new' },
+    { label: 'Old', value: 'old' }
+  ])
+  input.emit('keypress', 'k', { name: 'k' })
+  input.emit('keypress', '2', { name: '2' })
+  input.emit('keypress', 'j', { name: 'j' })
+  input.emit('keypress', '\r', { name: 'return' })
+
+  assert.equal(await choosing, 'old')
+  assert.doesNotMatch(output.text, /Left\/Up/u)
+})
+
 test('searchable choices filter long host lists and page without rendering every host', async () => {
   const { input, output } = terminalPair()
   output.rows = 12

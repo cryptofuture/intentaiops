@@ -9,6 +9,30 @@ import { TaskStore } from '../src/task-store.js'
 
 const PASSPHRASE = 'correct horse battery staple'
 
+test('Codex model settings are validated and persisted', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intentaiops-codex-settings-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new SettingsStore(root)
+  const settings = await store.initialize()
+
+  assert.deepEqual(settings.codex, { model: 'gpt-5.6-luna', reasoningEffort: 'medium' })
+  await store.setCodexSettings({ settings, model: 'gpt-5.6-terra', reasoningEffort: 'low' })
+  assert.deepEqual((await store.load()).codex, { model: 'gpt-5.6-terra', reasoningEffort: 'low' })
+  await assert.rejects(store.setCodexSettings({ settings, model: 'gpt-5.5', reasoningEffort: 'medium' }), /unsupported Codex model/u)
+})
+
+test('terminal controls are validated and persisted', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intentaiops-controls-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new SettingsStore(root)
+  const settings = await store.initialize()
+
+  assert.equal(settings.controls.wrapNavigation, true)
+  await store.setTerminalControls({ settings, controls: { ...settings.controls, vimKeys: true, colorMode: 'monochrome' } })
+  assert.equal((await store.load()).controls.vimKeys, true)
+  await assert.rejects(store.setTerminalControls({ settings, controls: { ...settings.controls, colorMode: 'sepia' } }), /invalid terminal control/u)
+})
+
 test('Kubernetes kubeconfigs are encrypted, rekeyed, and keep independent Stage 2 state', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'intentaiops-kubernetes-settings-'))
   t.after(() => rm(root, { recursive: true, force: true }))

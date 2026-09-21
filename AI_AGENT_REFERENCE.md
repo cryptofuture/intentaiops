@@ -408,7 +408,7 @@ INFO: Enter submits • Shift+Enter or Ctrl+J adds a line • ↑/↓ recalls ta
 [Codex turn.started] Codex is analyzing the task
 ```
 
-Codex runs with `gpt-5.6-luna` and medium reasoning. Its JSONL progress and reasoning summaries are shown as they arrive and saved with the task. Codex receives the sanitized Netdata inventory, including Agent information, contexts, functions, container visibility, and alerts, plus optional `context.md`, the policy extracted from `rules.json`, and your request. On Linux, this also includes Intent AI Ops's cached host profile: the exact `/etc/os-release` identity, architecture, kernel, init/service and package-manager conventions, detected stack commands and versions, distro-specific package-name candidates, and checked official documentation/package/release links. It does not receive the SSH URL, vault, password, or action key.
+Codex defaults to `gpt-5.6-luna` with medium reasoning. The dashboard can persist a different supported pairing in `settings.json`: `gpt-5.6-luna`, `gpt-5.6-terra`, or `gpt-5.6-sol`, with low or medium reasoning. Its JSONL progress and reasoning summaries are shown as they arrive and saved with the task. Codex receives the sanitized Netdata inventory, including Agent information, contexts, functions, container visibility, and alerts, plus optional `context.md`, the policy extracted from `rules.json`, and your request. On Linux, this also includes Intent AI Ops's cached host profile: the exact `/etc/os-release` identity, architecture, kernel, init/service and package-manager conventions, detected stack commands and versions, distro-specific package-name candidates, and checked official documentation/package/release links. It does not receive the SSH URL, vault, password, or action key.
 
 The Linux profile refresh is part of an active Stage 2 health/status read. Intent AI Ops derives the host facts through the token-authenticated loopback plugin, checks only a curated official distro release URL from the controller, and never sends the host inventory or SSH details to that site. It stores no raw web page content. Only bounded reachability/version facts and official URLs are retained, with a 24-hour online cache. An unavailable site does not make the host unhealthy: the last profile is retained with a refresh warning, and local facts continue to work.
 
@@ -692,7 +692,7 @@ Host authentication is delegated to OpenSSH. The initial interactive connection 
 
 ## Codex planner
 
-The planner defaults to `gpt-5.6-luna` with `medium` reasoning. Both are constructor options. Codex runs in a newly created temporary directory containing only:
+The planner defaults to `gpt-5.6-luna` with `medium` reasoning. The dashboard stores one validated model/reasoning pair in `settings.json`; supported models are `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol`, and supported reasoning levels are `low` and `medium`. Codex runs in a newly created temporary directory containing only:
 
 - sanitized Netdata inventory;
 - non-secret server context;

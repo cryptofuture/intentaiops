@@ -15,18 +15,20 @@ import {
 test('dashboard actions preserve zero, one, multiple, and recent-host availability', () => {
   const values = options => options.map(option => option.value)
   assert.deepEqual(values(mainActionOptions({ hostCount: 0 })), [
-    'multi-history', 'add', 'add-temporary', 'add-kubernetes', 'application-defaults', 'change-passphrase', 'quit'
+    'multi-history', 'add', 'add-temporary', 'add-kubernetes', 'codex-settings', 'controls', 'application-defaults', 'change-passphrase', 'quit'
   ])
   assert.deepEqual(values(mainActionOptions({ hostCount: 1 })), [
-    'browse-hosts', 'multi-history', 'add', 'add-temporary', 'add-kubernetes', 'application-defaults', 'change-passphrase', 'quit'
+    'browse-hosts', 'multi-history', 'add', 'add-temporary', 'add-kubernetes', 'codex-settings', 'controls', 'application-defaults', 'change-passphrase', 'quit'
   ])
   assert.deepEqual(values(mainActionOptions({ hostCount: 2 })), [
-    'browse-hosts', 'multi-task', 'multi-plugin', 'multi-history', 'add', 'add-temporary', 'add-kubernetes', 'application-defaults', 'change-passphrase', 'quit'
+    'browse-hosts', 'multi-task', 'multi-plugin', 'multi-history', 'add', 'add-temporary', 'add-kubernetes', 'codex-settings', 'controls', 'application-defaults', 'change-passphrase', 'quit'
   ])
   assert.equal(mainActionOptions({ hostCount: 1, recentServerId: 'alpha' })[0].value, 'host:alpha')
   assert.deepEqual(values(mainActionOptions({ hostCount: 0, clusterCount: 1 })).slice(0, 2), [
     'browse-kubernetes', 'multi-history'
   ])
+  assert.match(mainActionOptions({ hostCount: 0, codex: { model: 'gpt-5.6-terra', reasoningEffort: 'low' } })
+    .find(option => option.value === 'codex-settings').label, /gpt-5\.6-terra \/ low/u)
 })
 
 test('dashboard host rows are sorted, sanitized, unprobed, and exclude global email and secrets', async () => {

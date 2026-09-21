@@ -15,6 +15,18 @@ import {
   validateWindowsPlan
 } from './planner-platform-policy.js'
 
+export const CODEX_MODELS = Object.freeze(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'])
+export const CODEX_REASONING_EFFORTS = Object.freeze(['low', 'medium'])
+export const DEFAULT_CODEX_SETTINGS = Object.freeze({ model: 'gpt-5.6-luna', reasoningEffort: 'medium' })
+
+export function normalizeCodexSettings (value = {}) {
+  const model = value?.model ?? DEFAULT_CODEX_SETTINGS.model
+  const reasoningEffort = value?.reasoningEffort ?? DEFAULT_CODEX_SETTINGS.reasoningEffort
+  if (!CODEX_MODELS.includes(model)) throw new TypeError(`unsupported Codex model: ${model}`)
+  if (!CODEX_REASONING_EFFORTS.includes(reasoningEffort)) throw new TypeError(`unsupported Codex reasoning effort: ${reasoningEffort}`)
+  return { model, reasoningEffort }
+}
+
 export class CodexPlanner {
   constructor ({
     runner = runProcess,
@@ -25,10 +37,11 @@ export class CodexPlanner {
     consultationSchemaPath = fileURLToPath(new URL('../schemas/consultation.schema.json', import.meta.url)),
     routingSchemaPath = fileURLToPath(new URL('../schemas/task-routing.schema.json', import.meta.url))
   } = {}) {
+    const codex = normalizeCodexSettings({ model, reasoningEffort })
     this.runner = runner
     this.codexBinary = codexBinary
-    this.model = model
-    this.reasoningEffort = reasoningEffort
+    this.model = codex.model
+    this.reasoningEffort = codex.reasoningEffort
     this.schemaPath = path.resolve(schemaPath)
     this.consultationSchemaPath = path.resolve(consultationSchemaPath)
     this.routingSchemaPath = path.resolve(routingSchemaPath)

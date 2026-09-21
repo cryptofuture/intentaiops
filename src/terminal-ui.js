@@ -1,6 +1,7 @@
 import { emitKeypressEvents } from 'node:readline'
 import { createInterface } from 'node:readline/promises'
 import { PRODUCT_NAME } from './product.js'
+import { normalizeTerminalControls } from './terminal-controls.js'
 
 const ANSI_STYLES = Object.freeze({
   heading: '1;96',
@@ -27,9 +28,35 @@ export class TerminalUi {
   constructor ({ input = process.stdin, output = process.stdout, env = process.env, color } = {}) {
     this.input = input
     this.output = output
+    this.env = env
+    this.requestedColor = color
+    this.controls = normalizeTerminalControls()
     this.color = supportsColor({ output, env, color })
     this.initialInputState = this.captureInputState()
     this.rawReaders = new Set()
+  }
+
+  setControls (controls) {
+    this.controls = normalizeTerminalControls(controls)
+    const color = this.controls.colorMode === 'auto' ? this.requestedColor : this.controls.colorMode === 'color'
+    this.color = supportsColor({ output: this.output, env: this.env, color })
+  }
+
+  navigationKey (string, key) {
+    if (['up', 'left'].includes(key.name) || (this.controls.vimKeys && string === 'k')) return -1
+    if (['down', 'right'].includes(key.name) || (this.controls.vimKeys && string === 'j')) return 1
+    return 0
+  }
+
+  verticalNavigationKey (string, key) {
+    if (key.name === 'up' || (this.controls.vimKeys && string === 'k')) return -1
+    if (key.name === 'down' || (this.controls.vimKeys && string === 'j')) return 1
+    return 0
+  }
+
+  moveSelection (current, direction, length) {
+    if (this.controls.wrapNavigation) return (current + direction + length) % length
+    return Math.max(0, Math.min(length - 1, current + direction))
   }
 
   clear () {
@@ -152,6 +179,7 @@ export class TerminalUi {
   }
 
   renderKeyHints (hints, { width = this.terminalSize().width } = {}) {
+    if (!this.controls.shortcutHints) return []
     const pairs = (Array.isArray(hints) ? hints : [hints]).map(normalizeHint).filter(hint => hint.key || hint.label)
     const lines = wrapHints(pairs, Math.max(1, width)).map(line => line.map(hint => {
       const content = [this.paint('key', hint.key), hint.label].filter(Boolean).join(' ')
@@ -294,10 +322,10 @@ export class TerminalUi {
     render()
     return this.readRawKey((string, key, finish) => {
       if (key.ctrl && key.name === 'c') return finish(new Error('interrupted'))
-      if (['left', 'up'].includes(key.name)) selected = (selected - 1 + options.length) % options.length
-      else if (['right', 'down'].includes(key.name)) selected = (selected + 1) % options.length
+      const direction = this.navigationKey(string, key)
+      if (direction) selected = this.moveSelection(selected, direction, options.length)
       else if (key.name === 'return' || key.name === 'enter') return finish(null, options[selected].value)
-      else if (/^[1-9]$/.test(string) && options[Number(string) - 1]) {
+      else if (this.controls.numberShortcuts && /^[1-9]$/.test(string) && options[Number(string) - 1]) {
         return finish(null, options[Number(string) - 1].value)
       } else return
       render()
@@ -349,8 +377,8 @@ export class TerminalUi {
       const filtered = matches()
       if (key.ctrl && key.name === 'c') return finish(new Error('interrupted'))
       if (key.name === 'escape') return finish(null, null)
-      if (key.name === 'up' && filtered.length > 0) selected = (selected - 1 + filtered.length) % filtered.length
-      else if (key.name === 'down' && filtered.length > 0) selected = (selected + 1) % filtered.length
+      const direction = this.verticalNavigationKey(string, key)
+      if (direction && filtered.length > 0) selected = this.moveSelection(selected, direction, filtered.length)
       else if (key.name === 'left' && filtered.length > 0) selected = Math.max(0, selected - pageSize)
       else if (key.name === 'right' && filtered.length > 0) selected = Math.min(filtered.length - 1, selected + pageSize)
       else if (key.name === 'home' && filtered.length > 0) selected = 0
@@ -450,8 +478,7 @@ export class TerminalUi {
         if (key.name === 'escape' || string.toLowerCase() === 'q') return finish(null, null)
         if (string === '/') {
           searching = true
-        } else if (key.name === 'up' && filtered.length > 0) selected = (selected - 1 + filtered.length) % filtered.length
-        else if (key.name === 'down' && filtered.length > 0) selected = (selected + 1) % filtered.length
+        } else if (this.verticalNavigationKey(string, key) && filtered.length > 0) selected = this.moveSelection(selected, this.verticalNavigationKey(string, key), filtered.length)
         else if (key.name === 'pageup') selected = Math.max(0, selected - Math.max(1, this.terminalSize().height - summaryLines.length - 9))
         else if (key.name === 'pagedown') selected = Math.min(Math.max(0, filtered.length - 1), selected + Math.max(1, this.terminalSize().height - summaryLines.length - 9))
         else if (key.name === 'home') selected = 0
@@ -527,8 +554,7 @@ export class TerminalUi {
         }
         if (key.name === 'escape') return finish(null, [])
         if (string === '/') searching = true
-        else if (key.name === 'up' && filtered.length > 0) cursor = (cursor - 1 + filtered.length) % filtered.length
-        else if (key.name === 'down' && filtered.length > 0) cursor = (cursor + 1) % filtered.length
+        else if (this.verticalNavigationKey(string, key) && filtered.length > 0) cursor = this.moveSelection(cursor, this.verticalNavigationKey(string, key), filtered.length)
         else if (key.name === 'pageup') cursor = Math.max(0, cursor - Math.max(1, this.terminalSize().height - 8))
         else if (key.name === 'pagedown') cursor = Math.min(Math.max(0, filtered.length - 1), cursor + Math.max(1, this.terminalSize().height - 8))
         else if (key.name === 'home') cursor = 0
@@ -578,8 +604,8 @@ export class TerminalUi {
       return await this.readRawKey((string, key, finish) => {
         if (key.ctrl && key.name === 'c') return finish(new Error('interrupted'))
         if (key.name === 'escape' || string.toLowerCase() === 'q') return finish(null, null)
-        if (key.name === 'up') selected = (selected - 1 + actions.length) % actions.length
-        else if (key.name === 'down') selected = (selected + 1) % actions.length
+        const direction = this.verticalNavigationKey(string, key)
+        if (direction) selected = this.moveSelection(selected, direction, actions.length)
         else if (key.name === 'pageup') selected = Math.max(0, selected - Math.max(1, this.terminalSize().height - 8))
         else if (key.name === 'pagedown') selected = Math.min(actions.length - 1, selected + Math.max(1, this.terminalSize().height - 8))
         else if (key.name === 'home') selected = 0
@@ -708,12 +734,10 @@ export class TerminalUi {
           focus = focus === 'actions' && rows.length > 0 ? 'rows' : 'actions'
         } else if (focus === 'rows' && string === '/') {
           searching = true
-        } else if (key.name === 'up') {
-          if (focus === 'actions') actionIndex = (actionIndex - 1 + actions.length) % actions.length
-          else if (filtered.length > 0) rowIndex = (rowIndex - 1 + filtered.length) % filtered.length
-        } else if (key.name === 'down') {
-          if (focus === 'actions') actionIndex = (actionIndex + 1) % actions.length
-          else if (filtered.length > 0) rowIndex = (rowIndex + 1) % filtered.length
+        } else if (this.verticalNavigationKey(string, key)) {
+          const direction = this.verticalNavigationKey(string, key)
+          if (focus === 'actions') actionIndex = this.moveSelection(actionIndex, direction, actions.length)
+          else if (filtered.length > 0) rowIndex = this.moveSelection(rowIndex, direction, filtered.length)
         } else if (key.name === 'pageup') {
           const step = Math.max(1, this.terminalSize().height - summaryLines.length - 9)
           if (focus === 'actions') actionIndex = Math.max(0, actionIndex - step)
@@ -782,8 +806,8 @@ export class TerminalUi {
     return this.readRawKey((string, key, finish) => {
       if (key.ctrl && key.name === 'c') return finish(new Error('interrupted'))
       if (key.name === 'escape') return finish(null, [])
-      if (key.name === 'up') cursor = (cursor - 1 + options.length) % options.length
-      else if (key.name === 'down') cursor = (cursor + 1) % options.length
+      const direction = this.verticalNavigationKey(string, key)
+      if (direction) cursor = this.moveSelection(cursor, direction, options.length)
       else if (key.name === 'space') toggle(selected, options[cursor].value)
       else if (string.toLowerCase() === 'a') {
         if (selected.size === options.length) selected.clear()
@@ -1014,6 +1038,7 @@ export class TerminalUi {
   }
 
   keyHintLines (hints, width = this.terminalSize().width) {
+    if (!this.controls.shortcutHints) return []
     const pairs = (Array.isArray(hints) ? hints : [hints]).map(normalizeHint).filter(hint => hint.key || hint.label)
     return wrapHints(pairs, Math.max(1, width)).map(line => line.map(hint => [this.paint('key', hint.key), hint.label].filter(Boolean).join(' ')).join(this.paint('separator', ' | ')))
   }

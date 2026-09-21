@@ -12,6 +12,8 @@ import {
 } from './crypto-vault.js'
 import { resolveServerDirectory, validateServerId } from './server-id.js'
 import { normalizeApplicationDefaults } from './application-defaults.js'
+import { normalizeCodexSettings } from './codex-planner.js'
+import { normalizeTerminalControls } from './terminal-controls.js'
 
 const SETTINGS_FORMAT = 'webminai-settings'
 const SETTINGS_VERSION = 1
@@ -41,7 +43,9 @@ export class SettingsStore {
       kdf: this.kdfFactory(),
       hostHistories: {},
       servers: {},
-      clusters: {}
+      clusters: {},
+      codex: normalizeCodexSettings(),
+      controls: normalizeTerminalControls()
     }
 
     await mkdir(this.dataRoot, { recursive: true, mode: 0o700 })
@@ -63,6 +67,8 @@ export class SettingsStore {
     }
     settings.hostHistories ??= {}
     settings.clusters ??= {}
+    settings.codex = normalizeCodexSettings(settings.codex)
+    settings.controls = normalizeTerminalControls(settings.controls)
 
     return settings
   }
@@ -336,6 +342,18 @@ export class SettingsStore {
     }
     await this.save(settings)
     return normalized
+  }
+
+  async setCodexSettings ({ settings, model, reasoningEffort }) {
+    settings.codex = normalizeCodexSettings({ model, reasoningEffort })
+    await this.save(settings)
+    return settings.codex
+  }
+
+  async setTerminalControls ({ settings, controls }) {
+    settings.controls = normalizeTerminalControls(controls)
+    await this.save(settings)
+    return settings.controls
   }
 
   async setStage2State ({ settings, serverId, desired, ownership }) {
