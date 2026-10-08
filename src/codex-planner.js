@@ -1041,12 +1041,12 @@ async function copyContextIfPresent (source, destination) {
   }
 }
 
-function sanitizePlannerData (value) {
+export function sanitizePlannerData (value) {
   if (Array.isArray(value)) return value.map(sanitizePlannerData)
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [
       key,
-      /password|passphrase|secret|token|action.?key|connection.?url|private.?key/i.test(key)
+      /password|passwd|passphrase|secret|token|credential|authorization|action.?key|connection.?url|private.?key/i.test(key)
         ? '[redacted]'
         : sanitizePlannerData(item)
     ]))

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Intent AI Ops operator console</title>
+    <style>
+        body {
+            background: #101820;
+            color: #d9e5ec;
+            font: 16px system-ui;
+            margin: 24px
+        }
+
+        button,
+        input,
+        textarea,
+        select {
+            font: inherit;
+            background: #20313b;
+            color: inherit;
+            border: 1px solid #647983;
+            padding: 8px;
+            border-radius: 5px;
+            margin: 4px
+        }
+
+        button {
+            cursor: pointer
+        }
+
+        button:focus-visible {
+            outline: 2px solid #75c8d0
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%
+        }
+
+        td,
+        th {
+            text-align: left;
+            padding: 8px;
+            border-bottom: 1px solid #40515b
+        }
+
+        pre {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            background: #16232b;
+            padding: 16px;
+            max-height: 480px;
+            overflow: auto
+        }
+
+        textarea {
+            display: block;
+            width: 90%;
+            min-height: 80px
+        }
+
+        #message {
+            color: #f3cc80
+        }
+
+        section {
+            margin-block: 24px
+        }
+
+        .actions[hidden] {
+            display: none
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Intent AI Ops operator console</h1>
+    <p id="mode">Authenticate with the launch URL.</p>
+    <p id="message" role="status"></p>
+    <section id="login"><label>Launch token <input id="token" type="password" autocomplete="off"></label><button
+            id="connect">Connect</button></section>
+    <main hidden id="main"><button id="refresh">Refresh overview</button>
+        <h2>Hosts and tasks</h2>
+        <div id="hosts"></div>
+        <h2>Kubernetes clusters</h2>
+        <pre id="clusters"></pre>
+        <h2>Multi-host runs</h2>
+        <div id="runs"></div>
+        <section>
+            <h2>Selected task</h2>
+            <pre id="task">Select a task to inspect its command queue, results and revisions.</pre>
+            <div class="actions" hidden id="actions"><button data-action="pause">Pause at next boundary</button><button
+                    data-action="abort">Abort remaining work</button><button id="resume">Review and
+                    resume</button><button id="rollback">Review rollback</button><button id="execute-rollback"
+                    hidden>Approve and execute displayed rollback</button><button id="reconcile">Retrieve durable remote
+                    outcomes</button><button id="resolve">Record independently verified outcome</button><label>Question
+                    or revision instructions<textarea id="instructions"></textarea></label><button id="analyze">Ask a
+                    read-only question</button><button id="propose">Propose remaining-plan revision</button><button
+                    id="approve" hidden>Approve displayed revision</button></div>
+            <pre id="proposal"></pre>
+        </section>
+        <section>
+            <h2>Execution timeline</h2>
+            <pre id="events"></pre>
+        </section>
+        <section>
+            <h2>Historical replay</h2>
+            <p>Replay reads recorded events only.</p><label>Run ID <input id="run-id" type="number"
+                    min="1"></label><button id="replay">Load replay</button><button id="export">Download diagnostic
+                bundle</button><label>Recorded event <input id="position" type="range" min="0" max="0"
+                    value="0"></label>
+            <pre id="replay-event"></pre>
+        </section>
+    </main>
+    <script src="/app.js"></script>
+</body>
+
+</html>

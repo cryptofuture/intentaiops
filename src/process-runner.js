@@ -8,6 +8,7 @@ export async function runProcess (command, args, options = {}) {
     spawnImpl = spawn,
     cwd,
     env,
+    signal,
     onStdout,
     onStderr
   } = options
@@ -16,6 +17,7 @@ export async function runProcess (command, args, options = {}) {
     const child = spawnImpl(command, args, {
       cwd,
       env,
+      ...(signal ? { signal } : {}),
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe']
     })
@@ -75,10 +77,12 @@ export async function runProcess (command, args, options = {}) {
 }
 
 export async function runInteractiveProcess (command, args, options = {}) {
-  const { cwd, spawnImpl = spawn } = options
+  const { cwd, env, signal, spawnImpl = spawn } = options
   return new Promise((resolve, reject) => {
     const child = spawnImpl(command, args, {
       cwd,
+      env,
+      ...(signal ? { signal } : {}),
       shell: false,
       stdio: 'inherit'
     })

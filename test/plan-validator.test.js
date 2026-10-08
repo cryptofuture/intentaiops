@@ -179,7 +179,11 @@ test('only explicitly opted-in commands use durable jobs and their longer timeou
       }
     }
   })
-  assert.deepEqual(calls, [{ command: 'perform-long-install', options: { timeoutSeconds: 1800 } }])
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, 'perform-long-install')
+  assert.equal(calls[0].options.timeoutSeconds, 1800)
+  assert.equal(typeof calls[0].options.onRecovery, 'function')
+  assert.equal(typeof calls[0].options.onStatus, 'function')
   assert.equal(results[0].status, 'completed')
   assert.equal(results[0].result.jobId, 'ef'.repeat(16))
 

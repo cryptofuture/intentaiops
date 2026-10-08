@@ -1,5 +1,6 @@
 import { buildSafeDiagnosticCommand, isDeploymentPhase, validateDiagnostic } from './deployment-phases.js'
 import { classifyFailure } from './failure-signature.js'
+import { randomUUID } from 'node:crypto'
 
 const RISK = new Set(['read', 'change', 'destructive'])
 
@@ -146,13 +147,19 @@ export async function executeApprovedPlan ({
   netdata,
   approve,
   onResult = _entry => {},
+  onExecutionEvent,
+  onProgress,
+  completedCommandIds = [],
+  beforeCommand = async _item => true,
   requireRevert = true
 }) {
   validateCommandPlan(plan, policy, { requireRevert })
   const results = []
-  const statuses = new Map()
+  const statuses = new Map(completedCommandIds.map(id => [id, 'completed']))
 
   for (const item of plan.commands) {
+    if (statuses.get(item.id) === 'completed') continue
+    if (!await beforeCommand(item)) break
     if ((item.dependsOn ?? []).some(id => statuses.get(id) !== 'completed')) {
       const entry = { id: item.id, status: 'blocked' }
       results.push(entry)
@@ -171,19 +178,20 @@ export async function executeApprovedPlan ({
     }
 
     const startedAt = Date.now()
-    const execution = await runCommandWithRetry(item, netdata)
-    const { rawResult, executionError, attempts } = execution
+    await onExecutionEvent?.({ type: 'plan_approved', commandId: item.id })
+    const execution = await runCommandWithRetry(item, netdata, onExecutionEvent, onProgress)
+    const { rawResult, executionError, attempts, recoveryRequired } = execution
     const result = redactSensitiveResult(item.command, rawResult)
     const status = rawResult.exitCode === 0 ? 'completed' : 'failed'
-    const entry = /** @type {any} */ ({ id: item.id, phase: item.phase ?? null, status, durationMs: Date.now() - startedAt, result, ...(attempts > 1 ? { attempts } : {}) })
+    const entry = /** @type {any} */ ({ id: item.id, phase: item.phase ?? null, status, durationMs: Date.now() - startedAt, result, ...(attempts > 1 ? { attempts } : {}), ...(recoveryRequired ? { recoveryRequired: true } : {}) })
     if (status === 'failed') {
       entry.failure = classifyFailure({ item, result, error: executionError })
-      if (item.diagnostic) entry.diagnostic = await runSafeDiagnostic(netdata, item.diagnostic)
+      if (item.diagnostic && !recoveryRequired) entry.diagnostic = await runSafeDiagnostic(netdata, item.diagnostic)
     }
     results.push(entry)
     await onResult(entry)
     statuses.set(item.id, status)
-    if (rawResult.exitCode !== 0) break
+    if (rawResult.exitCode !== 0 || recoveryRequired) break
   }
 
   return results
@@ -200,24 +208,64 @@ function validateRetry (item) {
   if ((attempts - 1) * intervalMs > 15 * 60 * 1000) throw new TypeError(`command ${item.id} has an excessive retry window`)
 }
 
-async function runCommandWithRetry (item, netdata) {
+async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress) {
   const retry = item.retry ?? { attempts: 1, intervalMs: 0, exitCodes: [] }
   let rawResult
   let executionError
+  let recoveryRequired = false
+  let lastRecoveryState
   for (let attempt = 1; attempt <= retry.attempts; attempt++) {
+    const attemptId = randomUUID()
+    const event = (type, metadata = {}) => onExecutionEvent?.({ type, commandId: item.id, attemptId, metadata })
+    const recovery = async progress => {
+      if (!['reconnecting', 'reconnected', 'temporarily_unavailable', 'operator_review_required'].includes(progress.state) && !recoveryRequired) return
+      recoveryRequired = true
+      const state = progress.state === 'running' ? 'job_running' : progress.state
+      if (state === lastRecoveryState && state !== 'reconnecting') return
+      lastRecoveryState = state
+      const message = state === 'reconnecting'
+        ? `Reconnecting SSH (${progress.attempt}/${progress.attempts})...`
+        : state === 'reconnected'
+          ? 'SSH reconnected. Checking the recorded outcome.'
+          : state === 'job_running'
+            ? 'Job still running. Waiting for its recorded result.'
+            : state === 'temporarily_unavailable'
+              ? 'Connection unavailable. Retrying the existing job status.'
+              : 'Operator review needed before continuing. No command will be replayed.'
+      const metadata = { state, message, ...(progress.jobId ? { jobId: progress.jobId } : {}), ...(progress.attempt ? { attempt: progress.attempt } : {}) }
+      await event('execution_recovery', metadata)
+      await onProgress?.({ phase: 'execution-recovery', commandId: item.id, ...metadata })
+    }
+    await event('command_prepared')
+    await event('command_dispatched')
     executionError = undefined
     try {
       const execute = item.executionMode === 'job' ? netdata.runJob?.bind(netdata) : netdata.runCommand?.bind(netdata)
       if (!execute) throw new Error(`Netdata client does not support ${item.executionMode === 'job' ? 'job' : 'command'} execution`)
       rawResult = await execute(item.command, {
-        timeoutSeconds: Math.ceil(item.timeoutMs / 1000)
+        timeoutSeconds: Math.ceil(item.timeoutMs / 1000),
+        onRecovery: recovery,
+        ...(item.executionMode === 'job' ? { onStatus: recovery } : {}),
+        ...(onExecutionEvent && item.executionMode === 'job'
+          ? {
+              retainResult: true,
+              onStarted: status => event('command_acknowledged', { jobId: status.jobId, state: status.state })
+            }
+          : {})
       })
     } catch (error) {
       executionError = error
       rawResult = { exitCode: null, stdout: '', stderr: String(error?.message ?? error) }
     }
+    recoveryRequired ||= rawResult.recoveryRequired === true || Boolean(executionError) || rawResult.exitCode === null
+    await event(executionError || rawResult.exitCode === null ? 'command_outcome_unknown' : rawResult.exitCode === 0 ? 'command_completed' : 'command_failed', { exitCode: rawResult.exitCode })
+    if (recoveryRequired) {
+      await recovery({ state: 'operator_review_required' })
+      await onExecutionEvent?.({ type: 'execution_paused', metadata: { reason: 'recovery_requires_approval' } })
+      return { rawResult, executionError, attempts: attempt, recoveryRequired }
+    }
     const retryable = retry.exitCodes.includes(rawResult.exitCode)
-    if (!retryable || attempt === retry.attempts) return { rawResult, executionError, attempts: attempt }
+    if (!retryable || attempt === retry.attempts) return { rawResult, executionError, attempts: attempt, recoveryRequired }
     if (retry.intervalMs > 0) await new Promise(resolve => setTimeout(resolve, retry.intervalMs))
   }
 }

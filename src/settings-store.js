@@ -14,6 +14,7 @@ import { resolveServerDirectory, validateServerId } from './server-id.js'
 import { normalizeApplicationDefaults } from './application-defaults.js'
 import { normalizeCodexSettings } from './codex-planner.js'
 import { normalizeTerminalControls } from './terminal-controls.js'
+import { normalizeSshTransport } from './ssh-session-manager.js'
 
 const SETTINGS_FORMAT = 'webminai-settings'
 const SETTINGS_VERSION = 1
@@ -45,7 +46,8 @@ export class SettingsStore {
       servers: {},
       clusters: {},
       codex: normalizeCodexSettings(),
-      controls: normalizeTerminalControls()
+      controls: normalizeTerminalControls(),
+      ssh: normalizeSshTransport()
     }
 
     await mkdir(this.dataRoot, { recursive: true, mode: 0o700 })
@@ -69,6 +71,7 @@ export class SettingsStore {
     settings.clusters ??= {}
     settings.codex = normalizeCodexSettings(settings.codex)
     settings.controls = normalizeTerminalControls(settings.controls)
+    settings.ssh = normalizeSshTransport(settings.ssh)
 
     return settings
   }

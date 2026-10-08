@@ -60,9 +60,10 @@ export class HostSessionFactory {
   }
 
   async openSsh (server) {
+    const acquire = this.baseSsh.acquireSession?.bind(this.baseSsh) ?? this.baseSsh.openInteractiveSession.bind(this.baseSsh)
     if (server.sshCredential) {
       try {
-        return await this.baseSsh.openInteractiveSession(server.connectionUrl, {
+        return await acquire(server.connectionUrl, {
           authentication: server.authentication ?? 'auto',
           credential: server.sshCredential
         })
@@ -70,7 +71,7 @@ export class HostSessionFactory {
         this.onWarning(`The saved SSH credential did not authenticate (${error.message}). Retrying with the normal OpenSSH prompt.`)
       }
     }
-    return this.baseSsh.openInteractiveSession(server.connectionUrl, {
+    return acquire(server.connectionUrl, {
       authentication: server.authentication ?? 'auto'
     })
   }

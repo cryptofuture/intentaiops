@@ -205,6 +205,39 @@ Task history is the per-host audit trail of requests, Codex progress, plans, com
 
 Retries create new records and never overwrite the original task. Multi-host runs group separate per-host tasks, allowing failed hosts to be cleaned up and retried without rerunning successful hosts.
 
+## Execution recovery and operator console
+
+Intent AI Ops records execution progress so you can inspect interrupted work and continue without repeating confirmed completed commands. You stay in control: AI suggestions never execute without your approval.
+
+If SSH drops during execution, recovery tries to reconnect up to three times, waiting 1 then 2 seconds between attempts. For a recorded background job, it checks that same job rather than starting it again. Progress shows when it is reconnecting, when the job is still running, and when operator review is needed. After recovery, remaining commands stay paused until you review and approve continuation. If the result cannot be confirmed, investigate the host before resuming.
+
+### Recover or change a task
+
+1. Open **Task history and reverts**, select the task, then choose **Operator controls** or **Inspect and recover interrupted execution**.
+2. Inspect what completed and what remains. If a connection was lost, use **Reconcile durable remote outcomes** to check recorded remote jobs. If the outcome is still unknown, investigate the host before continuing. Do not assume the command failed or rerun it blindly.
+3. Choose **Review and resume** to continue, or **Revise remaining steps** to change the plan. Review the differences, approve the replacement, then resume. Completed commands stay unchanged.
+
+For example: “Use port 8080 instead of 80 for the remaining deployment steps.” You can also ask Codex a read-only question, abort remaining work, or review a rollback. A partly completed task needs a separately reviewed rollback proposal.
+
+To pause during a single-host task, enable **intervention at command boundaries** after reviewing the plan. Pausing stops before the next command; it does not kill a command already running.
+
+### Open the browser console
+
+```sh
+intentaiops console                   # view progress and history
+intentaiops console --console-actions # also allow reviewed operator actions
+```
+
+1. Run either command and unlock your vault in the terminal.
+2. Open the printed URL to see hosts, runs, command progress, failures, and plan revisions.
+3. With actions enabled, select a task to pause, revise, resume, or review rollback. Changed plans require fresh approval. SSH login prompts still appear in the terminal.
+
+The console is local-only (`127.0.0.1`). Keep its launch URL private. Replay and diagnostic exports only read history, never run commands. Raw command output is withheld from browser views and exports; inspect it in local task history.
+
+For several hosts, choose a **staged canary rollout** to try one host first, then continue in batches of two. Verify health after each stage. Failures or missing verification stop further stages; you can inspect and safely resume selected hosts without repeating successful ones.
+
+If repairs keep failing without progress, Intent AI Ops asks for a different strategy before another attempt. Older tasks without execution records cannot be resumed automatically. See [execution milestone details](docs/execution-milestones.md) for configuration, safety limits, and live-host testing notes.
+
 ## Development
 
 ```sh

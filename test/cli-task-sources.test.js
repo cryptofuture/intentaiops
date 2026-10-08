@@ -22,7 +22,7 @@ test('interactive task menus expose verified platform applications and AI-assist
   assert.match(source, /buildCommonTask\([\s\S]*applicationDefaults/)
   assert.match(source, /buildCandidatePlanningContext\([\s\S]*applicationDefaults/)
   assert.match(source, /plan = await admin\.plan\([\s\S]*applicationDefaults/)
-  assert.match(source, /service\.run\([\s\S]*applicationDefaults/)
+  assert.match(source, /controller\.run\([\s\S]*applicationDefaults/)
   assert.match(source, /renderAndSaveSystemUpdateReport/)
   assert.match(source, /admin\.saveUpdateContext/)
   assert.match(source, /parallelMap\(serverIds, 4/)

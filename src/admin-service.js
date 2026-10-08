@@ -11,6 +11,8 @@ import { SettingsStore } from './settings-store.js'
 import { Stage2Service } from './stage2-service.js'
 import { SystemSsh } from './system-ssh.js'
 import { TaskStore } from './task-store.js'
+import { planFingerprint } from './execution-journal.js'
+import { detectOperationLoop } from './operation-loop-detector.js'
 
 export class AdminService {
   constructor ({
@@ -248,6 +250,8 @@ export class AdminService {
     applicationDefaults,
     onProgress
   }) {
+    const loop = detectOperationLoop(previousAttempts, settings.operationLoop)
+    if (loop.detected && !retryInstructions?.trim()) throw new Error(`${loop.reason}; alternative operator instructions required`)
     const rules = await this.workspace.loadRules(serverId)
     const observed = withDockerPreference(
       inventory ?? await this.refreshInventory({ settings, passphrase, serverId }),
@@ -312,45 +316,150 @@ export class AdminService {
     })
   }
 
-  async execute ({ settings, passphrase, serverId, plan, approve, onResult, requireRevert = true }) {
+  async execute ({ settings, passphrase, serverId, taskId, plan, approve, onResult, onProgress, beforeCommand, requireRevert = true }) {
     const server = await this.serverSecrets({ settings, passphrase, serverId })
     const rules = await this.workspace.loadRules(serverId)
-    return executeApprovedPlan({
-      plan,
-      policy: rules.policy,
-      netdata: this.netdata(server),
-      approve,
-      onResult,
-      requireRevert
-    })
+    if (taskId === undefined) return executeApprovedPlan({ plan, policy: rules.policy, netdata: this.netdata(server), approve, onResult, onProgress, requireRevert })
+    const lease = this.tasks.acquireExecution(serverId, taskId, plan)
+    let ownershipError
+    const heartbeat = setInterval(() => {
+      try { this.tasks.renewExecution(serverId, taskId, lease.owner) } catch (error) { ownershipError = error }
+    }, 10000)
+    heartbeat.unref()
+    try {
+      const saved = this.tasks.get(serverId, taskId)
+      if (saved.results?.length && this.tasks.executionEvents(serverId, taskId).length === 0) throw new Error('legacy execution has no journal; continuation requires operator investigation')
+      const state = this.tasks.executionState(serverId, taskId)
+      if (this.tasks.rollbackState(serverId, taskId).some(command => command.status !== 'pending')) throw new Error('rollback has started; do not resume the original deployment')
+      if (state.some(command => ['uncertain', 'failed'].includes(command.status))) throw new Error('task requires operator reconciliation before continuation; no commands were dispatched')
+      const previous = this.tasks.get(serverId, taskId).results ?? []
+      if (this.tasks.executionEvents(serverId, taskId).length) this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_resumed' })
+      const results = await executeApprovedPlan({
+        plan,
+        policy: rules.policy,
+        netdata: this.netdata(server),
+        approve,
+        onResult,
+        onProgress: event => {
+          this.tasks.appendProgress(serverId, taskId, event)
+          return onProgress?.(event)
+        },
+        beforeCommand: async item => {
+          const control = this.tasks.control(serverId, taskId)
+          if (control.action !== 'run') {
+            this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_paused', metadata: { aborted: control.action === 'abort' } })
+            return false
+          }
+          if (beforeCommand && await beforeCommand(item) === false) {
+            this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_paused' })
+            return false
+          }
+          return true
+        },
+        completedCommandIds: state.filter(command => command.status === 'completed').map(command => command.commandId),
+        onExecutionEvent: event => {
+          if (ownershipError) throw ownershipError
+          this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
+          if (event.type === 'execution_paused' && event.metadata?.reason === 'recovery_requires_approval') {
+            const control = this.tasks.control(serverId, taskId)
+            if (control.action === 'run') this.tasks.setControl(serverId, taskId, 'pause', control.version)
+          }
+        },
+        requireRevert
+      })
+      const confirmed = state.filter(command => command.status === 'completed').map(command => previous.find(result => result.id === command.commandId && result.status === 'completed') ?? { id: command.commandId, status: 'completed', result: { exitCode: 0, stdout: '[completion confirmed by execution journal]', stderr: '' } })
+      return [...confirmed, ...results]
+    } finally {
+      clearInterval(heartbeat)
+      this.tasks.releaseExecution(serverId, taskId, lease.owner)
+    }
   }
 
-  async revertTask ({ settings, passphrase, serverId, taskId, approve, onResult }) {
+  async revertTask ({ settings, passphrase, serverId, taskId, reviewedPlan, approve, onResult, onProgress }) {
     const task = this.tasks.get(serverId, taskId)
-    if (!task.plan || !Array.isArray(task.plan.revertCommands) || task.plan.revertCommands.length === 0) {
+    if (!reviewedPlan && (!task.plan || !Array.isArray(task.plan.revertCommands) || task.plan.revertCommands.length === 0)) {
       throw new Error(`task ${taskId} has no revert plan`)
     }
+    if (this.tasks.executionState(serverId, taskId).some(command => command.status === 'uncertain')) throw new Error('rollback requires operator reconciliation of uncertain commands')
+    if (this.tasks.rollbackState(serverId, taskId).some(command => command.status === 'uncertain')) throw new Error('rollback outcome requires reconciliation before further changes')
+    if (!reviewedPlan && this.tasks.executionEvents(serverId, taskId).length && this.tasks.executionState(serverId, taskId).some(command => command.status !== 'completed')) throw new Error('partial execution requires a separately reviewed rollback plan; saved rollback commands do not identify their forward changes')
     const server = await this.serverSecrets({ settings, passphrase, serverId })
     const rules = await this.workspace.loadRules(serverId)
-    const revertPlan = {
+    const revertPlan = reviewedPlan ?? {
       ...task.plan,
       summary: `Revert task ${taskId}: ${task.plan.summary}`,
       changeOverview: `Restore the state captured before task ${taskId}`,
       commands: task.plan.revertCommands,
       revertCommands: []
     }
-    return executeApprovedPlan({
-      plan: revertPlan,
-      policy: rules.policy,
-      netdata: this.netdata(server),
-      approve,
-      onResult,
-      requireRevert: false
-    })
+    const lease = this.tasks.acquireExecution(serverId, taskId, task.plan)
+    const heartbeat = setInterval(() => {
+      try { this.tasks.renewExecution(serverId, taskId, lease.owner) } catch {}
+    }, 10000)
+    heartbeat.unref()
+    try {
+      this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'rollback_started' })
+      const rollbackRevision = planFingerprint(revertPlan)
+      const history = this.tasks.allExecutionEvents(serverId, taskId).filter(event => event.metadata.rollbackRevision === rollbackRevision && event.commandId && !['plan_approved', 'execution_recovery'].includes(event.type))
+      const last = new Map(history.map(event => [event.commandId, event]))
+      if ([...last.values()].some(event => !['command_completed', 'command_prepared'].includes(event.type))) throw new Error('rollback outcome needs reconciliation; rollback will not be repeated')
+      const results = await executeApprovedPlan({ plan: revertPlan, policy: rules.policy, netdata: this.netdata(server), approve, onResult, onProgress: event => { this.tasks.appendProgress(serverId, taskId, event); return onProgress?.(event) }, completedCommandIds: [...last.values()].filter(event => event.type === 'command_completed').map(event => event.commandId), onExecutionEvent: event => this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { ...event, metadata: { ...event.metadata, operation: 'rollback', rollbackRevision } }), requireRevert: false })
+      const confirmed = [...last.values()].filter(event => event.type === 'command_completed').map(event => task.revertResults?.find(result => result.id === event.commandId && result.status === 'completed') ?? { id: event.commandId, status: 'completed', result: { exitCode: 0, stdout: '[completion confirmed by execution journal]', stderr: '' } })
+      const combined = [...confirmed, ...results]
+      this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'rollback_completed', metadata: { completed: combined.length === revertPlan.commands.length && combined.every(result => result.status === 'completed') } })
+      return combined
+    } finally {
+      clearInterval(heartbeat)
+      this.tasks.releaseExecution(serverId, taskId, lease.owner)
+    }
   }
 
   createTask (serverId, request, options) {
     return this.tasks.create(serverId, request, options)
+  }
+
+  async reconcileTask ({ settings, passphrase, serverId, taskId, onProgress }) {
+    const task = this.tasks.get(serverId, taskId)
+    const lease = this.tasks.acquireExecution(serverId, taskId, task.plan)
+    const heartbeat = setInterval(() => {
+      try { this.tasks.renewExecution(serverId, taskId, lease.owner) } catch {}
+    }, 10000)
+    heartbeat.unref()
+    try {
+      const server = await this.serverSecrets({ settings, passphrase, serverId })
+      const netdata = this.netdata(server)
+      for (const command of [...this.tasks.executionState(serverId, taskId), ...this.tasks.rollbackState(serverId, taskId)]) {
+        if (command.status !== 'uncertain' || !command.jobId || !netdata.jobStatus) continue
+        this.tasks.renewExecution(serverId, taskId, lease.owner)
+        const report = progress => {
+          const state = progress.state === 'running' ? 'job_running' : progress.state
+          const message = state === 'reconnecting' ? 'Reconnecting SSH to retrieve the recorded job result.' : state === 'reconnected' ? 'SSH reconnected. Checking the existing job.' : state === 'job_running' ? 'Job still running. Operator review needed before continuation.' : 'Operator review needed before continuation.'
+          const metadata = { state, message, jobId: command.jobId, ...(command.rollbackRevision ? { operation: 'rollback', rollbackRevision: command.rollbackRevision } : {}) }
+          this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_recovery', commandId: command.commandId, attemptId: command.attemptId, metadata })
+          const event = { phase: 'execution-recovery', commandId: command.commandId, ...metadata }
+          this.tasks.appendProgress(serverId, taskId, event)
+          return onProgress?.(event)
+        }
+        let remote
+        try { remote = await netdata.jobStatus(command.jobId, { onRecovery: report }) } catch (error) { await report({ state: 'operator_review_required' }); throw error }
+        if (remote.state === 'running') await report(remote)
+        if (!['succeeded', 'failed', 'cancelled', 'timed_out'].includes(remote.state)) continue
+        const completed = remote.state === 'succeeded' && remote.exitCode === 0
+        this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, {
+          type: completed ? 'command_completed' : 'command_failed',
+          commandId: command.commandId,
+          attemptId: command.attemptId,
+          metadata: { jobId: command.jobId, state: remote.state, exitCode: remote.exitCode, reconciled: true, ...(command.rollbackRevision ? { operation: 'rollback', rollbackRevision: command.rollbackRevision } : {}) }
+        })
+        const result = { id: command.commandId, status: completed ? 'completed' : 'failed', result: { exitCode: remote.exitCode, stdout: '[remote output omitted during reconciliation]', stderr: '' } }
+        if (command.rollbackRevision) this.tasks.appendRevertResult(serverId, taskId, result)
+        else this.tasks.appendResult(serverId, taskId, result)
+      }
+      return this.tasks.executionState(serverId, taskId)
+    } finally {
+      clearInterval(heartbeat)
+      this.tasks.releaseExecution(serverId, taskId, lease.owner)
+    }
   }
 
   listTasks (serverId, options) {

@@ -22,6 +22,9 @@ import { parseSshCommand } from './ssh-command.js'
 import { ServerWorkspace } from './server-workspace.js'
 import { validateServerId } from './server-id.js'
 import { SettingsStore } from './settings-store.js'
+import { TaskStore } from './task-store.js'
+import { OperatorController } from './operator-controller.js'
+import { startOperatorConsole } from './operator-console.js'
 import { Stage2Service } from './stage2-service.js'
 import { SystemSsh } from './system-ssh.js'
 import { updateIntentAiOps } from './self-update.js'
@@ -29,6 +32,7 @@ import { TerminalUi } from './terminal-ui.js'
 import { FALLBACK_ADMIN_EMAIL, normalizeAdminEmailPreset } from './application-defaults.js'
 import { CLI_NAME, DATA_DIRECTORY_NAME, LEGACY_DATA_DIRECTORY_NAME, PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_URL } from './product.js'
 import { hostHealthProfile, isHostHealthTask } from './host-health-task.js'
+import { detectOperationLoop } from './operation-loop-detector.js'
 import { normalizeTerminalControls } from './terminal-controls.js'
 import {
   buildDashboardHostRow,
@@ -60,14 +64,15 @@ const VAULT_PASSPHRASE_GUIDANCE = 'Use at least 12 characters; prefer five or mo
 export async function runCli ({ argv = process.argv.slice(2), input, output, selfUpdate = updateIntentAiOps } = {}) {
   const cliOptions = parseArguments(argv)
   const ui = new TerminalUi({ input, output })
+  let transport
   try {
-    return await runCliSession({ cliOptions, ui, selfUpdate })
+    return await runCliSession({ cliOptions, ui, selfUpdate, onTransport: value => { transport = value } })
   } finally {
-    ui.dispose()
+    try { await transport?.closeSessions() } finally { ui.dispose() }
   }
 }
 
-async function runCliSession ({ cliOptions, ui, selfUpdate }) {
+async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
   if (cliOptions.help) {
     printHelp(ui)
     return
@@ -84,12 +89,19 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
 
   const dataRoot = path.resolve(cliOptions.dataRoot ?? await resolveDefaultDataRoot(os.homedir()))
   const settingsStore = new SettingsStore(dataRoot)
-  const baseSsh = new SystemSsh()
   const unlocked = await unlock(ui, settingsStore)
   const settings = unlocked.settings
+  const baseSsh = new SystemSsh({
+    transport: settings.ssh,
+    onDiagnostic: event => {
+      if (cliOptions.debug && event.type !== 'channel') renderDebugEvent(ui, { phase: 'ssh-transport', message: JSON.stringify(event) })
+    }
+  })
+  onTransport(baseSsh)
   ui.setControls(settings.controls)
   const directoryAliases = new Map(Object.entries(settings.servers).map(([serverId, server]) => [serverId, server.historyId ?? serverId]))
   const workspace = new ServerWorkspace(dataRoot, { directoryAliases })
+  const taskStore = new TaskStore(dataRoot, { directoryAliases })
   let passphrase = unlocked.passphrase
   let applicationDefaults = await settingsStore.decryptApplicationDefaults({ settings, passphrase })
   const hostRuntime = new Map()
@@ -118,11 +130,30 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
   let recentServerId = null
   let selectedHostId = null
 
+  if (cliOptions.console) {
+    const controller = new OperatorController({
+      dataRoot,
+      settings,
+      passphrase,
+      tasks: taskStore,
+      adminFor: async serverId => {
+        const opened = await hostSessions.open({ settings, passphrase, serverId, requireActive: true })
+        return { admin: opened.admin, close: () => opened.session.close() }
+      }
+    })
+    const consoleServer = await startOperatorConsole({ controller, actions: cliOptions.consoleActions })
+    ui.info(`Open ${consoleServer.url}`)
+    ui.info('Press Ctrl+C in this terminal to stop the local console. SSH authentication prompts appear here when needed.')
+    try { await new Promise(resolve => process.once('SIGINT', resolve)) } finally { await consoleServer.close() }
+    return
+  }
+
   for (;;) {
     const serverIds = Object.keys(settings.servers).sort()
     const clusterIds = Object.keys(settings.clusters ?? {}).sort()
     const activeHosts = serverIds.filter(serverId => settings.servers[serverId].desiredStage2 === 'active').length
     const hostRows = await buildDashboardHostRows({ context, serverIds, recentServerId })
+    const interrupted = serverIds.flatMap(serverId => taskStore.interruptedTasks(serverId).map(task => `${serverId}/#${task.id}`))
     const menuOptions = mainActionOptions({
       hostCount: serverIds.length,
       clusterCount: clusterIds.length,
@@ -139,6 +170,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
         ]),
         `Kubernetes clusters: ${clusterIds.length}`,
         `Codex: ${settings.codex.model} / ${settings.codex.reasoningEffort} reasoning`,
+        ...(interrupted.length ? [`Interrupted execution: ${interrupted.join(', ')}. Open host task history to inspect.`] : []),
         applicationDefaults.adminEmail
           ? `Default administrator email: ${applicationDefaults.adminEmail}`
           : ui.styleToken(`Default administrator email: ${FALLBACK_ADMIN_EMAIL}`, FALLBACK_ADMIN_EMAIL, 'warning')
@@ -501,7 +533,7 @@ export async function addHost ({ context, temporary = false }) {
   let session
   let hostFingerprint
   try {
-    session = await baseSsh.openInteractiveSession(connectionUrl, { authentication })
+    session = await (baseSsh.acquireSession ?? baseSsh.openInteractiveSession).call(baseSsh, connectionUrl, { authentication })
     const check = await session.ssh.execute(connectionUrl, 'echo WEBMINAI_SSH_OK')
     if (check.stdout.trim() !== 'WEBMINAI_SSH_OK') throw new Error('unexpected SSH test response')
     hostFingerprint = await session.ssh.hostFingerprint(connectionUrl)
@@ -1051,11 +1083,16 @@ async function executeMultiHostRun ({
         }
       }
     }
-    const service = new MultiHostService({ dataRoot: settingsStore.dataRoot, adminFor })
+    const controller = new OperatorController({ dataRoot: settingsStore.dataRoot, settings, passphrase, adminFor })
+    let rollout
+    if (await ui.confirm('Use a staged canary rollout?', false)) {
+      const canaryHostId = await ui.choose('Select canary host', serverIds.map(value => ({ label: value, value })))
+      rollout = { canaryHostId, batchSize: 2, failureThreshold: 1 }
+    }
     const externalVerify = effectiveCatalogId === 'nginx-static-site'
       ? appliedNginxVerifier({ settingsStore, settings, passphrase })
       : null
-    const run = await service.run({
+    const run = await controller.run({
       settings,
       passphrase,
       serverIds,
@@ -1067,6 +1104,8 @@ async function executeMultiHostRun ({
       planningHints,
       applicationDefaults,
       externalVerify,
+      rollout,
+      verifyStage: ({ stage }) => ui.confirm(`Stage ${stage.id} completed. Have you verified deployment health on ${stage.hosts.map(host => host.serverId).join(', ')} before continuing?`, false),
       onEvent: event => renderMultiHostEvent(ui, event),
       review: ({ run, hosts }) => reviewMultiHostPlans(ui, run, hosts, 'Execute')
     })
@@ -1955,11 +1994,27 @@ async function runTask ({
     admin.markTaskRunning(serverId, task.id)
     const healthTask = isHostHealthTask(effectiveCatalogId)
     const updateTask = isSystemUpdateTask(effectiveCatalogId)
+    const interactive = await ui.confirm('Enable intervention at command boundaries?', false)
+    const controller = new OperatorController({ dataRoot: admin.dataRoot, settings, passphrase, tasks: admin.tasks, adminFor: async () => admin })
     const results = await admin.execute({
       settings,
       passphrase,
       serverId,
+      taskId: task.id,
       plan,
+      onProgress: event => renderTaskProgress(ui, event),
+      beforeCommand: interactive
+        ? async item => {
+          const action = await ui.choose(`Next command: ${item.id}`, [
+            { label: 'Continue to normal approval', value: 'run' },
+            { label: 'Inspect execution and pause', value: 'pause' },
+            { label: 'Abort remaining work', value: 'abort' }
+          ])
+          if (action === 'run') return true
+          controller.control(serverId, task.id, action ?? 'pause', admin.tasks.stateVersion(serverId, task.id))
+          return false
+        }
+        : undefined,
       onResult: result => admin.appendTaskResult(serverId, task.id, (healthTask || updateTask) ? sanitizeHealthResult(result) : result),
       approve: approvalMode === 'all'
         ? async () => true
@@ -1969,6 +2024,7 @@ async function runTask ({
     const savedResults = (healthTask || updateTask) ? results.map(sanitizeHealthResult) : results
     admin.saveTaskResults(serverId, task.id, savedResults)
     renderResults(ui, savedResults)
+    if (admin.tasks.control(serverId, task.id).action !== 'run') await manageExecution({ ui, controller, serverId, taskId: task.id })
     if (isHostHealthTask(effectiveCatalogId) && results.every(result => result.status === 'completed')) {
       await renderAndSaveHostHealthReport({
         ui,
@@ -2058,14 +2114,34 @@ async function browseTaskHistory ({ ui, admin, settings, passphrase, serverId, s
   const task = admin.getTask(serverId, selected)
   renderTaskRecord(ui, task)
   const actions = taskHistoryActions(task, { catalogTask: Boolean(task.catalogId) })
+  if (task.plan) actions.unshift({ label: 'Operator controls: inspect, pause, revise and resume', value: 'operator' })
+  if (task.plan && ['running', 'partial', 'failed'].includes(task.status)) actions.unshift({ label: 'Inspect and recover interrupted execution', value: 'recover' })
   const action = await ui.choose('History action', actions)
-  if (action === 'retry' || action === 'retry-extra') {
+  if (action === 'operator') {
+    const controller = new OperatorController({ dataRoot: admin.dataRoot, settings, passphrase, tasks: admin.tasks, adminFor: async () => admin })
+    await manageExecution({ ui, controller, serverId, taskId: task.id })
+  } else if (action === 'recover') {
+    if (!admin.tasks.executionEvents(serverId, task.id).length) {
+      ui.warn('This task has no execution journal. Its remote outcome cannot be inferred safely.')
+      await ui.pause()
+      return
+    }
+    const controller = new OperatorController({ dataRoot: admin.dataRoot, settings, passphrase, tasks: admin.tasks, adminFor: async () => admin })
+    await controller.reconcile(serverId, task.id, admin.tasks.stateVersion(serverId, task.id), event => renderTaskProgress(ui, event))
+    await manageExecution({ ui, controller, serverId, taskId: task.id })
+  } else if (action === 'retry' || action === 'retry-extra') {
     let retryInstructions = null
     if (action === 'retry-extra') {
       retryInstructions = await ui.editor(`Additional corrections for retry of task #${task.id}`)
       if (!retryInstructions) return
     }
     const previousAttempts = admin.getTaskRetryHistory(serverId, task.id)
+    const loop = detectOperationLoop(previousAttempts, settings.operationLoop)
+    if (loop.detected) {
+      ui.warn(loop.reason)
+      if (!retryInstructions) retryInstructions = await ui.editor('Describe an alternative diagnostic or repair strategy')
+      if (!retryInstructions) return
+    }
     await runTask({
       ui,
       admin,
@@ -2094,6 +2170,64 @@ async function browseTaskHistory ({ ui, admin, settings, passphrase, serverId, s
   }
 }
 
+async function manageExecution ({ ui, controller, serverId, taskId }) {
+  for (;;) {
+    const view = controller.inspect(serverId, taskId)
+    ui.clear()
+    ui.banner(`Operator / ${serverId} / task #${taskId}`)
+    ui.renderTable([{ key: 'commandId', label: 'COMMAND' }, { key: 'status', label: 'STATE' }], view.commands)
+    const action = await ui.choose('Execution controls', [
+      { label: 'Inspect recorded commands and results', value: 'inspect' },
+      { label: 'Pause at next command boundary', value: 'pause' },
+      { label: 'Ask Codex a read-only question', value: 'analyze' },
+      { label: 'Revise remaining steps', value: 'propose' },
+      { label: 'Propose rollback of confirmed changes', value: 'propose-rollback' },
+      { label: 'Reconcile durable remote outcomes', value: 'reconcile' },
+      { label: 'Record independently verified uncertain outcome', value: 'resolve' },
+      { label: 'Review and resume', value: 'resume' },
+      { label: 'Abort remaining work', value: 'abort' },
+      { label: 'Review rollback', value: 'rollback' },
+      { label: 'Back', value: null }
+    ])
+    if (!action) return
+    try {
+      if (action === 'inspect') {
+        renderPlan(ui, view.task.plan)
+        renderResults(ui, view.task.results ?? [])
+        ui.output.write(`${JSON.stringify(view.revisions.map(item => ({ id: item.id, parentId: item.parentId, approved: item.approved })), null, 2)}\n`)
+      } else if (action === 'pause' || action === 'abort') controller.control(serverId, taskId, action, view.stateVersion)
+      else if (action === 'analyze') {
+        const question = await ui.editor('Read-only question')
+        if (question) ui.output.write(`${(await controller.analyze(serverId, taskId, question)).answer}\n`)
+      } else if (action === 'reconcile') await controller.reconcile(serverId, taskId, view.stateVersion, event => renderTaskProgress(ui, event))
+      else if (action === 'resolve') {
+        const uncertain = [...view.commands, ...view.rollbackCommands].filter(command => command.status === 'uncertain')
+        if (!uncertain.length) throw new Error('No uncertain commands')
+        const command = await ui.choose('Independently verified command', uncertain.map(command => ({ label: `${command.commandId} / ${command.rollbackRevision ? 'rollback' : 'deployment'}`, value: command })))
+        if (!command) continue
+        const status = await ui.choose('Verified remote outcome', [{ label: 'Completed', value: 'completed' }, { label: 'Failed or partially applied', value: 'failed' }])
+        const evidence = await ui.editor('Authoritative remote evidence, without credentials')
+        if (await ui.confirm('Attest this outcome without repeating the command?', false)) controller.resolve(serverId, taskId, view.stateVersion, command.commandId, status, evidence, command.rollbackRevision)
+      } else if (action === 'propose' || action === 'propose-rollback') {
+        const instructions = await ui.editor('Changes to remaining work')
+        if (!instructions) continue
+        const proposal = await controller.propose(serverId, taskId, instructions, view.stateVersion, action === 'propose-rollback')
+        ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
+        renderPlan(ui, proposal.proposed)
+        if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+      } else if (action === 'resume') {
+        renderPlan(ui, view.task.plan)
+        if (await ui.confirm('Execute remaining steps of this reviewed plan?', false)) await controller.resume(serverId, taskId, view.stateVersion, view.fingerprint, event => renderTaskProgress(ui, event))
+      } else if (action === 'rollback') {
+        const revision = [...view.revisions].reverse().find(item => item.approved && item.plan.operatorRollback)
+        renderCommandList(ui, revision?.plan.commands ?? view.task.plan.revertCommands, 'Reviewed rollback')
+        if (await ui.confirm('Execute these reviewed rollback commands?', false)) await controller.rollback(serverId, taskId, view.stateVersion, revision ? view.reviewedRollbackFingerprint : view.rollbackFingerprint, revision?.id)
+      }
+    } catch (error) { ui.error(error.message) }
+    await ui.pause()
+  }
+}
+
 async function runRevertTask ({ ui, admin, settings, passphrase, serverId, task }) {
   ui.clear()
   ui.banner(`Revert task #${task.id} / ${serverId}`)
@@ -2109,6 +2243,7 @@ async function runRevertTask ({ ui, admin, settings, passphrase, serverId, task 
       serverId,
       taskId: task.id,
       onResult: result => admin.appendTaskRevertResult(serverId, task.id, result),
+      onProgress: event => renderTaskProgress(ui, event),
       approve: approvalMode === 'all'
         ? async () => true
         : item => approveCommand(ui, item, 'Revert')
@@ -2432,7 +2567,7 @@ export function renderResults (ui, results, heading = 'Execution results') {
 }
 
 function renderTaskProgress (ui, event) {
-  const prefix = event.type === 'reasoning' ? 'Codex reasoning' : `Codex ${event.type}`
+  const prefix = event.phase === 'execution-recovery' ? `Recovery / ${event.commandId}` : event.type === 'reasoning' ? 'Codex reasoning' : `Codex ${event.type}`
   ui.output.write(`\n${ui.paint('muted', `[${prefix}]`)} ${event.message}\n`)
 }
 
@@ -2528,6 +2663,8 @@ function parseArguments (argv) {
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]
     if (argument === '--help' || argument === '-h') options.help = true
+    else if (argument === 'console') options.console = true
+    else if (argument === '--console-actions') options.consoleActions = true
     else if (argument === '--update') options.update = true
     else if (argument === '--debug') options.debug = true
     else if (argument === '--no-debug') options.debug = false
@@ -2541,6 +2678,7 @@ function parseArguments (argv) {
 
 function printHelp (ui) {
   ui.output.write(`Usage: ${CLI_NAME} --update\n`)
+  ui.output.write(`       ${CLI_NAME} console [--console-actions] [--data-root DIRECTORY]\n`)
   ui.output.write(`       ${CLI_NAME} [--debug|--no-debug] [--data-root DIRECTORY]\n\n`)
   ui.output.write('Interactive AI-assisted administration over system OpenSSH and Netdata.\n')
   ui.output.write(`${PRODUCT_URL}\n`)

@@ -1,6 +1,9 @@
 import { buildCandidatePlanningContext, buildCommonTask, isApplicationCommonTask } from './common-tasks.js'
 import { DeploymentScorecard } from './deployment-scorecard.js'
 import { MultiHostRunStore } from './multi-host-run-store.js'
+import { buildRolloutStages } from './canary-scheduler.js'
+import { detectOperationLoop } from './operation-loop-detector.js'
+import { OperatorController } from './operator-controller.js'
 
 export class MultiHostService {
   /** @param {import('./public-api-contracts.js').MultiHostServiceOptions} options */
@@ -38,12 +41,22 @@ export class MultiHostService {
     applicationDefaults = {},
     review = async () => true,
     externalVerify,
+    rollout,
+    verifyStage,
     onEvent = () => {}
   }) {
+    if (rollout) {
+      buildRolloutStages(serverIds.map(serverId => ({ serverId })), rollout)
+      if (!Number.isInteger(rollout.failureThreshold ?? 1) || (rollout.failureThreshold ?? 1) < 1) throw new TypeError('invalid rollout failure threshold')
+    }
+    const controller = new OperatorController({ dataRoot: this.runs.dataRoot, settings, passphrase, runs: this.runs })
+    const notify = onEvent
+    onEvent = event => { controller.record(event); notify(event) }
     const parent = retryOfRunId === null ? null : this.runs.get(retryOfRunId)
     if (parent && serverIds.some(serverId => !parent.hosts.some(host => host.serverId === serverId))) {
       throw new Error(`retry hosts must belong to multi-host run ${retryOfRunId}`)
     }
+    if (parent && serverIds.some(serverId => parent.hosts.find(host => host.serverId === serverId).status === 'completed')) throw new Error('completed hosts cannot be retried; select only unfinished hosts')
     const run = this.runs.create({ request, kind, catalogId, serverIds, retryOfRunId, retryInstructions })
     const prepared = await parallelMap(serverIds, this.concurrency, async serverId => {
       let admin
@@ -55,6 +68,8 @@ export class MultiHostService {
         const previousAttempts = previousTaskId && kind === 'ai'
           ? admin.getTaskRetryHistory(serverId, previousTaskId)
           : []
+        const loop = detectOperationLoop(previousAttempts, settings.operationLoop)
+        if (loop.detected && !retryInstructions?.trim()) throw new Error(`${loop.reason}; alternative operator instructions required`)
         const consultationContext = kind !== 'ai'
           ? []
           : previousTaskId
@@ -173,8 +188,9 @@ export class MultiHostService {
     const runnable = executable.filter(host => !noChange.includes(host))
 
     this.runs.updateRun(run.id, 'running')
-    await parallelMap(runnable, this.concurrency, async host => {
+    const executeHost = async host => {
       const { admin, serverId, taskId, plan } = host
+      if (this.runs.control(run.id).action === 'pause') return
       try {
         this.runs.updateHost(run.id, serverId, { status: 'running', error: null })
         admin.markTaskRunning(serverId, taskId)
@@ -183,8 +199,11 @@ export class MultiHostService {
           settings,
           passphrase,
           serverId,
+          taskId,
           plan,
           approve: async () => true,
+          onProgress: event => onEvent({ type: 'execution-recovery', runId: run.id, serverId, taskId, ...event }),
+          beforeCommand: () => this.runs.control(run.id).action === 'run',
           onResult: result => {
             admin.appendTaskResult(serverId, taskId, result)
             this.recordScorecard({ run, serverId, taskId, plan, result, operation: 'apply' })
@@ -192,10 +211,17 @@ export class MultiHostService {
           }
         })
         const task = admin.saveTaskResults(serverId, taskId, results)
+        if (results.some(result => result.recoveryRequired)) this.runs.setControl(run.id, 'pause', this.runs.control(run.id).version)
+        if (task.status !== 'completed' && (this.runs.control(run.id).action === 'pause' || (admin.tasks && admin.tasks.control(serverId, taskId).action !== 'run'))) {
+          this.runs.updateHost(run.id, serverId, { status: 'partial', error: null })
+          onEvent({ type: 'paused', runId: run.id, serverId, taskId, message: 'Paused at a command boundary' })
+          return
+        }
         if (task.status !== 'completed') throw new Error('one or more approved commands did not complete')
         let verification = null
         if (externalVerify) {
           verification = await externalVerify({ serverId, taskId, plan, admin })
+          if (verification?.ok !== true) throw new Error('External health verification did not explicitly pass')
           onEvent({ type: 'verified', runId: run.id, serverId, taskId, verification, message: verification.message ?? 'External verification passed' })
         }
         this.runs.updateHost(run.id, serverId, { status: 'completed', error: null, verification })
@@ -205,11 +231,30 @@ export class MultiHostService {
         this.runs.updateHost(run.id, serverId, { status: 'failed', error: errorMessage(error) })
         onEvent({ type: 'failed', runId: run.id, serverId, taskId, error, message: errorMessage(error) })
       }
-    })
+    }
+    const stages = rollout && runnable.length ? buildRolloutStages(runnable, rollout) : [{ id: 'parallel', hosts: runnable }]
+    const failureThreshold = rollout?.failureThreshold ?? 1
+    if (!Number.isInteger(failureThreshold) || failureThreshold < 1) throw new TypeError('invalid rollout failure threshold')
+    for (const stage of stages) {
+      if (this.runs.control(run.id).action === 'pause') break
+      onEvent({ type: 'rollout-stage', runId: run.id, stage: stage.id, pendingHosts: runnable.filter(host => this.runs.get(run.id).hosts.find(saved => saved.serverId === host.serverId).status === 'planned').length })
+      await parallelMap(stage.hosts, this.concurrency, executeHost)
+      const observed = this.runs.get(run.id)
+      const failures = observed.hosts.filter(host => ['failed', 'partial', 'cancelled'].includes(host.status)).length
+      const stageComplete = stage.hosts.every(host => observed.hosts.find(saved => saved.serverId === host.serverId).status === 'completed')
+      const verified = !rollout || (stageComplete && (verifyStage ? await verifyStage({ run: observed, stage }) === true : stage.hosts.every(host => observed.hosts.find(saved => saved.serverId === host.serverId).verification?.ok === true)))
+      if (rollout && (failures >= failureThreshold || !verified)) {
+        onEvent({ type: 'rollout-halted', runId: run.id, stage: stage.id, message: 'Remaining hosts await operator review' })
+        break
+      }
+    }
     return this.finishExecution(run.id)
   }
 
   async revert ({ settings, passphrase, runId, serverIds, review = async _details => true, externalVerify, onEvent = _event => {} }) {
+    const controller = new OperatorController({ dataRoot: this.runs.dataRoot, settings, passphrase, runs: this.runs })
+    const notify = onEvent
+    onEvent = event => { controller.record(event); notify(event) }
     let run = this.runs.get(runId)
     const selected = serverIds ?? run.hosts.filter(host => host.taskId && !['reverted', 'cancelled'].includes(host.status)).map(host => host.serverId)
     const hosts = await parallelMap(selected, this.concurrency, async serverId => {

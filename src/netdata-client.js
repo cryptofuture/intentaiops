@@ -270,7 +270,7 @@ export class NetdataClient {
     }
   }
 
-  async runCommand (command, { timeoutSeconds = 30 } = {}) {
+  async runCommand (command, { timeoutSeconds = 30, onRecovery } = {}) {
     if (typeof command !== 'string' || command.length === 0 || command.length > 32768) {
       throw new TypeError('command must be a non-empty string no longer than 32768 characters')
     }
@@ -282,19 +282,20 @@ export class NetdataClient {
     const result = await this.postJson(
       `/api/v3/function?function=webminai%3Acommand&timeout=${timeoutSeconds}`,
       body,
-      (timeoutSeconds + 5) * 1000
+      (timeoutSeconds + 5) * 1000,
+      onRecovery
     )
     return decodeCommandOutput(result)
   }
 
-  async startJob (command, { timeoutSeconds = 3600 } = {}) {
+  async startJob (command, { timeoutSeconds = 3600, onRecovery } = {}) {
     validateCommand(command)
     validateJobTimeout(timeoutSeconds)
     const request = [
       `timeoutSeconds=${timeoutSeconds}`,
       `command=${Buffer.from(command, 'utf8').toString('base64url')}`
     ].join('\n')
-    const result = await this.signedJobRequest('job_start', request)
+    const result = await this.signedJobRequest('job_start', request, onRecovery)
     if (result?.status !== 'accepted' || result?.state !== 'running') {
       throw new Error('Netdata job start returned an invalid response')
     }
@@ -302,9 +303,9 @@ export class NetdataClient {
     return result
   }
 
-  async jobStatus (jobId) {
+  async jobStatus (jobId, { onRecovery } = {}) {
     validateJobId(jobId)
-    const result = decodeCommandOutput(await this.signedJobRequest('job_status', jobId))
+    const result = decodeCommandOutput(await this.signedJobRequest('job_status', jobId, onRecovery))
     if (!JOB_STATES.has(result?.state) || result.jobId !== jobId) {
       throw new Error('Netdata job status returned an invalid response')
     }
@@ -329,7 +330,10 @@ export class NetdataClient {
     timeoutSeconds = 3600,
     pollIntervalMs = 1000,
     statusErrorAttempts = 120,
+    statusRecoveryTimeoutMs = 120000,
     signal,
+    retainResult = false,
+    onStarted = async (_status) => {},
     onStatus = (_status) => {}
   } = {}) {
     if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 100 || pollIntervalMs > 10000) {
@@ -342,11 +346,15 @@ export class NetdataClient {
       throw new TypeError('job status error attempts must be between 0 and 120')
     }
     if (typeof onStatus !== 'function') throw new TypeError('job status callback must be a function')
+    if (!Number.isInteger(statusRecoveryTimeoutMs) || statusRecoveryTimeoutMs < 1 || statusRecoveryTimeoutMs > 300000) throw new TypeError('job status recovery timeout must be between 1 and 300000 milliseconds')
 
-    const started = await this.startJob(command, { timeoutSeconds })
+    const started = await this.startJob(command, { timeoutSeconds, onRecovery: progress => onStatus(progress) })
     const jobId = started.jobId
+    await onStarted(started)
     let cancellationRequested = false
     let consecutiveStatusErrors = 0
+    let recoveryStarted
+    let recoveryRequired = false
     while (true) {
       if (signal?.aborted && !cancellationRequested) {
         await this.cancelJob(jobId)
@@ -354,17 +362,30 @@ export class NetdataClient {
       }
       let status
       try {
-        status = await this.jobStatus(jobId)
+        status = await this.jobStatus(jobId, {
+          onRecovery: async progress => {
+            recoveryRequired = true
+            recoveryStarted ??= Date.now()
+            await onStatus({ jobId, ...progress })
+          }
+        })
         consecutiveStatusErrors = 0
+        recoveryStarted = undefined
       } catch (error) {
         consecutiveStatusErrors++
-        if (consecutiveStatusErrors > statusErrorAttempts || !isRecoverableJobStatusError(error)) throw error
+        recoveryRequired = true
+        recoveryStarted ??= Date.now()
+        if (consecutiveStatusErrors > statusErrorAttempts || Date.now() - recoveryStarted >= statusRecoveryTimeoutMs || !isRecoverableJobStatusError(error)) {
+          await onStatus({ jobId, state: 'operator_review_required' })
+          throw error
+        }
         await onStatus({ jobId, state: 'temporarily_unavailable', attempt: consecutiveStatusErrors })
         await wait(pollIntervalMs)
         continue
       }
       await onStatus(status)
       if (TERMINAL_JOB_STATES.has(status.state)) {
+        if (retainResult || recoveryRequired) return { ...status, cleaned: false, ...(recoveryRequired ? { recoveryRequired: true } : {}) }
         try {
           await this.cleanupJob(jobId)
           return { ...status, cleaned: true }
@@ -376,12 +397,13 @@ export class NetdataClient {
     }
   }
 
-  async signedJobRequest (functionName, request) {
+  async signedJobRequest (functionName, request, onRecovery) {
     const body = createSignedCommand(request, this.actionKey)
     return this.postJson(
       `/api/v3/function?function=webminai%3A${functionName}&timeout=10`,
       body,
-      15000
+      15000,
+      onRecovery
     )
   }
 
@@ -436,13 +458,14 @@ export class NetdataClient {
     }
   }
 
-  async postJson (path, body, timeoutMs = 35000) {
+  async postJson (path, body, timeoutMs = 35000, onRecovery) {
     validateApiPath(path)
     const command = curlCommand('POST', path)
     try {
       const result = await this.ssh.execute(this.connectionUrl, command, {
         input: `${JSON.stringify(body)}\n`,
-        timeoutMs
+        timeoutMs,
+        ...(onRecovery ? { onRecovery } : {})
       })
       return parseJsonResponse(result.stdout)
     } catch (error) {
@@ -580,6 +603,8 @@ function isTransientNetdataError (error) {
 }
 
 function isRecoverableJobStatusError (error) {
+  if (error?.recoveryExhausted || error?.cause?.recoveryExhausted) return false
+  if (error?.reconnected || error?.cause?.reconnected) return true
   const evidence = [
     error?.message,
     error?.cause?.message,

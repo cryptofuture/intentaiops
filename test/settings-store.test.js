@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { normalizeSshTransport } from '../src/ssh-session-manager.js'
 import { argon2Available, createKdfParameters } from '../src/crypto-vault.js'
 import { SettingsStore } from '../src/settings-store.js'
 import { TaskStore } from '../src/task-store.js'
@@ -387,4 +388,20 @@ test('settings store rejects unsafe server ids and unsupported SSH passwords', a
     serverId: 'safe',
     connectionUrl: 'ssh://user:password@example.test'
   }), /passwords are not supported/)
+})
+test('SSH transport settings preserve defaults and reject invalid options', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'webminai-settings-test-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new SettingsStore(root)
+  const settings = await store.initialize()
+  assert.deepEqual(settings.ssh, { multiplexing: true, idleTimeoutSeconds: 600, compression: false })
+  assert.deepEqual(normalizeSshTransport(undefined), settings.ssh)
+  assert.deepEqual(normalizeSshTransport({ compression: true }), { ...settings.ssh, compression: true })
+  for (const invalid of [{ multiplexing: 'yes' }, { compression: 1 }, { idleTimeoutSeconds: -1 }, { idleTimeoutSeconds: 1.5 }]) assert.throws(() => normalizeSshTransport(invalid), /invalid SSH/)
+  delete settings.ssh
+  await store.save(settings)
+  assert.deepEqual((await store.load()).ssh, normalizeSshTransport())
+  settings.ssh = { multiplexing: false, compression: true, idleTimeoutSeconds: 60 }
+  await store.save(settings)
+  assert.deepEqual((await store.load()).ssh, settings.ssh)
 })

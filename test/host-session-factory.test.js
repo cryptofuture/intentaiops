@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { HostSessionFactory } from '../src/host-session-factory.js'
+import { SshSessionManager } from '../src/ssh-session-manager.js'
 
 function dependencies ({ savedCredential = null, fingerprintError = null } = {}) {
   const calls = []
@@ -126,4 +127,24 @@ test('host runtime dependency direction stays behind public factory and admin me
   assert.match(cli, /function runConnectedHostSession\b/u)
   assert.doesNotMatch(multiHost, /admin\.stage2|admin\.ssh|admin\.workspace/u)
   assert.match(multiHost, /admin\.capabilities/u)
+})
+
+test('separate host factories use the same application pool without closing another lease', async () => {
+  const setup = dependencies()
+  let opens = 0
+  const baseSsh = { async openInteractiveSession () { opens++; return setup.session } }
+  const pool = new SshSessionManager({ ssh: baseSsh })
+  baseSsh.acquireSession = pool.acquire.bind(pool)
+  const factory = () => new HostSessionFactory({ dataRoot: '/tmp/webminai-test', settingsStore: setup.settingsStore, workspace: setup.workspace, baseSsh })
+  const options = { settings: { servers: { prod: {} } }, passphrase: 'test', serverId: 'prod' }
+  try {
+    const [a, b] = await Promise.all([factory().open(options), factory().open(options)])
+    assert.equal(opens, 1)
+    await a.session.close()
+    assert.equal(setup.calls.includes('close'), false)
+    await b.ssh.hostFingerprint('ssh://root@example.test')
+    await b.session.close()
+    assert.equal(setup.calls.includes('close'), false)
+  } finally { await pool.close() }
+  assert.equal(setup.calls.filter(call => call === 'close').length, 1)
 })

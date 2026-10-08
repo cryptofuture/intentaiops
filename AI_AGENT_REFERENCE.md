@@ -664,6 +664,18 @@ For each authenticated command, the plugin clears supplementary groups, establis
 
 This is intentionally a root administration boundary, not a restricted monitoring collector: a valid approved command can make arbitrary host changes. A native-plugin vulnerability would therefore have root impact. Loopback-only API access, system SSH transport, per-host keys, short-lived signed requests, deterministic plan validation, and interactive approval are all part of the required trust model.
 
+## SSH connection reuse
+
+Intent AI Ops shares an authenticated OpenSSH connection across compatible host operations, including SSH, SCP, inventory, and Stage 2. Each operation gets its own channel. Closing one workflow does not disconnect another; unused connections close after 10 minutes, and owned connections close when the CLI exits.
+
+Optional `ssh` settings in your existing `settings.json`:
+
+```json
+"ssh": { "multiplexing": true, "idleTimeoutSeconds": 600, "compression": false }
+```
+
+Existing settings work unchanged. Compression is independent and off by default. Unsupported clients, including Windows clients, use ordinary SSH. A dropped connection never automatically repeats a command. Use `--debug` for transport counters. See [transport details and opt-in benchmarks](docs/ssh-connection-reuse.md).
+
 ## Data layout
 
 ```text

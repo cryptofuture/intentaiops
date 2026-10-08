@@ -60,3 +60,7 @@ export { buildWindowsJellyfinComposeTask } from './windows-jellyfin-compose-task
 export { buildWindowsHomeAssistantComposeTask } from './windows-home-assistant-compose-task.js'
 export { SshCommandError, SystemSsh } from './system-ssh.js'
 export { TaskStore } from './task-store.js'
+export { SshSessionManager, normalizeSshTransport } from './ssh-session-manager.js'
+export { OperatorController, planDifferences } from './operator-controller.js'
+export { startOperatorConsole } from './operator-console.js'
+export { detectOperationLoop } from './operation-loop-detector.js'

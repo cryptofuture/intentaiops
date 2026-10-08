@@ -27,6 +27,7 @@ try {
   const help = run(executable, ['--help'], temporary)
   assert.match(help.stdout, /^Usage: intentaiops/mu)
   assert.match(help.stdout, /https:\/\/intentaiops\.top/u)
+  assert.match(help.stdout, /console \[--console-actions\]/u)
 
   const modules = run(npm, ['root', '--global', '--prefix', prefix], temporary).stdout.trim()
   const packageRoot = path.join(modules, 'intent-ai-ops')
@@ -37,6 +38,7 @@ try {
   assert.equal(installedPackage.scripts?.['verify:sqlite'], 'node scripts/install-better-sqlite3.js')
   assert.equal(existsSync(path.join(packageRoot, 'dist', 'intent-ai-ops.tgz')), false)
   assert.equal(existsSync(path.join(packageRoot, 'dist', 'intent-ai-ops.tgz.sha256')), false)
+  for (const asset of ['operator-controller.js', 'operator-console.js', 'operator-console.html', 'operator-console-browser.js']) assert.equal(existsSync(path.join(packageRoot, 'src', asset)), true, asset)
   for (const artifact of [
     'webminai.plugin',
     'webminai.plugin-freebsd-amd64',

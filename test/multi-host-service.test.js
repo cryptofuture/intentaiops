@@ -201,14 +201,14 @@ function fakeAdmin (root, serverId, tracker) {
       await new Promise(resolve => setTimeout(resolve, 20))
       return [{ id: 'revert', status: 'completed' }]
     },
-    async execute () {
+    async execute ({ plan }) {
       tracker.active++
       tracker.maximum = Math.max(tracker.maximum, tracker.active)
       tracker.executions[serverId] = (tracker.executions[serverId] ?? 0) + 1
       try {
         await new Promise(resolve => setTimeout(resolve, 30))
         if (tracker.failOnce?.delete(serverId)) throw new Error('simulated host failure')
-        return [{ id: 'apply', status: 'completed' }]
+        return plan.commands.map(command => ({ id: command.id, status: 'completed' }))
       } finally {
         tracker.active--
       }

@@ -210,7 +210,8 @@ test('durable job polling survives a short Netdata plugin restart', async () => 
   })
   assert.deepEqual(states, ['temporarily_unavailable', 'succeeded'])
   assert.equal(result.stdout, 'resumed')
-  assert.equal(result.cleaned, true)
+  assert.equal(result.cleaned, false)
+  assert.equal(result.recoveryRequired, true)
 })
 
 test('durable job polling recovers from an SSH transport timeout', async () => {
@@ -232,6 +233,54 @@ test('durable job polling recovers from an SSH transport timeout', async () => {
   assert.equal(result.state, 'succeeded')
   assert.equal(result.stdout, 'resumed')
   assert.equal(polls, 2)
+})
+
+test('job recovery forwards progress, checks the same job, and retains its result', async () => {
+  const jobId = '56'.repeat(16)
+  const calls = []
+  const states = []
+  let polls = 0
+  const client = new NetdataClient({
+    connectionUrl: 'ssh://host',
+    actionKey: ACTION_KEY,
+    ssh: {
+      execute: async (_url, command, options) => {
+        calls.push(command)
+        if (command.includes('job_start')) return { stdout: JSON.stringify({ status: 'accepted', state: 'running', jobId }) }
+        assert.ok(command.includes('job_status'))
+        if (++polls === 1) {
+          await options.onRecovery({ state: 'reconnecting', attempt: 1, attempts: 3 })
+          await options.onRecovery({ state: 'reconnected', attempt: 1 })
+          const cause = new Error('SSH command failed with exit code 255')
+          cause.reconnected = true
+          throw cause
+        }
+        return { stdout: JSON.stringify({ status: 'ok', state: polls === 2 ? 'running' : 'succeeded', jobId, exitCode: polls === 2 ? null : 0 }) }
+      }
+    }
+  })
+  const result = await client.runJob('change-once', { pollIntervalMs: 100, onStatus: event => states.push(event.state) })
+  assert.equal(calls.filter(command => command.includes('job_start')).length, 1)
+  assert.deepEqual(states, ['reconnecting', 'reconnected', 'temporarily_unavailable', 'running', 'succeeded'])
+  assert.equal(result.recoveryRequired, true)
+  assert.equal(result.cleaned, false)
+})
+
+test('exhausted SSH recovery stops polling and requests operator review', async () => {
+  const client = new NetdataClient({ ssh: {}, connectionUrl: 'ssh://host', actionKey: ACTION_KEY })
+  const jobId = '78'.repeat(16)
+  let polls = 0
+  const states = []
+  client.startJob = async () => ({ status: 'accepted', state: 'running', jobId })
+  client.jobStatus = async () => {
+    polls++
+    const cause = new Error('connection reset')
+    cause.recoveryExhausted = true
+    throw new Error('Netdata status unavailable', { cause })
+  }
+  await assert.rejects(client.runJob('change-once', { onStatus: event => states.push(event.state) }), /status unavailable/u)
+  assert.equal(polls, 1)
+  assert.deepEqual(states, ['operator_review_required'])
 })
 
 test('Docker execution inventory detects Compose and a containerized host', async () => {

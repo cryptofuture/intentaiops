@@ -27,6 +27,8 @@
     "schemas",
     "scripts/install-better-sqlite3.js",
     "src",
+    "docs/execution-milestones.md",
+    "docs/ssh-connection-reuse.md",
     "README.md"
   ],
   "engines": {
@@ -41,6 +43,8 @@
     "build:checksums": "sh scripts/dist-checksums.sh write",
     "build:package": "node scripts/build-package-tarball.js",
     "benchmark:vault-kdf": "node scripts/benchmark-vault-kdf.js",
+    "benchmark:ssh": "node scripts/benchmark-ssh.js",
+    "test:ssh": "node --test test/system-ssh.test.js test/host-session-factory.test.js test/ssh-session-manager.test.js test/ssh-integration.test.js",
     "check:checksums": "sh scripts/dist-checksums.sh verify",
     "check:plugin:freebsd": "sh scripts/build-native-plugin.sh freebsd-compat",
     "cli": "node bin/intentaiops.js",
