@@ -8,6 +8,70 @@ import test from 'node:test'
 import { buildCommonTask } from '../src/common-tasks.js'
 import { LinuxHostContextService } from '../src/linux-host-context.js'
 import { mariadbDataPreflight, wordpressArtifactCommand } from '../src/linux-php-foundation.js'
+import { n8nRelease } from '../src/n8n-task.js'
+import { moodleRelease } from '../src/moodle-task.js'
+
+test('Moodle retries truncated acquisition within a bound and never publishes a failed digest', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-moodle-acquire-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'ubuntu', VERSION_ID: '24.04' }, commands: { apt: true } }
+    })
+    const built = buildCommonTask('moodle-linux', 312, { platform: 'linux', linuxContext: context, docker: { preferred: false } })
+    const digest = createHash('sha256').update('verified fixture').digest('hex')
+    const command = built.plan.commands.find(c => c.id === 'verify-artifacts').command.replaceAll('/var/lib/webminai/webminai-moodle-18106', root).replaceAll(moodleRelease().sha256, digest).replaceAll('-o root -g root ', '')
+    const mock = `calls=0; curl () { calls=$((calls+1)); printf x >> '${root}/calls'; if [ "$calls" -eq 1 ]; then printf truncated; else printf 'verified fixture'; fi > '${root}/moodle.tar.gz.tmp'; }; `
+    const result = spawnSync('/bin/sh', ['-c', mock + command], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(readFileSync(path.join(root, 'calls'), 'utf8'), 'xx')
+    assert.equal(readFileSync(path.join(root, 'moodle.tar.gz'), 'utf8'), 'verified fixture')
+    assert.equal(spawnSync('/bin/sh', ['-c', 'curl () { return 9; }; ' + command]).status, 0)
+    writeFileSync(path.join(root, 'moodle.tar.gz'), 'corrupt')
+    const failed = spawnSync('/bin/sh', ['-c', `curl () { printf x >> '${root}/failures'; printf corrupt > '${root}/moodle.tar.gz.tmp'; }; ` + command], { encoding: 'utf8' })
+    assert.equal(failed.status, 1)
+    assert.equal(readFileSync(path.join(root, 'failures'), 'utf8'), 'xxx')
+    assert.match(failed.stderr, /ARTIFACT_DOWNLOAD_FAILED/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('n8n acquisition never trusts an executable left by an interrupted npm install', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-n8n-acquire-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'ubuntu', VERSION_ID: '24.04' }, commands: { apt: true } }
+    })
+    const app = path.join(root, 'application')
+    mkdirSync(path.join(app, 'node_modules/.bin'), { recursive: true })
+    writeFileSync(path.join(app, 'node_modules/stale'), 'partial')
+    writeFileSync(path.join(app, 'package-lock.json'), '{partial')
+    writeFileSync(path.join(app, 'node_modules/.bin/n8n'), '#!/bin/sh\nexit 42\n', { mode: 0o755 })
+    const fixture = path.join(root, 'valid-n8n')
+    writeFileSync(fixture, `#!/bin/sh\nprintf '%s\\n' '${n8nRelease().version}'\n`, { mode: 0o755 })
+    const built = buildCommonTask('n8n-linux', 311, { platform: 'linux', linuxContext: context, docker: { preferred: false } })
+    const command = built.plan.commands.find(c => c.id === 'install-n8n').command.replaceAll('/opt/webminai-n8n-18109', app).replaceAll('/var/lib/webminai/task-state/311-n8n-linux', path.join(root, 'state')).replaceAll('-o root -g root ', '')
+    assert.match(command, /install --prefer-offline --maxsockets=4 --omit=dev/)
+    const mocks = `node () { test -f '${root}/binding-ready'; }; npm () { case "$1" in install-scripts) if [ "$2" = --help ]; then return 0; fi; printf '%s' "$3" > '${root}/approved'; return 0;; rebuild) : > '${root}/binding-ready'; return 0;; esac; [ ! -e '${app}/package-lock.json' ] || return 8; printf called >> '${root}/calls'; mkdir -p '${app}/node_modules/.bin'; cp '${fixture}' '${app}/node_modules/.bin/n8n'; }; `
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = spawnSync('/bin/sh', ['-c', mocks + command], { encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+    }
+    assert.equal(existsSync(path.join(app, 'node_modules/stale')), false)
+    assert.equal(readFileSync(path.join(root, 'calls'), 'utf8'), 'called')
+    assert.equal(readFileSync(path.join(root, 'approved'), 'utf8'), 'sqlite3')
+    assert.equal(existsSync(path.join(app, '.webminai-npm-complete')), true)
+    rmSync(path.join(app, '.webminai-npm-complete'))
+    rmSync(path.join(root, 'binding-ready'))
+    rmSync(path.join(root, 'approved'))
+    assert.equal(spawnSync('/bin/sh', ['-c', mocks.replace('then return 0;', 'then return 1;') + command]).status, 0)
+    assert.equal(existsSync(path.join(root, 'approved')), false)
+    assert.equal(existsSync(path.join(root, 'binding-ready')), true)
+    rmSync(path.join(app, '.webminai-npm-complete'))
+    assert.equal(spawnSync('/bin/sh', ['-c', 'npm () { return 9; }; ' + command]).status, 9)
+    assert.equal(existsSync(path.join(app, '.webminai-npm-complete')), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 test('repeating Oracle htop rollback preserves the pre-existing repository after task state is removed', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'intent-epel-'))
@@ -157,6 +221,17 @@ test('Ghost rejects existing MariaDB data before any MySQL package changes', asy
       execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'ubuntu', VERSION_ID: '24.04' }, commands: { apt: true } }
     })
     const built = buildCommonTask('ghost-linux', 309, { platform: 'linux', linuxContext: context, docker: { preferred: false } })
+    assert.match(built.plan.commands.find(c => c.id === 'install-ghost').command, /user-created/)
+    const state = '/var/lib/webminai/task-state/309-ghost-linux'
+    const present = path.join(root, 'task-state')
+    mkdirSync(present)
+    const restore = built.plan.revertCommands.find(c => c.id === 'restore-stack').command.replaceAll(state, present)
+    const mocks = `rm () { return 0; }; cp () { return 0; }; systemctl () { return 0; }; id () { return 0; }; userdel () { printf removed > '${root}/user-removed'; }; `
+    assert.equal(spawnSync('/bin/sh', ['-c', mocks + restore]).status, 0)
+    assert.equal(existsSync(path.join(root, 'user-removed')), false)
+    writeFileSync(path.join(present, 'user-created'), '')
+    assert.equal(spawnSync('/bin/sh', ['-c', mocks + restore]).status, 0)
+    assert.equal(existsSync(path.join(root, 'user-removed')), true)
     const command = built.plan.commands.find(c => c.id === 'install-stack').command
     const preflight = command.slice(0, command.indexOf('; export DEBIAN_FRONTEND=')).replaceAll('/var/lib/mysql', root)
     assert.match(preflight, /operator-reviewed migration/)
@@ -172,6 +247,25 @@ test('Ghost rejects existing MariaDB data before any MySQL package changes', asy
     writeFileSync(path.join(root, 'aria_log_control'), 'preserved')
     assert.equal(spawnSync('/bin/sh', ['-c', preflight]).status, 1)
     assert.equal(readFileSync(path.join(root, 'aria_log_control'), 'utf8'), 'preserved')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Alpine CLI installation owns only packages absent from its captured baseline', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-alpine-install-'))
+  try {
+    const built = buildCommonTask('intent-ai-ops-linux', 310, { platform: 'linux', linuxContext: { identity: { id: 'alpine' } } })
+    assert.match(built.plan.commands[0].command, /apk info -e 'nodejs'/)
+    assert.match(built.plan.commands[1].command, /apk add --no-cache nodejs npm/)
+    const state = '/var/lib/webminai/tasks/310/intent-ai-ops-install'
+    writeFileSync(path.join(root, 'owns-root'), '')
+    writeFileSync(path.join(root, 'pkg-nodejs.existed'), '')
+    const command = built.plan.revertCommands[0].command.replaceAll(state, root)
+    const result = spawnSync('/bin/sh', ['-c', `rm () { return 0; }; apk () { printf '%s\\n' "$*" >> '${root}/removed'; }; ` + command], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(readFileSync(path.join(root, 'removed'), 'utf8'), 'del npm\n')
+    const installer = readFileSync(new URL('../scripts/install.sh', import.meta.url), 'utf8')
+    assert.equal(spawnSync('/bin/sh', ['-n'], { input: installer }).status, 0)
+    assert.match(installer, /\/etc\/alpine-release/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

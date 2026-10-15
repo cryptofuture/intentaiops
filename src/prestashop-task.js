@@ -77,12 +77,15 @@ function configureNativePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'install-packages', nativePackagesCommand(built.plan.commands.find(item => item.id === 'install-packages').command, state, linuxContext, profile))
   replaceCommand(built.plan, 'verify-artifacts', artifactCommand(profile), 'Acquire and verify the exact official PrestaShop distribution')
   renameCommand(built.plan, 'extract-application', 'extract-prestashop', extractCommand(profile), 'Extract the nested verified PrestaShop distribution with reviewed ownership and permissions')
-  renameCommand(built.plan, 'install-application', 'install-prestashop', installCommand(profile, state), 'Initialize the PrestaShop database using protected credential-file indirection inside PHP')
+  renameCommand(built.plan, 'install-application', 'install-prestashop', installCommand(profile, state), 'Initialize the PrestaShop database with protected credentials and a bounded 120-second language download timeout')
+  const install = built.plan.commands.find(item => item.id === 'install-prestashop')
+  install.executionMode = 'job'
+  install.timeoutMs = 1800000
   renameCommand(built.plan, 'verify-application', 'verify-prestashop')
   insertSequentialCommands(built.plan, 'install-prestashop', 'verify-prestashop', nativeInstallSteps(profile, state))
   replaceCommand(built.plan, 'verify-prestashop', nativeVerifyCommand(profile), 'Verify PrestaShop configuration, database state, installer removal, socket, and external marker')
   enhanceNativeModuleRestore(built.plan, state, linuxContext)
-  built.plan.modifiedFiles.push(`${ARTIFACTS}/prestashop.zip`, `${state}/installer-argv.php`, `${WEB_ROOT}/app/config/parameters.php`)
+  built.plan.modifiedFiles.push(`${ARTIFACTS}/prestashop.zip`, `${state}/installer-argv.php`, `${WEB_ROOT}/app/config/parameters.php`, `${WEB_ROOT}/classes/Language.php`)
   built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/app/config/parameters.php`)} && test ! -d ${quote(`${WEB_ROOT}/install`)} && test -S ${quote(profile.phpFpmListener)} && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
   built.verifyReverted = `test ! -e ${quote(WEB_ROOT)} && test ! -e ${quote(ARTIFACTS)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)}`
 }
@@ -93,7 +96,7 @@ function configureComposePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'pull-images', pullCommand(state), 'Pull and record the pinned official PrestaShop PHP-FPM, nginx, and MariaDB images')
   replaceCommand(built.plan, 'start-compose', startCommand(), 'Start MariaDB, PrestaShop PHP-FPM, and nginx and wait through bounded readiness')
   insertComposeSwapFoundation(built.plan, state)
-  renameCommand(built.plan, 'initialize-application', 'initialize-prestashop', composeInstallStepCommand(linuxContext, 'database'), 'Initialize the PrestaShop database inside the container using protected credential-file indirection')
+  renameCommand(built.plan, 'initialize-application', 'initialize-prestashop', composeInstallStepCommand(linuxContext, 'database'), 'Initialize the PrestaShop database inside the container with protected credentials and a bounded 120-second language download timeout')
   insertSequentialCommands(built.plan, 'initialize-prestashop', 'verify-compose', composeInstallSteps(linuxContext))
   replaceCommand(built.plan, 'verify-compose', composeVerifyCommand(linuxContext), 'Verify Compose health, Unix socket, protected configuration, and the PrestaShop marker')
   built.plan.modifiedFiles.push(`${SERVICE_ROOT}/compose.yaml`, `${SERVICE_ROOT}/php-fpm.conf`, `${SERVICE_ROOT}/nginx.conf`, `${SERVICE_ROOT}/installer-argv.php`, SWAP_FILE)
@@ -489,6 +492,12 @@ function nginxConfig () {
 function installerBootstrapLines () {
   return [
     '<?php',
+    "$languageFile = dirname(dirname($argv[0])) . '/classes/Language.php';",
+    '$languageSource = file_get_contents($languageFile);',
+    "if (!is_string($languageSource)) { fwrite(STDERR, 'language timeout source missing' . PHP_EOL); exit(1); }",
+    "$languageSource = str_replace('public const PACK_DOWNLOAD_TIMEOUT = 20;', 'public const PACK_DOWNLOAD_TIMEOUT = 120;', $languageSource, $changed);",
+    "if ($changed > 1 || substr_count($languageSource, 'public const PACK_DOWNLOAD_TIMEOUT = 120;') !== 1) { fwrite(STDERR, 'unsupported language timeout source' . PHP_EOL); exit(1); }",
+    "if ($changed === 1 && file_put_contents($languageFile, $languageSource) === false) { fwrite(STDERR, 'language timeout update failed' . PHP_EOL); exit(1); }",
     "$files = ['db_password' => getenv('WEBMINAI_DB_PASS_FILE'), 'password' => getenv('WEBMINAI_ADMIN_PASSWORD_FILE')];",
     'foreach ($files as $option => $path) {',
     "    if (!$path || !is_file($path)) { fwrite(STDERR, 'missing protected credential file' . PHP_EOL); exit(1); }",

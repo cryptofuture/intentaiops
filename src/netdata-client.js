@@ -309,6 +309,8 @@ export class NetdataClient {
     if (!JOB_STATES.has(result?.state) || result.jobId !== jobId) {
       throw new Error('Netdata job status returned an invalid response')
     }
+    const orphaned = result.state === 'failed' && result.exitCode === 125 && result.stderr?.trim() === 'detached job controller exited before recording a result'
+    if (result.state === 'unknown' || orphaned) return { ...result, state: 'unknown', exitCode: null, recoveryRequired: true }
     return result
   }
 
@@ -384,6 +386,7 @@ export class NetdataClient {
         continue
       }
       await onStatus(status)
+      if (status.state === 'unknown') return { ...status, cleaned: false }
       if (TERMINAL_JOB_STATES.has(status.state)) {
         if (retainResult || recoveryRequired) return { ...status, cleaned: false, ...(recoveryRequired ? { recoveryRequired: true } : {}) }
         try {
@@ -567,7 +570,7 @@ function decodeCommandOutput (result) {
   }
 }
 
-const JOB_STATES = new Set(['running', 'cancelling', 'succeeded', 'failed', 'timed_out', 'cancelled', 'completed', 'cleaned'])
+const JOB_STATES = new Set(['running', 'cancelling', 'succeeded', 'failed', 'timed_out', 'cancelled', 'completed', 'cleaned', 'unknown'])
 const TERMINAL_JOB_STATES = new Set(['succeeded', 'failed', 'timed_out', 'cancelled'])
 
 function validateCommand (command) {

@@ -765,6 +765,8 @@ test('verified PrestaShop task resolves nginx and PHP-FPM socket routes without 
     assert.equal(built.plan.applicationDelta.application.id, 'prestashop')
     const serialized = JSON.stringify(built.plan)
     assert.match(serialized, /WEBMINAI_PRESTASHOP_OK/u)
+    assert.match(serialized, /public const PACK_DOWNLOAD_TIMEOUT = 120;/u)
+    assert.match(serialized, /unsupported language timeout source/u)
     assert.match(serialized, /67babe2beb58ea242ca09f2942a301e5e09567c0e04f88525b2cfb6f671a5eeb/u)
     assert.doesNotMatch(serialized, /WEBMINAI_DRUPAL_OK/u)
     assert.doesNotMatch(serialized, /password: [0-9A-Fa-f]{16,}/u)
@@ -790,6 +792,8 @@ test('verified PrestaShop task resolves nginx and PHP-FPM socket routes without 
       assert.match(built.plan.revertCommands.find(item => item.id === 'remove-prestashop-swap').command, /swapoff/u)
     } else {
       const install = built.plan.commands.find(item => item.id === 'install-prestashop').command
+      assert.equal(built.plan.commands.find(item => item.id === 'install-prestashop').executionMode, 'job')
+      assert.equal(built.plan.commands.find(item => item.id === 'install-prestashop').timeoutMs, 1800000)
       assert.match(built.plan.commands.find(item => item.id === 'install-packages').command, /module enable php:8\.3/u)
       assert.match(built.plan.revertCommands.find(item => item.id === 'restore-packages-services').command, /module reset php/u)
       assert.match(install, /auto_prepend_file/u)

@@ -35,7 +35,7 @@ function buildNativeTask (taskId, context) {
   const commands = [
     item('capture-baseline', 'baseline', nativeBaseline(state, profile), 'Capture package, repository, nginx, and task-owned path state exactly once'),
     item('install-runtime', 'packages', nativePackages(state, context, profile), `Install the reviewed ${profile.nodeDescription}, nginx, and required utilities`, ['capture-baseline'], 1800000, 'job'),
-    item('install-n8n', 'acquire', nativeNpmInstall(state, profile), `Install n8n ${VERSION} into an isolated application prefix`, ['install-runtime'], 3600000, 'job'),
+    item('install-n8n', 'acquire', nativeNpmInstall(state), `Install n8n ${VERSION} into an isolated application prefix`, ['install-runtime'], 3600000, 'job'),
     item('generate-credentials', 'secrets', nativeCredentials(), 'Generate the n8n encryption key on-host without emitting it', ['capture-baseline']),
     item('configure-services', 'configure', nativeConfigure(profile, state), 'Create the locked service account, n8n service, and isolated nginx marker vhost', ['install-n8n', 'generate-credentials']),
     item('verify-n8n', 'verify', nativeVerify(profile), 'Verify n8n health, SQLite persistence, and the nginx marker', ['configure-services'], 900000, 'job')
@@ -202,17 +202,17 @@ function rpmPackages () {
   ])
 }
 
-function nativeNpmInstall (state, profile) {
-  const ensureSqlite = profile.family === 'arch'
-    ? `cd ${quote(APP_ROOT)}; if ! node -e ${quote("require('sqlite3')")}; then npm install-scripts approve sqlite3; npm_config_cache=${quote(`${state}/npm-cache`)} npm rebuild sqlite3 --loglevel=error; node -e ${quote("require('sqlite3')")}; fi`
-    : `cd ${quote(APP_ROOT)}; node -e ${quote("require('sqlite3')")}`
+function nativeNpmInstall (state) {
+  const ensureSqlite = `cd ${quote(APP_ROOT)}; if ! node -e ${quote("require('sqlite3')")}; then if npm install-scripts --help >/dev/null 2>&1; then npm install-scripts approve sqlite3; fi; npm_config_cache=${quote(`${state}/npm-cache`)} npm rebuild sqlite3 --loglevel=error; node -e ${quote("require('sqlite3')")}; fi`
   return join([
     'set -eu', 'umask 022', `install -d -o root -g root -m 0755 ${quote(APP_ROOT)}`, `install -d -o root -g root -m 0755 ${quote(`${state}/npm-cache`)}`,
     'export NODE_OPTIONS="${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000"', // eslint-disable-line no-template-curly-in-string
-    `if [ ! -x ${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} ]; then npm_config_cache=${quote(`${state}/npm-cache`)} npm --prefix ${quote(APP_ROOT)} install --omit=dev --no-audit --no-fund --loglevel=error ${quote(`n8n@${VERSION}`)}; fi`,
+    `if [ ! -f ${quote(`${APP_ROOT}/.webminai-npm-complete`)} ]; then rm -rf -- ${quote(`${APP_ROOT}/node_modules`)}; rm -f -- ${quote(`${APP_ROOT}/package-lock.json`)}; npm_config_cache=${quote(`${state}/npm-cache`)} npm --prefix ${quote(APP_ROOT)} install --prefer-offline --maxsockets=4 --omit=dev --no-audit --no-fund --loglevel=error ${quote(`n8n@${VERSION}`)}; fi`,
     ensureSqlite,
     `chmod -R a+rX ${quote(APP_ROOT)}`,
-    `${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} --version | grep -Fx ${quote(VERSION)}`, "printf '%s\\n' n8n-installed"
+    `${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} --version | grep -Fx ${quote(VERSION)}`,
+    `${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} start --help >/dev/null`,
+    `: > ${quote(`${APP_ROOT}/.webminai-npm-complete`)}`, "printf '%s\\n' n8n-installed"
   ])
 }
 

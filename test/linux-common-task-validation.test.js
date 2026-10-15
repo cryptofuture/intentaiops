@@ -1,9 +1,22 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { execute, recoverIncomplete, requireCompleted, revert } from '../scripts/validate-linux-common-tasks.js'
+import { execute, recoverIncomplete, requireCompleted, revert, stageInstallSource } from '../scripts/validate-linux-common-tasks.js'
 
 const plan = { summary: 'Common fixture', changeOverview: 'Test fixture', modifiedFiles: [], commands: [{ id: 'apply' }], revertCommands: [{ id: 'undo' }] }
 const completed = id => ({ id, status: 'completed' })
+
+test('installer validation stages the current checkout and rejects an unsafe remote temporary path', async () => {
+  const copies = []
+  const ssh = { execute: async () => ({ stdout: '/tmp/webminai.test123\n' }), copy: async (...args) => copies.push(args) }
+  const source = await stageInstallSource(ssh, 'lab')
+  assert.deepEqual(source, { installerPath: '/tmp/webminai.test123/install.sh', packageUrl: '/tmp/webminai.test123/intent-ai-ops.tgz' })
+  assert.equal(copies.length, 2)
+  assert.ok(copies[0][1].endsWith('/scripts/install.sh'))
+  assert.ok(copies[1][1].endsWith('/dist/intent-ai-ops.tgz'))
+  ssh.execute = async () => ({ stdout: '/tmp/../../etc\n' })
+  await assert.rejects(stageInstallSource(ssh, 'lab'))
+  assert.equal(copies.length, 2)
+})
 
 test('validator cannot silently clean up uncertain or incomplete changes', async () => {
   let state = 'uncertain'

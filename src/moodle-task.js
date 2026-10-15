@@ -272,10 +272,12 @@ function artifactCommand () {
     'set -eu',
     `install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}`,
     `if [ -s ${quote(archive)} ] && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(archive)} | sha256sum -c - >/dev/null 2>&1; then printf '%s\n' artifact-already-verified; exit 0; fi`,
-    `curl --fail --location --silent --show-error --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)}`,
-    `printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(`${archive}.tmp`)} | sha256sum -c - >/dev/null`,
+    'for attempt in 1 2 3; do :',
+    `if curl --fail --location --silent --show-error --connect-timeout 15 --max-time 600 --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)} && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(`${archive}.tmp`)} | sha256sum -c - >/dev/null; then :`,
     `mv -f -- ${quote(`${archive}.tmp`)} ${quote(archive)}`,
-    "printf '%s\n' artifact-verified"
+    "printf '%s\n' artifact-verified; exit 0",
+    'fi; done',
+    "printf '%s\n' ARTIFACT_DOWNLOAD_FAILED >&2; exit 1"
   ].join('; ')
 }
 

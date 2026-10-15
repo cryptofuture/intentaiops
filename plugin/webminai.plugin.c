@@ -1087,16 +1087,9 @@ static bool finish_orphaned_job(const char *job_id, struct command_result *resul
     while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {}
     if (load_job_result(job_id, result)) return true;
 
-    char pid_path[1024];
-    long command_pid = 0;
-    if (job_path(pid_path, sizeof(pid_path), job_id, "pid") &&
-        read_integer_file(pid_path, &command_pid) && command_pid > 1) {
-        kill(-(pid_t)command_pid, SIGTERM);
-    }
     static const char message[] = "detached job controller exited before recording a result";
     result->exit_code = 125;
     buffer_append(&result->stderr_buffer, message, sizeof(message) - 1);
-    persist_job_result(job_id, result);
     return true;
 }
 
@@ -1464,7 +1457,7 @@ static void handle_job_status(const char *transaction, const char *job_id) {
         return;
     }
     if (finish_orphaned_job(job_id, &result)) {
-        respond_job_state(transaction, job_id, result.exit_code == 0 ? "succeeded" : "failed", &result);
+        respond_job_state(transaction, job_id, "unknown", &result);
         free(result.stdout_buffer.data);
         free(result.stderr_buffer.data);
         return;

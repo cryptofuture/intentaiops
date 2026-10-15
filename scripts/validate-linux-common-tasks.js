@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { AdminService } from '../src/admin-service.js'
 import { buildCommonTask, commonTaskEligibility, listCommonTasks } from '../src/common-tasks.js'
 import { SettingsStore } from '../src/settings-store.js'
@@ -68,6 +68,8 @@ async function validateHost (serverId) {
     authentication: server.authentication,
     credential: server.sshCredential
   })
+  let installSource
+  let finished = false
   try {
     const admin = new AdminService({ dataRoot, settings: settingsStore, ssh: session.ssh, workspace })
     const inventory = await admin.refreshInventory({ settings, passphrase, serverId })
@@ -93,13 +95,30 @@ async function validateHost (serverId) {
     process.stdout.write(`\n${serverId} ${identity.id} ${identity.versionId}: validating ${definitions.length} eligible common tasks\n`)
     for (const definition of definitions) {
       await recoverIncomplete(admin, server, serverId, definition.id, options)
+      if (definition.id === 'intent-ai-ops-linux') {
+        installSource = await stageInstallSource(session.ssh, server.connectionUrl)
+        options.intentAiOpsInstallSource = installSource
+      }
       if (definition.category === 'diagnostic') await validateReadOnly(admin, serverId, definition, options)
       else if (definition.category === 'maintenance') await validateOneWay(admin, serverId, definition, options)
       else await validateLifecycle(admin, server, serverId, definition, options)
     }
+    finished = true
   } finally {
-    await session.close()
+    try {
+      if (finished && installSource) await session.ssh.execute(server.connectionUrl, `rm -f -- '${installSource.installerPath}' '${installSource.packageUrl}'; rmdir '${path.posix.dirname(installSource.installerPath)}'`)
+    } finally { await session.close() }
   }
+}
+
+export async function stageInstallSource (ssh, connectionUrl) {
+  const result = await ssh.execute(connectionUrl, 'umask 077; mktemp -d /tmp/webminai.XXXXXXXX')
+  const directory = result.stdout.trim()
+  assert.match(directory, /^\/tmp\/webminai\.[A-Za-z0-9]+$/u)
+  const source = { installerPath: `${directory}/install.sh`, packageUrl: `${directory}/intent-ai-ops.tgz` }
+  await ssh.copy(connectionUrl, fileURLToPath(new URL('./install.sh', import.meta.url)), source.installerPath)
+  await ssh.copy(connectionUrl, fileURLToPath(new URL('../dist/intent-ai-ops.tgz', import.meta.url)), source.packageUrl)
+  return source
 }
 
 export async function recoverIncomplete (admin, server, serverId, catalogId, options) {

@@ -9,7 +9,7 @@ const CREDENTIALS = '/root/jellyfin_credentials'
 const SERVICE_ROOT = '/opt/webminai/services/jellyfin'
 const PROJECT = 'webminai-jellyfin-18113'
 const PORTABLE_ARCHIVE = `jellyfin_${VERSION}-amd64.tar.gz`
-const PORTABLE_URL = `https://repo.jellyfin.org/files/server/linux/latest-stable/amd64/${PORTABLE_ARCHIVE}`
+const PORTABLE_URL = `https://repo.jellyfin.org/files/server/linux/stable/v${VERSION}/amd64/${PORTABLE_ARCHIVE}`
 const PORTABLE_SHA256 = '9f7f194a7e37777cfde0d107c088fc47e81c7904440046ac0ceb7a289546cf79'
 const FFMPEG_VERSION = '7.1.4-3'
 const FFMPEG_ARCHIVE = `jellyfin-ffmpeg_${FFMPEG_VERSION}_portable_linux64-gpl.tar.xz`
@@ -217,7 +217,7 @@ function nativeAcquire (state, profile) {
   }
   const artifact = `${state}/${PORTABLE_ARCHIVE}`
   return join([
-    'set -eu', `if ! [ -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(PORTABLE_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then curl --fail --location --retry 5 --retry-delay 2 --silent --show-error --output ${quote(`${artifact}.tmp`)} ${quote(PORTABLE_URL)}; printf '%s  %s\\n' ${quote(PORTABLE_SHA256)} ${quote(`${artifact}.tmp`)} | sha256sum -c -; mv -f -- ${quote(`${artifact}.tmp`)} ${quote(artifact)}; fi`, `install -d -o root -g root -m 0755 ${quote(APP_ROOT)}`, `tar -xzf ${quote(artifact)} -C ${quote(APP_ROOT)} --strip-components=1`, `test -x ${quote(profile.binary)}`, `test -f ${quote(`${profile.webdir}/index.html`)}`, packageSnapshot(profile, `${state}/packages.after`), packageAdded(profile, state)
+    'set -eu', `if ! [ -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(PORTABLE_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error --output ${quote(`${artifact}.tmp`)} ${quote(PORTABLE_URL)}; printf '%s  %s\\n' ${quote(PORTABLE_SHA256)} ${quote(`${artifact}.tmp`)} | sha256sum -c -; mv -f -- ${quote(`${artifact}.tmp`)} ${quote(artifact)}; fi`, `install -d -o root -g root -m 0755 ${quote(APP_ROOT)}`, `tar -xzf ${quote(artifact)} -C ${quote(APP_ROOT)} --strip-components=1`, `test -x ${quote(profile.binary)}`, `test -f ${quote(`${profile.webdir}/index.html`)}`, packageSnapshot(profile, `${state}/packages.after`), packageAdded(profile, state)
   ])
 }
 

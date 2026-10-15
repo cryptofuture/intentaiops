@@ -168,6 +168,32 @@ test('Netdata client runs a durable job through short signed polling requests an
   assert.equal(calls.every(call => call.options.timeoutMs === 15000), true)
 })
 
+for (const state of ['unknown', 'failed']) {
+  test(`Netdata client preserves ${state} orphaned job uncertainty without cleanup or replay`, async () => {
+    const jobId = 'ab'.repeat(16)
+    const calls = []
+    const client = new NetdataClient({
+      ssh: {
+        async execute (connectionUrl, command) {
+          calls.push(command)
+          const body = calls.length === 1 ? { status: 'accepted', state: 'running', jobId } : { status: 'ok', state, jobId, exitCode: 125, stdout: '', stderr: 'detached job controller exited before recording a result' }
+          return { stdout: JSON.stringify(body) }
+        }
+      },
+      connectionUrl: 'ssh://server.example',
+      actionKey: ACTION_KEY
+    })
+    const result = await client.runJob('change-once', { pollIntervalMs: 100 })
+    assert.equal(result.state, 'unknown')
+    assert.equal(result.exitCode, null)
+    assert.equal(result.recoveryRequired, true)
+    assert.equal(result.cleaned, false)
+    assert.equal(calls.length, 2)
+    assert.match(calls[0], /job_start/u)
+    assert.match(calls[1], /job_status/u)
+  })
+}
+
 test('Netdata client exposes signed job cancellation', async () => {
   let request
   const client = new NetdataClient({

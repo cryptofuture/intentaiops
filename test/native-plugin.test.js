@@ -126,24 +126,35 @@ test('native plugin starts, polls, cancels, and cleans durable command jobs', as
   assert.notEqual(cancelled.body.exitCode, 0)
   assert.equal((await request('job_cleanup', cancelStart.body.jobId)).body.state, 'cleaned')
 
-  const orphanStart = await request('job_start', `timeoutSeconds=60\ncommand=${Buffer.from('sleep 30').toString('base64url')}`)
+  const survivedFile = path.join(directory, 'orphan-survived')
+  const orphanCommand = `sleep 1; printf survived > '${survivedFile}'`
+  const orphanStart = await request('job_start', `timeoutSeconds=60\ncommand=${Buffer.from(orphanCommand).toString('base64url')}`)
   const controllerFile = path.join(jobDirectory, orphanStart.body.jobId, 'controller.pid')
   let controllerPid
+  let commandPid
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
       controllerPid = Number.parseInt((await readFile(controllerFile, 'utf8')).trim(), 10)
+      commandPid = Number.parseInt((await readFile(path.join(jobDirectory, orphanStart.body.jobId, 'pid'), 'utf8')).trim(), 10)
       break
     } catch {
       await new Promise(resolve => setTimeout(resolve, 25))
     }
   }
   assert.ok(Number.isInteger(controllerPid) && controllerPid > 1)
+  assert.ok(Number.isInteger(commandPid) && commandPid > 1)
   process.kill(controllerPid, 'SIGKILL')
   const orphaned = await request('job_status', orphanStart.body.jobId)
-  assert.equal(orphaned.body.state, 'failed')
+  assert.equal(orphaned.body.state, 'unknown')
   assert.equal(orphaned.body.exitCode, 125)
   assert.match(Buffer.from(orphaned.body.stderr, 'base64').toString(), /controller exited before recording a result/u)
-  assert.equal((await request('job_cleanup', orphanStart.body.jobId)).body.state, 'cleaned')
+  assert.equal((await request('job_cleanup', orphanStart.body.jobId)).statusCode, 409)
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try { if (await readFile(survivedFile, 'utf8') === 'survived') break } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  assert.equal(await readFile(survivedFile, 'utf8'), 'survived')
+  assert.equal((await request('job_status', orphanStart.body.jobId)).body.state, 'unknown')
   await session.stop()
 })
 

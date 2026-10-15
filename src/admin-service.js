@@ -443,6 +443,7 @@ export class AdminService {
         let remote
         try { remote = await netdata.jobStatus(command.jobId, { onRecovery: report }) } catch (error) { await report({ state: 'operator_review_required' }); throw error }
         if (remote.state === 'running') await report(remote)
+        if (remote.state === 'unknown') await report({ state: 'operator_review_required' })
         if (!['succeeded', 'failed', 'cancelled', 'timed_out'].includes(remote.state)) continue
         const completed = remote.state === 'succeeded' && remote.exitCode === 0
         this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, {
