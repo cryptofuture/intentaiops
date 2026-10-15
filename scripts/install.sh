@@ -29,7 +29,17 @@ if command -v node >/dev/null 2>&1; then
   NPM_COMMAND=$(command -v npm)
 else
   system_name=$(uname -s)
-  if [ "$system_name" = FreeBSD ]; then
+  if [ "$system_name" = Linux ] && [ -f /etc/alpine-release ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+      apk add --no-cache nodejs npm
+    else
+      command -v sudo >/dev/null 2>&1 || { printf '%s\n' 'ERROR: Alpine Node installation requires root or sudo.' >&2; exit 1; }
+      sudo apk add --no-cache nodejs npm
+    fi
+    NODE_COMMAND=$(command -v node)
+    NPM_COMMAND=$(command -v npm)
+    "$NODE_COMMAND" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 24 || (major === 24 && minor >= 7) ? 0 : 1)' || { printf '%s\n' 'ERROR: Alpine requires Node.js 24.7 or newer.' >&2; exit 1; }
+  elif [ "$system_name" = FreeBSD ]; then
     if [ "$(id -u)" -eq 0 ]; then
       pkg install -y node24 npm-node24 python312 gmake
     else
@@ -75,6 +85,7 @@ fi
 
 PATH=$(dirname "$NODE_COMMAND"):$PATH
 export PATH
+export NODE_OPTIONS="${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000"
 "$NPM_COMMAND" install --global --prefix "$INSTALL_ROOT/npm" "$PACKAGE_URL"
 printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$NODE_COMMAND" "$INSTALL_ROOT/npm/lib/node_modules/intent-ai-ops/bin/intentaiops.js" > "$BIN_DIRECTORY/intentaiops"
 printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$NODE_COMMAND" "$INSTALL_ROOT/npm/lib/node_modules/intent-ai-ops/bin/intentops.js" > "$BIN_DIRECTORY/intentops"

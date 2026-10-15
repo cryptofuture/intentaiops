@@ -1,3 +1,5 @@
+import { mariadbDataPreflight, wordpressArtifactCommand } from './linux-php-foundation.js'
+
 const SITE = 'webminai-wordpress-18101'
 const WEB_ROOT = `/srv/${SITE}`
 const ARTIFACTS = `/var/lib/webminai/${SITE}`
@@ -27,7 +29,7 @@ export function buildWordpressLinuxTask (taskId, linuxContext) {
   const commands = [
     command('capture-baseline', baselineCommand({ state, family, profile, services }), 'Capture package, service, database, and path state before changing the host'),
     command('install-packages', installPackagesCommand({ state, family, profile }), 'Install the reviewed distro-specific native WordPress stack', ['capture-baseline']),
-    command('verify-artifacts', artifactCommand(), 'Download and verify official WordPress and WP-CLI artifacts', ['install-packages']),
+    command('verify-artifacts', wordpressArtifactCommand(ARTIFACTS), 'Download and verify official WordPress and WP-CLI artifacts', ['install-packages']),
     command('generate-credentials', credentialsCommand(), 'Generate protected task-owned database and administrator credentials on the host', ['capture-baseline']),
     command('prepare-database', databaseCommand({ family, profile }), 'Initialize MariaDB, wait for readiness, and create only the task-owned database identity', ['install-packages', 'generate-credentials']),
     command('extract-wordpress', extractCommand(profile), 'Extract verified WordPress core with explicit application ownership and permissions', ['verify-artifacts']),
@@ -36,6 +38,10 @@ export function buildWordpressLinuxTask (taskId, linuxContext) {
     command('install-wordpress', wordpressCommand(profile), 'Configure and install WordPress using protected stdin prompts', ['prepare-database', 'configure-nginx']),
     command('publish-and-verify', publishCommand(profile), 'Publish the marker page and verify database, HTTP, and restart persistence', ['install-wordpress'])
   ]
+  for (const step of commands.filter(item => ['install-packages', 'verify-artifacts'].includes(item.id))) {
+    step.executionMode = 'job'
+    step.timeoutMs = 1800000
+  }
   const revertCommands = [
     command('remove-wordpress-database', removeDatabaseCommand(state), 'Drop only the task-owned WordPress database and local users'),
     command('remove-wordpress-files', removeFilesCommand({ state, profile }), 'Remove task-owned site, credentials, artifacts, and configuration, restoring nginx main configuration', ['remove-wordpress-database']),
@@ -66,6 +72,7 @@ function baselineCommand ({ state, family, profile, services }) {
   const targets = [WEB_ROOT, ARTIFACTS, CREDENTIALS, profile.phpFpmRuntimeDirectory, profile.phpFpmPool, profile.nginxVhost, ...(profile.phpExtensionConfig ? [profile.phpExtensionConfig] : [])]
   return [
     'set -eu',
+    mariadbDataPreflight(),
     `state=${quote(state)}`,
     'if [ ! -s "$state/packages.before" ]; then :',
     `for path in ${targets.map(quote).join(' ')}; do [ ! -e "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`,
@@ -86,28 +93,6 @@ function installPackagesCommand ({ state, family, profile }) {
     packageSnapshot(family, '"$state/packages.after"'.replace('$state', state)),
     `LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} | grep -Ev '^(curl|netdata|netdata-|openssh|openssh-|webminai|webminai-)' > ${quote(`${state}/packages.added`)} || true`,
     "printf '%s\n' packages-ready"
-  ].join('; ')
-}
-
-function artifactCommand () {
-  return [
-    'set -eu',
-    `install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}`,
-    `if [ -s ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} ] && [ -s ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)} ] && [ -s ${quote(`${ARTIFACTS}/wp-cli.phar`)} ] && [ -s ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)} ]; then wp_expected=$(tr -d '\r\n' < ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)}); wp_actual=$(sha1sum ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} | awk '{print $1}'); cli_expected=$(tr -d '\r\n' < ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)}); cli_actual=$(sha512sum ${quote(`${ARTIFACTS}/wp-cli.phar`)} | awk '{print $1}'); if [ "$wp_actual" = "$wp_expected" ] && [ "$cli_actual" = "$cli_expected" ]; then printf '%s\n' artifacts-already-verified; exit 0; fi; fi`,
-    `curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} https://wordpress.org/latest.tar.gz`,
-    `curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)} https://wordpress.org/latest.tar.gz.sha1`,
-    `expected=$(tr -d '\\r\\n' < ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)})`,
-    'printf \'%s\' "$expected" | grep -Eq \'^[0-9A-Fa-f]{40}$\'',
-    `actual=$(sha1sum ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} | awk '{print $1}')`,
-    '[ "$actual" = "$expected" ]',
-    `curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wp-cli.phar`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar`,
-    `curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar.sha512`,
-    `expected=$(tr -d '\\r\\n' < ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)})`,
-    'printf \'%s\' "$expected" | grep -Eq \'^[0-9A-Fa-f]{128}$\'',
-    `actual=$(sha512sum ${quote(`${ARTIFACTS}/wp-cli.phar`)} | awk '{print $1}')`,
-    '[ "$actual" = "$expected" ]',
-    `chmod 0755 ${quote(`${ARTIFACTS}/wp-cli.phar`)}`,
-    'printf \'%s\n\' artifacts-verified'
   ].join('; ')
 }
 
@@ -268,7 +253,7 @@ function installPackages (family, packages) {
   if (family === 'debian') return `env DEBIAN_FRONTEND=noninteractive apt-get update; env DEBIAN_FRONTEND=noninteractive apt-get install -y ${list}`
   if (family === 'alpine') return `apk add --no-cache ${list}`
   if (family === 'arch') return `pacman -Sy --noconfirm --needed ${list}`
-  if (family === 'suse') return `zypper --non-interactive refresh --force; zypper --non-interactive install --no-recommends ${list}`
+  if (family === 'suse') return `zypper --non-interactive refresh; zypper --non-interactive install --no-recommends ${list}`
   return `dnf -y install ${list}`
 }
 

@@ -2,9 +2,11 @@
 import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { AdminService } from '../src/admin-service.js'
 import { buildCommonTask, commonTaskEligibility, listCommonTasks } from '../src/common-tasks.js'
 import { SettingsStore } from '../src/settings-store.js'
+import { ServerWorkspace } from '../src/server-workspace.js'
 import { SystemSsh } from '../src/system-ssh.js'
 
 const HOSTS = [
@@ -36,20 +38,29 @@ const ENDPOINTS = new Map([
 
 const selectedHost = option('host')
 const selectedTask = option('task')
-if (process.argv.includes('--help') || process.argv.includes('-h')) {
-  process.stdout.write('Usage: validate-linux-common-tasks.js [--host=SERVER_ID] [--task=CATALOG_ID]\n')
-  process.exit(0)
-}
-if (!process.env.VAULT_TEST) throw new Error('VAULT_TEST is required')
-if (selectedHost && !HOSTS.includes(selectedHost)) throw new Error(`unknown Linux lab host: ${selectedHost}`)
-
 const dataRoot = path.resolve(process.env.WEBMINAI_DATA_ROOT ?? path.join(os.homedir(), '.webminai'))
-const settingsStore = new SettingsStore(dataRoot)
-const settings = await settingsStore.load()
-const passphrase = process.env.VAULT_TEST
-const applicationDefaults = await settingsStore.decryptApplicationDefaults({ settings, passphrase })
+let settingsStore
+let settings
+let workspace
+let passphrase
+let applicationDefaults
 
-for (const serverId of selectedHost ? [selectedHost] : HOSTS) await validateHost(serverId)
+async function main () {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    process.stdout.write('Usage: validate-linux-common-tasks.js [--host=SERVER_ID] [--task=CATALOG_ID]\n')
+    return
+  }
+  if (!process.env.VAULT_TEST) throw new Error('VAULT_TEST is required')
+  if (selectedHost && !HOSTS.includes(selectedHost)) throw new Error(`unknown Linux lab host: ${selectedHost}`)
+  settingsStore = new SettingsStore(dataRoot)
+  settings = await settingsStore.load()
+  workspace = new ServerWorkspace(dataRoot, {
+    directoryAliases: new Map(Object.entries(settings.servers).map(([id, server]) => [id, server.historyId ?? id]))
+  })
+  passphrase = process.env.VAULT_TEST
+  applicationDefaults = await settingsStore.decryptApplicationDefaults({ settings, passphrase })
+  for (const serverId of selectedHost ? [selectedHost] : HOSTS) await validateHost(serverId)
+}
 
 async function validateHost (serverId) {
   const server = await settingsStore.decryptServer({ settings, passphrase, serverId })
@@ -58,7 +69,7 @@ async function validateHost (serverId) {
     credential: server.sshCredential
   })
   try {
-    const admin = new AdminService({ dataRoot, settings: settingsStore, ssh: session.ssh })
+    const admin = new AdminService({ dataRoot, settings: settingsStore, ssh: session.ssh, workspace })
     const inventory = await admin.refreshInventory({ settings, passphrase, serverId })
     const options = {
       platform: 'linux',
@@ -91,52 +102,28 @@ async function validateHost (serverId) {
   }
 }
 
-async function recoverIncomplete (admin, server, serverId, catalogId, options) {
+export async function recoverIncomplete (admin, server, serverId, catalogId, options) {
   const tasks = admin.listTasks(serverId, { limit: 100 }).filter(task =>
     task.catalogId === catalogId && task.request.startsWith('Validate Linux common task:') && task.status !== 'cancelled'
   )
   for (const summary of tasks) {
     const task = admin.getTask(serverId, summary.id)
     if (!task.plan?.revertCommands?.length) continue
+    if (admin.tasks.executionState(serverId, task.id).some(command => command.status === 'uncertain')) {
+      throw new Error(`task #${task.id} has an uncertain outcome; reconcile remote evidence before further validation`)
+    }
     const built = buildCommonTask(catalogId, task.id, options)
     if (built.verifyReverted) {
-      const clean = await admin.netdata(server).runCommand(built.verifyReverted, { timeoutSeconds: 300 })
+      const statePaths = (task.plan.modifiedFiles ?? []).filter(file => file.startsWith('/var/lib/webminai/task-state/'))
+      const absent = statePaths.map(file => `test ! -e '${file.replaceAll("'", "'\\''")}'`).join(' && ')
+      const clean = await admin.netdata(server).runCommand(`${built.verifyReverted}${absent ? ` && ${absent}` : ''}`, { timeoutSeconds: 300 })
       if (clean.exitCode === 0) {
         admin.saveTaskRevertResults(serverId, task.id, [{ id: 'verify-recovered-state', status: 'completed', result: clean }])
         continue
       }
     }
-    process.stdout.write(`[${serverId}/${catalogId}] recovering task #${task.id}\n`)
-    admin.markTaskReverting(serverId, task.id)
-    const results = await executeRecoveryPlan(admin, serverId, task.id, built.plan.revertCommands)
-    admin.saveTaskRevertResults(serverId, task.id, results)
+    throw new Error(`task #${task.id} needs a separately reviewed rollback before further validation`)
   }
-}
-
-async function executeRecoveryPlan (admin, serverId, taskId, commands) {
-  const plan = {
-    summary: `Recover task #${taskId}`,
-    changeOverview: 'Run the current reviewed rollback for an earlier interrupted validation task.',
-    modifiedFiles: [],
-    warnings: [],
-    requiresConfirmation: true,
-    commands,
-    revertCommands: []
-  }
-  const results = await admin.execute({
-    settings,
-    passphrase,
-    serverId,
-    plan,
-    requireRevert: false,
-    approve: async () => true,
-    onResult: result => {
-      admin.appendTaskRevertResult(serverId, taskId, result)
-      process.stdout.write(`  ${result.id}: ${result.status}\n`)
-    }
-  })
-  requireCompleted(results, 'recovery')
-  return results
 }
 
 async function validateReadOnly (admin, serverId, definition, options) {
@@ -233,36 +220,57 @@ function create (admin, serverId, definition) {
   return admin.createTask(serverId, `Validate Linux common task: ${definition.label}`, { kind: 'catalog', catalogId: definition.id })
 }
 
-async function execute (admin, serverId, taskId, plan, label, requireRevert = true) {
+export async function execute (admin, serverId, taskId, plan, label, requireRevert = true) {
+  const executionTask = label === 'apply 2'
+    ? admin.createTask(serverId, `Reapply Linux validation task #${taskId}`, { kind: 'catalog', catalogId: admin.getTask(serverId, taskId).catalogId })
+    : null
+  const executionTaskId = executionTask?.id ?? taskId
+  if (executionTask) {
+    admin.saveTaskPlan(serverId, executionTaskId, plan)
+    admin.markTaskRunning(serverId, executionTaskId)
+  }
   const results = await admin.execute({
     settings,
     passphrase,
     serverId,
+    taskId: executionTaskId,
     plan,
     requireRevert,
     approve: async () => true,
     onResult: result => {
-      admin.appendTaskResult(serverId, taskId, result)
+      admin.appendTaskResult(serverId, executionTaskId, result)
       process.stdout.write(`  ${result.id}: ${result.status}\n`)
     }
   })
-  requireCompleted(results, label)
+  if (executionTask) admin.saveTaskResults(serverId, executionTaskId, results)
+  requireCompleted(results, label, plan.commands.length)
   return results
 }
 
-async function revert (admin, serverId, taskId, label) {
+export async function revert (admin, serverId, taskId, label) {
+  const task = admin.getTask(serverId, taskId)
+  const reviewedPlan = label === 'revert 2'
+    ? {
+        ...task.plan,
+        summary: `Verify repeat rollback for task #${taskId}`,
+        changeOverview: 'Explicitly repeat the verified rollback to test idempotence after the first rollback restored the baseline.',
+        commands: task.plan.revertCommands,
+        revertCommands: []
+      }
+    : undefined
   const results = await admin.revertTask({
     settings,
     passphrase,
     serverId,
     taskId,
+    reviewedPlan,
     approve: async () => true,
     onResult: result => {
       admin.appendTaskRevertResult(serverId, taskId, result)
       process.stdout.write(`  ${result.id}: ${result.status}\n`)
     }
   })
-  requireCompleted(results, label)
+  requireCompleted(results, label, task.plan.revertCommands.length)
   return results
 }
 
@@ -301,12 +309,14 @@ async function verifyExternal (server, catalogId, shouldExist) {
   throw new Error(`${catalogId} external verification failed at ${url}: ${evidence}`)
 }
 
-function requireCompleted (results, label) {
+export function requireCompleted (results, label, expectedCount) {
   const failed = results.find(result => result.status !== 'completed')
-  if (!failed) return
-  throw new Error(`${label} failed at ${failed.id}: ${failed.failure?.code ?? failed.status}${failed.failure?.evidence ? ` (${failed.failure.evidence})` : ''}`)
+  if (failed) throw new Error(`${label} failed at ${failed.id}: ${failed.failure?.code ?? failed.status}${failed.failure?.evidence ? ` (${failed.failure.evidence})` : ''}`)
+  assert.equal(results.length, expectedCount, `${label}: execution paused or stopped before all reviewed commands completed`)
 }
 
 function option (name) {
   return process.argv.find(argument => argument.startsWith(`--${name}=`))?.slice(name.length + 3) ?? null
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main()

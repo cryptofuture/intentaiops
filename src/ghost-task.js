@@ -185,7 +185,9 @@ function ubuntuBaseline (state, paths) {
 
 function ubuntuPackages (state) {
   return join([
-    'set -eu', 'export DEBIAN_FRONTEND=noninteractive', 'apt-get update', 'apt-get install -y ca-certificates curl gnupg nginx mysql-server openssl',
+    'set -eu',
+    'if [ -e /var/lib/mysql/aria_log_control ] || { [ -s /var/lib/mysql/mysql_upgrade_info ] && grep -qi MariaDB /var/lib/mysql/mysql_upgrade_info; }; then printf \'%s\\n\' \'Existing MariaDB data requires an operator-reviewed migration before MySQL installation\' >&2; exit 1; fi',
+    'export DEBIAN_FRONTEND=noninteractive', 'apt-get update', 'apt-get install -y ca-certificates curl gnupg nginx mysql-server openssl',
     'if ! node -e "const [a,b,c]=process.versions.node.split(\'.\').map(Number);process.exit(a===22&&(b>23||(b===23&&c>=1))?0:1)" >/dev/null 2>&1; then',
     'install -d -o root -g root -m 0755 /usr/share/keyrings',
     'curl --fail --location --silent --show-error https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes --output /usr/share/keyrings/nodesource.gpg',
@@ -224,7 +226,8 @@ function ubuntuDatabase () {
 
 function ubuntuGhostInstall (state) {
   return join([
-    'set -eu', 'umask 022', `id webminai-ghost >/dev/null 2>&1 || useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-ghost`,
+    'set -eu', 'umask 022', `if ! id webminai-ghost >/dev/null 2>&1; then useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-ghost; : > ${quote(`${state}/user-created`)}; fi`,
+    'export NODE_OPTIONS="${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000"', // eslint-disable-line no-template-curly-in-string
     `install -d -o webminai-ghost -g webminai-ghost -m 0750 ${quote(DATA_ROOT)}`, `install -d -o webminai-ghost -g webminai-ghost -m 0755 ${quote(APP_ROOT)}`, `install -d -o webminai-ghost -g webminai-ghost -m 0755 ${quote(`${state}/npm-cache`)}`,
     `if [ ! -x ${quote(`${CLI_ROOT}/bin/ghost`)} ]; then npm_config_cache=${quote(`${state}/npm-cache`)} npm install --global --prefix ${quote(CLI_ROOT)} --omit=dev --no-audit --no-fund --loglevel=error ghost-cli@1.29.1; fi`,
     `if [ ! -x ${quote(`${CLI_ROOT}/bin/pnpm`)} ]; then npm_config_cache=${quote(`${state}/npm-cache`)} npm install --global --prefix ${quote(CLI_ROOT)} --omit=dev --no-audit --no-fund --loglevel=error pnpm@11.15.1; fi`,
@@ -280,7 +283,7 @@ function ubuntuRestore (state, paths) {
   commands.push(removeDebianPackages(`${state}/packages.added`))
   commands.push(`if systemctl cat nginx >/dev/null 2>&1; then if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx >/dev/null 2>&1 || true; else systemctl disable nginx >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx 2>/dev/null || true; fi; fi`)
   commands.push(`if systemctl cat mysql >/dev/null 2>&1; then if [ -e ${quote(`${state}/mysql.enabled`)} ]; then systemctl enable mysql >/dev/null 2>&1 || true; else systemctl disable mysql >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/mysql.active`)} ]; then systemctl start mysql; else systemctl stop mysql 2>/dev/null || true; fi; fi`)
-  commands.push('id webminai-ghost >/dev/null 2>&1 && userdel webminai-ghost 2>/dev/null || true', `rm -rf -- ${quote(state)}`)
+  commands.push(`if [ -e ${quote(`${state}/user-created`)} ]; then id webminai-ghost >/dev/null 2>&1 && userdel webminai-ghost 2>/dev/null || true; fi`, `rm -rf -- ${quote(state)}`)
   return join(commands)
 }
 

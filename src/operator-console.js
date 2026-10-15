@@ -61,11 +61,18 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
         if (clients.size >= 16) return json(429, { error: 'too many subscriptions' })
         response.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive' })
         response.write(': connected\n\n')
+        let waitingForDrain = false
         const send = () => {
+          if (waitingForDrain || response.destroyed) return
           try {
             for (const event of controller.events(cursor)) {
-              if (!response.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`)) { response.destroy(); break }
+              const ready = response.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`)
               cursor = event.id
+              if (!ready) {
+                waitingForDrain = true
+                response.once('drain', () => { waitingForDrain = false; send() })
+                break
+              }
             }
           } catch { response.destroy() }
         }

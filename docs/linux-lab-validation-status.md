@@ -1,0 +1,308 @@
+# Linux lab validation checkpoint
+
+Updated: 2026-10-15 09:40 UTC. Branch: `yet-to-test`. Baseline: local `main` (44 changed files at `main...HEAD`). Latest verified results below supersede earlier chronological notes. Reliability regressions have passed; the complete application catalog matrix is still incomplete.
+
+## Resume from here
+
+### Saved at operator request (2026-10-15 09:40 UTC)
+
+**Not finished. No running job was cancelled.** The background drivers below can keep advancing after this snapshot. Consult their journals before starting anything on those hosts. Credentials remain only in the encrypted vault and existing environment, never in this document.
+
+- Current generated matrix: **37 new application lifecycle PASS rows**, **8 FAIL rows**, **3 RUNNING rows**, **19 INELIGIBLE rows**. This excludes earlier successful Fedora WordPress-through-Moodle and Rocky/openSUSE WordPress cases. Recovery success is not counted as a fresh full lifecycle pass; ineligible cases are not passes. Report: `/tmp/intent-lab-check.qfoLPY/remaining-matrix.md`.
+- All nine hosts passed their eligible basic catalog/health checks and completed their current-release update. Reliability run 10 passed all 21 reported workflows on openSUSE/Rocky; per-host diagnostic/intervention checks covered all nine. See the previous sections for exact coverage, not a claim that every workflow ran on every host.
+- Latest full local suite: **399 passed**, before the subsequent Ghost preflight/account-ownership and Alpine installer changes. The focused catalog recovery file passed **9 tests** after adding the Ghost data preflight, before the latest Alpine route/account-ownership edits. Lint and typecheck passed after those latest source edits. Add coverage for the Alpine package ownership route and Ghost account ownership, then rerun the full checks.
+- Package-install validation last passed for SHA-256 `8671272518896c960e93b9000c14e3b77f439cfe4e93138d3bc21352bab8b674`. This build includes the npm connection-window fix but **predates the latest Ghost/PrestaShop/Alpine edits**. Rebuild it again before handoff. Tarball and all five native checksums were verified from `dist/`; an initial check from the repository root merely used the wrong working directory. Test-generated native binaries were restored to the original artifacts.
+
+#### Active jobs and ownership
+
+| Host | Current task | Last confirmed state | Owning local process/session |
+| --- | --- | --- | --- |
+| Arch | n8n 38 | `install-n8n` running, job `8eb4ecdcdf513722b6be75f053ffba5e` | Original matrix `38598` |
+| Fedora | n8n 37 | `install-runtime` running, job `26d5dd57009aa25c98993693abf00142` | Original matrix `38598` |
+| Debian | n8n 143 | Reviewed acquisition running, job `009ccead4c88d768fa08102667fc01d2` | Recovery `34715`; original isolated validator `6152` exited |
+| openSUSE | PrestaShop 71 | Artifact acquisition running, job `61d95296ee1a0dbda933cd2b71a9e81d` | Matrix `44114` |
+| AlmaLinux | Moodle 43 | Reviewed recovery completed and applied-state verification passed; rollback still required | Recovery `91342` exited successfully |
+| Oracle | Joomla 38 | Confirmed failed package download; no rollback performed | Matrix `85047` stopped at failure |
+| Rocky | PrestaShop 42 | Confirmed failed partial database initialization; no rollback performed | Original driver moved on to Fedora |
+| Ubuntu | Ghost 58 | `initialize-database-reviewed-recovery` failed; task `partial` | Recovery `88548` exited; matrix `62407` exited |
+| Alpine | Intent AI Ops 36 | Bootstrap job terminated with exit 143/signal 15; no rollback performed | Matrix `62407` exited |
+
+`uncertain` in the active-task helper means dispatched but not yet locally completed; query the recorded durable job before deciding its outcome. Never rerun one merely because the driver is quiet.
+
+#### Fixes and remaining work
+
+1. **npm connection timing:** Debian's default Node family selection failed in about 6.9 seconds; an explicit IPv4 GET succeeded, and npm succeeded with either family selection disabled or its attempt timeout raised to 5000 ms. Linux n8n/Ghost acquisition now uses the latter, preserving IPv6 fallback, TLS, and existing `NODE_OPTIONS`. The standalone POSIX installer now applies the same bounded connection window. No global npm/network configuration changed. Debian's reviewed acquisition progressed beyond 175 MB of metadata. Do not mistake that progress for a completed installation.
+2. **Original n8n failures cleaned:** Debian 142, Alpine 35, Ubuntu 57 completed separately reviewed partial rollback and live fixture-removal checks. Their runtime baseline was restored; acquisition was not blindly replayed. Debian 143 is a new test followed by a fresh approved recovery revision. Alpine/Ubuntu still need fresh full n8n lifecycles after their other outstanding work.
+3. **Alma Moodle:** The floating Remi repository RPM changed. Source now pins the versioned `remi-release-9.8-1.el9.remi.noarch.rpm`, SHA-256 `21100d93098f5821ff21d7ed511c99d874ba895438c2b78d8c73937133158d73`, independently matching the primary and its listed Australian mirror. Moodle 43 recovery preserved the completed baseline and passed live application verification. Next run `trs node /tmp/intent-lab-check.qfoLPY/finish-recovery.mjs alma-moodle`, verify successful cleanup, then restart only Alma's remaining matrix for a genuine lifecycle pass.
+4. **Oracle Joomla:** Failed because `yum.oracle.com` reset package-download connections, exhausting DNF's configured mirrors. Recorded exit is 1, not unknown. PHP/nginx module enablement completed, but the package transaction did not. Cached downloads remain. Inspect before a separately reviewed retry of idempotent package work; preserve the original baseline/module ownership. The temporary recovery helper does not yet map Oracle Joomla 38, so do not invoke `--joomla` on Oracle unchanged.
+5. **Rocky PrestaShop:** `install-prestashop` returned confirmed exit 1 with output suppressed by the old plan. The task-owned database has 234 tables and `parameters.php`, but country/employee/language/configuration tables are empty. This is **not** successful initialization; do not attest it completed or skip it merely because configuration exists. No active PHP installer was found. The cgroup reported zero OOM kills, so an OOM cause is not established. Source now retains database-installer output in its protected task-state log and emits only a safe error marker. Review fixture-only partial rollback, then rerun a fresh case with private diagnostics. Do not print credential-bearing installer output.
+6. **Alpine Intent AI Ops:** The bootstrap spent its 900-second bound downloading the glibc Node archive and terminated. Source inspection also shows that archive is unsuitable for Alpine's musl runtime. The common-task builder now receives Linux context and uses Alpine's `nodejs`/`npm` packages, captures their prior presence, and removes only newly introduced packages on reviewed rollback. The standalone POSIX installer also selects Alpine packages instead of that archive. These latest changes still need dedicated tests and live validation. First review cleanup of task 36's owned install root; do not overwrite its baseline or automatically repeat its failed install.
+7. **Ghost safety and lab data:** See the important database checkpoint below before touching Ubuntu. The source rejects MariaDB data before installing MySQL and records service-account creation so rollback preserves a pre-existing account. The fresh guard has a shell regression; account ownership needs its own focused check.
+
+#### Important Ubuntu database checkpoint
+
+- Ghost 58 found inactive MariaDB data at `/var/lib/mysql` underneath newly installed MySQL packages. Protective signed task **59** placed a **runtime-only** mask on `mysql.service`; it did not cancel package work or change data.
+- Signed repair task **60** subsequently moved that stopped directory, without deletion, to **`/var/lib/webminai/lab-recovery/ubuntu-mariadb-task-58/mysql-before`**, initialized a separate empty MySQL directory, and removed only task 59's runtime mask. **Do not rerun `protect-ubuntu-database.mjs` or `repair-ubuntu.mjs --ghost`: their work is already complete.**
+- Both older MySQL data sets remain untouched: `/var/lib/mysql-8.0` and `/var/lib/webminai/lab-recovery/ubuntu-mysql-task-40/mysql-before`.
+- Ghost 58 then used a fresh approved revision preserving its completed baseline. Runtime installation and credential generation completed. Database initialization failed because MySQL is still frozen by **`/etc/mysql/FROZEN`**, as confirmed by `journalctl -u mysql.service`. The new empty MySQL data is initialized, but the service is failed/inactive. **Do not blindly delete or bypass the freeze.** Inspect its reason, confirm the exact new data directory and backups, then separately review preserving that freeze file and allowing only the compatible new MySQL directory to start. No original database migration has occurred.
+- The preserved MariaDB directory still needs a deliberate end-of-test restoration or explicit handoff decision. Never restore it while MySQL is running, and never point MySQL at it. Preserve the new MySQL directory separately if moving it aside. No database data was deleted during these repairs.
+- Task 58 contains newly generated protected Ghost credentials. Never print its credential files, installer arguments, or raw diagnostic logs to AI/event exports.
+
+#### Resume commands and helpers
+
+- `trs node /tmp/intent-lab-check.qfoLPY/active-tasks.mjs`
+- `trs node /tmp/intent-lab-check.qfoLPY/current-jobs.mjs` (read-only durable status)
+- `trs node /tmp/intent-lab-check.qfoLPY/matrix-summary.mjs`
+- `trs node /tmp/intent-lab-check.qfoLPY/lab-state.mjs HOST` (last four task records)
+- `trs node /tmp/intent-lab-check.qfoLPY/failed-details.mjs` (recorded failure metadata; currently prints Oracle's package-only download tail)
+- Encrypted vault `/home/vscode/intent-linux-test-vault.6jq3DT`, existing `VAULT_TEST` environment, SSH config `/tmp/intent-lab-check.qfoLPY/ssh_config`; strict host-key checking remains enabled.
+- `remaining-matrix.mjs HOST ...` skips recorded PASS/INELIGIBLE cases and stops a host on its first failure. Its optional `--skip-n8n` excludes n8n without counting it passed. Do not overlap hosts with the active drivers. `recover-uncertain.mjs --ghost` currently assumes original command IDs when identifying completed commands and therefore needs adjustment before another Ghost revision; retain the already-revised completed prefix verbatim.
+- Remaining full checks after further edits: `npm test`, `npm run lint`, `npm run typecheck`, `npm run test:package-install`, checksum checks from `dist/`, and `git diff --check`. Restore only known test-generated native artifacts, not user changes or the rebuilt tarball. No commits or generated private test artifacts have been added.
+
+### Current continuation (2026-10-15 09:20 UTC)
+
+- Follow-up: **399 local tests passed**, lint/typecheck passed after the npm connection-window fix. Node's default family selection failed in 6.9 seconds while an explicit IPv4 HTTPS GET completed; npm metadata succeeded both with selection disabled and with `--network-family-autoselection-attempt-timeout=5000`. The source uses only the latter during Linux n8n/Ghost acquisition, preserving IPv6 fallback, TLS, and existing `NODE_OPTIONS`. A shell regression checks both generated plans. No global network/npm configuration changed. Debian n8n 143 is now retrying acquisition under a fresh reviewed revision in session `34715`, preserving its two completed commands; the original validator `6152` exited with the recorded timeout before that revision. Latest package-install check passed with tarball SHA `25e103cecfec017e5c832dd4376e5c2f04428481db264a1270946f5891ee0246`, but this predates the connection-window fix and must be rebuilt again.
+- Latest local checks: **398 tests passed**, lint/typecheck passed. A subsequent Moodle RPM pin change has focused checks running and still needs the final complete checks/package rebuild. Native test-generated binaries were restored, not committed.
+- Matrix report `/tmp/intent-lab-check.qfoLPY/remaining-matrix.md` now records **30 additional application lifecycle passes**, beyond the previously recorded Fedora/Rocky/openSUSE passes. The matrix is not complete. Read current journals and the report before starting another process on a host.
+- All nine current-release update tasks are completed, including Oracle 33's separately approved report-only continuation. No completed package update was repeated.
+- openSUSE Joomla 66 recovered under a fresh approved revision after its confirmed TLS download failure, verified the applied state, and completed reviewed rollback/fixture-removal checks. A fresh full application matrix on openSUSE is active in session `44114`.
+- Debian n8n 142, Alpine n8n 35, and Ubuntu n8n 57 failed npm acquisition with `ETIMEDOUT`, before credential creation or service configuration. Separately reviewed partial rollbacks restored their runtime baselines and verified fixture removal on all three. Cleanup is not a lifecycle pass. No uncertain npm command was replayed. Debian's fresh isolated n8n test is active in session `6152`; avoid another Debian validator until it ends.
+- Registry diagnosis: no npm proxy or proxy environment variables are configured in Debian's root context. IPv4-first npm metadata probes also timed out. Curl succeeds with both HTTP/1.1 and HTTP/2, including npm's user-agent; a Node HTTPS IPv4 HEAD request succeeded in 7.8 seconds. The cause is not yet established. Do not claim an IPv6 fix or disable TLS/use an unofficial mirror. A user question about the LXD host's proxy/VPN is pending.
+- AlmaLinux Moodle 43 correctly rejected a changed floating Remi RPM checksum before installing it. Updated the source to the versioned upstream `remi-release-9.8-1.el9.remi.noarch.rpm`, SHA-256 `21100d93098f5821ff21d7ed511c99d874ba895438c2b78d8c73937133158d73`, independently matching the primary server and its listed Australian mirror. Reviewed recovery preserving the completed baseline is active in session `91342`. After completion, `/tmp/intent-lab-check.qfoLPY/finish-recovery.mjs alma-moodle` performs reviewed rollback and live fixture-removal verification, then restart the Alma matrix.
+- Active independent drivers: `38598` owns Arch/Rocky and queued Fedora; `85047` owns Oracle applications; `44114` owns openSUSE; `62407` owns Ubuntu/Alpine applications **excluding n8n**, whose failures remain unresolved. Excluding n8n allows unrelated tests to proceed; it is not marked ineligible or passed. Do not overlap hosts across drivers.
+- New n8n rollback regressions require the task-state directory before package/repository restoration, and remove the service account only when a task-owned creation marker exists. Existing failed tasks were cleaned with the current reviewed rollback commands, not their old unsafe saved defaults.
+
+### Latest all-host completion effort (2026-10-15 07:58 UTC)
+
+- Latest source checks: **396 unit/default tests passed**, lint/typecheck passed, package installation passed, five native artifact checksums verified. New coverage also confirms SSE delivers events created after subscription, not only its initial backlog. The live replay test now tolerates normal HTTP chunk boundaries while retaining reconnect/no-replay assertions. Latest rebuilt tarball SHA-256: `696eacde9e000269a9ce0ee3ce8f8f79d4ba7328fb8432747ac4ae1179dd2212`. Generated native test binaries were restored to the original release artifacts.
+- The new application matrix has passed 15 additional lifecycles, including fresh AlmaLinux WooCommerce, Debian PrestaShop, Ubuntu WordPress/WooCommerce/Joomla/Drupal, and Alpine WordPress/WooCommerce/Joomla/Drupal. Its current and remaining rows are in the generated Markdown report. openSUSE's old-process WooCommerce direct-command timeout was independently reconciled from the complete plugin/product/metadata/HTTP postconditions, then remaining verification and reviewed rollback passed. A fresh openSUSE application matrix using the current durable-job code is active in session `47153`; do not restart the older full validator.
+
+- Oracle's new full validation exposed a repeat-rollback bug: repository cleanup ran after its task state had already been deleted, so a second revert removed pre-existing EPEL. Fixed ownership checking to require the state directory. A shell regression executes both rollbacks with mocked package tools and proves pre-existing EPEL is never removed. Repair task 13 restored the exact captured `oracle-epel-release-el9` version `1.0-1.el9`. Full Oracle rerun session `74257` has now passed htop plus the other basic cases and reached its current-release update.
+- Shared WordPress artifact acquisition now lives in `linux-php-foundation.js`, respecting the existing architecture guard against application-builder dependencies. Both WordPress and WooCommerce use it. A new shell regression proves valid cached hashes skip download and corrupted data forces acquisition rather than being trusted. **Full local suite: 395 passed**, lint/typecheck passed after the fixes. Keep the earlier failed architecture-check output as historical evidence; it was fixed by moving the helper to the foundation, not by relaxing the test.
+- Ubuntu fresh WordPress lifecycle **passed** after data-preserving repair. Ubuntu/Oracle original recovered fixtures were also removed through reviewed rollback. AlmaLinux WooCommerce task 34 was independently reconciled without repeating the completed plugin work, completed remaining verification, and passed reviewed cleanup; its fresh full lifecycle is active in session `22220`.
+- Active matrix sessions: original two-worker driver `38598` (Debian and Alpine currently), AlmaLinux driver `22220`, Ubuntu driver `39654`, full openSUSE validator `71367`, full Oracle validator `74257`. Read the generated Markdown report and task journals before restarting any host. The matrix still has untested application rows; do not claim the entire catalog passed.
+
+- **All five originally uncertain tasks are now recovered and applied-state verified**, including Oracle htop 8 and Ubuntu WordPress 40. Their reviewed rollback/fixture-removal checks also passed. Ubuntu's preserved MySQL data remains in the private backup described below; no original data was deleted.
+- New matrix failure: AlmaLinux WooCommerce task 34 exceeded the direct-command timeout at `install-woocommerce`. Independent checks proved the pinned plugin active, exactly one published marker product, all three expected product metadata values, and the HTTP marker. Reconciled completion without replaying plugin installation, preserved ten completed commands in a new reviewed revision, and completed the remaining verification. Reviewed cleanup is active in session `40252` if still running; check its result before restarting this host.
+- WooCommerce native plugin installation now uses a durable signed 30-minute job. WooCommerce now reuses WordPress's existing digest-verified artifact-cache helper instead of redownloading core on repeat apply. Focused regressions and lint passed after these changes. Rebuild/checks must run again after the current source edits.
+- The live matrix has additionally passed Alpine WordPress and Debian WooCommerce/Joomla. See `/tmp/intent-lab-check.qfoLPY/remaining-matrix.md` for authoritative per-case results. Oracle's full common-task validator is active in session `8733`; Ubuntu's remaining application matrix is active in session `39654`. openSUSE has passed its complete WordPress lifecycle and moved to WooCommerce.
+
+- **Reliability run 10 passed all 21 reported tests with zero exclusions** on openSUSE/Rocky, including all four real process-crash boundaries, job/master disconnection, loop protection, pause/revision/stale approval/rollback, canary gates, authenticated console/SSE/export, real CLI and real Chrome. Duration 162 seconds. Per-host diagnostic/pause/lease/resume checks have passed on all nine distributions; complete workflow suites passed on Debian/Ubuntu and openSUSE/Rocky, not every workflow on every distribution. Log: `/tmp/intent-lab-check.qfoLPY/linux-reliability-v10.log`. The full application catalog matrix is still running and is not yet a pass.
+
+- Fresh full WordPress lifecycles now **passed on Debian and AlmaLinux** (matrix report). Their WooCommerce cases are active next. openSUSE completed all eligible basic lifecycle cases, full read-only health, and its current-release update; WordPress task 23 is now running. SSH multiplexing integration on openSUSE **passed**, with one master and 21 channels.
+- Reliability run 9 on openSUSE/Rocky passed every host/execution case, CLI and Chrome, but its local SSE replay test failed with `ECONNRESET`. A minimal local reproduction proved a test-process scheduling race: blocking the shared event loop for eight seconds after an HTTP response reuses an expired keep-alive connection; yielding once before the request returns SSE 200. Added that event-loop yield to the integration fixture without changing production code or weakening assertions. Full run 10 is active in session `78349`, log `/tmp/intent-lab-check.qfoLPY/linux-reliability-v10.log`; retain run 9's failure log.
+- Updated local full suite: **393 passed**, typecheck and focused tests passed. Generated native test binaries were restored to pre-test artifacts. Final lint/package/checksum checks remain to be refreshed after current edits.
+
+- AlmaLinux WordPress task 31 also recovered and verified successfully. All four recovered WordPress fixtures (Alma 31, Debian 64, Alpine 14, Arch 21) then completed reviewed rollback with live fixture-removal verification. They are safe for fresh full lifecycle tests.
+- openSUSE nginx task 2 was reconciled from its remote `prepare-complete` marker, resumed without reinstalling, and applied successfully. Its first rollback revealed another bug: package removal already deleted `/run/nginx`, then `rmdir` failed. Fixed cleanup to check directory existence, added a regression assertion, and completed a reviewed cleanup continuation. A fresh full openSUSE catalog validator is active in session `71367`; nginx, htop, jq, system-user, systemd service/timer have advanced successfully, with cron running at the latest inspection.
+- nginx package preparation now uses signed durable jobs with a 30-minute bound, matching htop/WordPress. No old uncertain command was automatically rerun.
+- Ubuntu repair task 44 **passed**: stopped MySQL data was moved, without deletion, to `/var/lib/webminai/lab-recovery/ubuntu-mysql-task-40/mysql-before`; existing `/var/lib/mysql-8.0` was left untouched. `apt-get -f install` completed the interrupted MariaDB transaction and `dpkg --audit` is clean. Both original data sets remain private and preserved. This is not a MySQL-to-MariaDB data migration. Ubuntu WordPress task 40 now has a fresh reviewed recovery revision running in session `80698`.
+- Oracle htop task 8 remains active in session `7255`, downloading Oracle repository metadata under the recorded durable job. Do not duplicate it.
+- A two-worker remaining-application matrix is active in session `38598`, selecting AlmaLinux, Debian, Alpine, Arch, Rocky, Fedora. It skips previously passed Fedora WordPress-through-Moodle and Rocky WordPress lifecycles. Actual per-case progress and private log paths are appended to **`/tmp/intent-lab-check.qfoLPY/remaining-matrix.md`** by `remaining-matrix.mjs`. INELIGIBLE is not PASS. A failed host stops safely while the other worker continues. Consult this report before restarting anything.
+- Latest focused recovery/catalog regression tests passed; lint passed. Final full checks and package rebuild must run again after the completion effort.
+
+### Current recovery/openSUSE run
+
+- User authorized testing openSUSE and reviewed continuation of the five old uncertain executions. Temporary helper `/tmp/intent-lab-check.qfoLPY/recover-uncertain.mjs` first probes task-owned postconditions, resolves completed versus failed/partially-applied work, creates/validates a fresh revision preserving the completed prefix, explicitly approves its fingerprint, and resumes through the shared controller. It does not erase old events or replay verified completed commands.
+- **Recovered and live applied-state verified:** Alpine WordPress task 14, Arch WordPress task 21, Debian WordPress task 64. These are successful recovery/apply checks, not full two-apply/two-revert lifecycle passes. Sites remain deployed; cleanup is pending.
+- AlmaLinux WordPress task 31 recovery is still running in session `30912`; package installation completed, artifact job `4a3d72d0d2158a99e87ef1f5e07397dd` was pending/running at the latest inspection. Oracle htop task 8 recovery is still running in session `7255`, job `9653f4bc5f57b7954b5502c17e0f7584`. Do not start duplicates. The Oracle revision preserves the currently installed EPEL repository because its original ownership cannot be proven from the incomplete old capture.
+- openSUSE is registered in the vault, Netdata installed, signed Stage 2 active, and normal root execution policy enabled. The temporary setup helper initially omitted fingerprint workspace aliases, causing post-activation policy setup to fail; its alias handling was corrected and policy setup completed only after an active Stage 2 probe. Initial validation task 1 was rejected before dispatch due to that policy setup issue.
+- **openSUSE rerun failed:** full-catalog validator session `41034` stopped at nginx task 2 `prepare-nginx`, with an uncertain 300-second direct-command timeout. No later catalog cases ran. No rollback/replay was performed. Investigate the remote package outcome before continuation; nginx package preparation still needs the same durable-job treatment already added for htop and WordPress.
+- Ubuntu's conflicting MySQL data is still preserved and blocked by preflight. No migration/reset was authorized.
+- Model code default remains `gpt-5.6-luna` / `medium` in `src/codex-planner.js`, not 6.1 Sol Low; no model settings changed.
+
+- **openSUSE SSH key verification resolved:** the operator supplied the fingerprint directly from the LXD container, matching `SHA256:Ru/ojZy1rImqt0nIydv0kPotUNTQfulrFEqR2xiG5AU`. Independently hashed the current scanned ED25519 public key, updated only `[127.0.0.1]:2226` in the private lab `known_hosts`, and verified batch SSH to `10.201.49.174` as `webminai` with strict host-key checking still enabled. This supersedes older key-blocker notes below. Vault registration, Stage 2 activation, and openSUSE common-task tests remain pending.
+
+### Failure-fix follow-up
+
+- Alpine nginx task 21 and Arch nginx task 24 now pass two applies, two reviewed reverts, and exact-baseline checks. Fixed missing `/run/nginx` creation and nginx include detection when `conf.d` already exists. Original failed task 1 on each host remains historical evidence.
+- Fedora PrestaShop task 32 also passed. The original driver then stopped at Moodle task 34: Fedora incorrectly received EL9's `dnf module enable mariadb:10.11`. Fixed Moodle to restrict MariaDB module capture/enable/reset to EL9. Fresh Fedora Moodle tasks 35/36 **passed** two applies, two reverts, and exact baseline (session `86414`, exited 0).
+- WordPress/WooCommerce package installation and artifact acquisition now use the existing signed durable-job mechanism with 30-minute bounds, matching the PHP application foundation. Simple htop/jq installs also use durable jobs. This does not replay any old uncertain commands. Fresh Rocky WordPress tasks 26/27 **passed** two applies, two reverts, and exact baseline (session `12582`, exited 0).
+- Ubuntu's confirmed dpkg error is caused by existing MySQL 8 data and an already populated `/var/lib/mysql-8.0` destination. Both data directories are preserved. Added a read-only MySQL-data guard before native MariaDB deployment in WordPress and the shared PHP foundation. Database migration or lab reset still needs explicit review; do not delete these directories to make a test pass.
+- Three new focused regressions in `test/linux-catalog-recovery.test.js` pass: nginx include/backup/runtime handling, MySQL-data protection, and Fedora module selection plus durable-job planning. Added a fourth regression in the validator tests: uncertain state blocks even read-only cleanup inference; dirty state cannot execute an unjournaled cleanup or be marked reverted. Full suite **393 tests passed**; lint, typecheck, package installation, checksums, and diff whitespace checks passed. Updated tarball SHA-256: `834414a79ca41d5d3f48bd6eedc12bc0fb3b4e3caf1a6ff50a6a2890429ae62d`.
+- Found and removed the validator's old automatic recovery helper, which used freshly generated unjournaled rollback commands. New validation refuses uncertain outcomes and requires separate reviewed rollback for remaining task state. Fedora's already-started runner used the old helper to clean task 34 before this guard landed; that cleanup is recorded as `reverted`, not a Moodle pass. New successful lifecycle evidence is tasks 35/36. No uncertain task was sent through that helper during this follow-up.
+- The new MySQL preflight also passed a signed read-only check on the actual Ubuntu host: it rejected the known conflict without changing either data directory. No database repair/migration was attempted.
+- No catalog or reliability validator remains active after these follow-up runs. Preserve the vault and existing uncertain tasks for later operator-reviewed recovery.
+- Old uncertain outcomes remain unchanged: Alma 31, Debian 64, Alpine 14, Arch 21, Oracle 8. Read-only probes found completed package snapshots for Arch and downloaded artifacts for Alpine, but no durable job IDs for these old direct commands. Do not infer a final exit status from package or file presence alone.
+
+- **Linux feature regression suite: passed.** Final run 8 passed all 21 reported tests, with no exclusions, on Debian/Ubuntu. Earlier runs covered the other six verified hosts. In aggregate, all 26 distinct implemented live checks passed, including real crash discovery/recovery, live CLI terminal interaction, and actual Chrome UI/replay. Logs end in `linux-reliability-v8.log` under the artifact directory below.
+- **Local checks: passed.** Latest full suite: 393 tests; lint; typecheck; package installation; all five artifact checksums. Latest tarball checksum is in the follow-up above.
+- **Original catalog driver finished.** It passed Fedora PrestaShop, then stopped at the Moodle module failure. The focused Moodle fix and lifecycle rerun subsequently passed, as recorded above.
+- **Update tasks are now genuinely completed:** AlmaLinux 21, Debian 20, Fedora 20, Rocky 25, Ubuntu 39, Alpine 13, Arch 19. The first four required or exercised reviewed report continuation; completed package updates were not replayed. Do not trust earlier buffered PASS output without the journal confirmation described below.
+- **Unresolved catalog cases:** WordPress AlmaLinux 31, Debian 64, Alpine 14, Arch 21 have uncertain outcomes requiring evidence before continuation/cleanup; Ubuntu WordPress 40 has a confirmed package-manager failure and needs a reviewed partial rollback. Oracle htop 8 has an uncertain install outcome. Do not blindly rerun these cases. The earlier Alpine/Arch nginx failures were separately reviewed and cleaned up, not converted into passes.
+- **openSUSE remains untested** pending independent SSH host-key verification. Non-Linux real-host paths and live Codex completions were not exercised. Planner/analysis outputs in the new suite are deterministic fixtures. Catalog failures are not yet classified as regressions versus main on a clean host baseline.
+- To continue, inspect the current SQLite journals and `webminai-fedora-44.log` before starting anything. Snapshot rows below are historical and can become stale while the original driver runs. Vault, SSH configuration, log paths, commands, and exact failed task IDs are retained below. No secrets are stored in this report.
+
+## Objective
+
+Test **all changes relative to main**, using Linux common tasks as real-host fixtures. Catalog install/revert tests alone are insufficient. Add missing automated regression/integration cases for durable execution, crash recovery, loop detection, intervention, multi-host rollout, console security/replay, and SSH reuse. Keep tests explicitly opt-in and confined to these disposable hosts.
+
+## Safe resume information
+
+- Encrypted test vault: `/home/vscode/intent-linux-test-vault.6jq3DT`.
+- Encryption password comes from existing `VAULT_TEST`; never print or store its value in this document.
+- Temporary SSH config, helper scripts, and detailed logs: `/tmp/intent-lab-check.qfoLPY`.
+- Original lab key and known-hosts file: `scripts/lxd-lab/`. Never print the private key.
+- Connections use direct IPv4 addresses, port 22, user `webminai`, and strict host-key checking. Saved loopback host-key aliases preserve existing trusted keys.
+- Stage 2 was activated through the existing installer on eight verified hosts. Their action keys now belong to this test vault, not any older vault. Preserve this vault for reruns.
+- Ubuntu Netdata was initially inactive; Stage 2 activation restored it. Alpine lacked `/etc/machine-id`; a new ID was created only because that file did not exist, allowing normal fingerprint registration.
+- openSUSE remains excluded: its saved SSH key does not match the server. Await independent fingerprint verification from the LXD host: `lxc exec webminai-opensuse-160 -- ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`. Presented ED25519 fingerprint: `SHA256:Ru/ojZy1rImqt0nIydv0kPotUNTQfulrFEqR2xiG5AU`. Do not bypass checking or trust a keyscan alone.
+
+**Do not start duplicate validators on a host with active work.** Package updates can be one-way and must not be killed or automatically repeated because local output is quiet. Read task journals and retained remote job status before deciding what to do.
+
+## Host progress
+
+Successful lifecycle entries below passed two real applies, two explicitly reviewed reverts, and exact-baseline verification unless noted. A successful cleanup after a failed test is not a test pass.
+
+| Host | IPv4 | Passed common-task cases | Current state |
+| --- | --- | --- | --- |
+| AlmaLinux 9 | 10.201.49.157 | nginx, htop, jq, system-user, systemd-service, systemd-timer, cron, logrotate, tmpfiles; read-only host health | `system-update-linux`, task 21, running |
+| Debian 13 | 10.201.49.126 | nginx, htop, jq, system-user, systemd-service, systemd-timer, cron, logrotate, tmpfiles; read-only host health | `system-update-linux`, task 20, running |
+| Fedora 44 | 10.201.49.71 | nginx, htop, jq, system-user, systemd-service, systemd-timer, cron, logrotate, tmpfiles; read-only host health | `system-update-linux`, task 20, running |
+| Alpine 3.23 | 10.201.49.175 | htop, jq, system-user, cron, logrotate; host health; current-release update | WordPress task 14 failed with uncertain outcome, reviewed recovery needed; nginx failed, reviewed cleanup passed |
+| Arch | 10.201.49.166 | htop, jq, system-user, systemd service/timer, cron, logrotate, tmpfiles, host health, current-release update | nginx failed and reviewed cleanup passed; WordPress task 21 failed with uncertain package-install outcome, reviewed recovery needed |
+| Oracle 9 | 10.201.49.20 | system-user lifecycle; reliability diagnostics | Registered and Stage 2 active; full catalog queued |
+| Rocky 9 | 10.201.49.6 | system-user lifecycle; reliability diagnostics | Registered and Stage 2 active; full catalog queued |
+| Ubuntu 24.04 | 10.201.49.200 | system-user lifecycle; reliability diagnostics | Registered and Stage 2 active; full catalog queued |
+| openSUSE 16.0 | 10.201.49.174 | Not tested | SSH host-key verification required |
+
+### Confirmed failures
+
+- Alpine nginx: `nginx -t` failed because `/run/nginx/nginx.pid` could not be opened; runtime directory was missing.
+- Arch nginx: syntax check passed, but the verification could not connect to port 18080.
+- Both failures occurred after confirmed `prepare-nginx` and `write-site`, with a failed verification step. Automatic partial rollback was correctly rejected. The two fixture-only rollback plans were reviewed, explicitly executed, and `verifyReverted` passed on both hosts. Their task 1 statuses now read `reverted`; preserve these failures in reports rather than interpreting that status as success.
+- An initial AlmaLinux nginx attempt exposed an outdated validator: legacy unjournaled applies followed by a journaled rollback caused the second rollback to be rejected. Its fixture was verified clean. The updated validator subsequently passed nginx using journaled applies and separately approved repeated rollback.
+
+## Active local test processes
+
+These are unified-exec session IDs for this conversation; they might not survive a new session. Check processes and logs rather than assuming they still exist.
+
+- Session `30084`: full AlmaLinux common-task validator; stdout is buffered by `trs`. Task databases provide live progress.
+- Session `90164`: `/tmp/intent-lab-check.qfoLPY/run-common-tasks.mjs`, two workers for Alpine, Arch, Debian, Fedora, Oracle, Rocky, Ubuntu. Alpine/Arch stopped at nginx; their logs remain. Debian/Fedora are currently updating, blocking later queued hosts.
+- Session `36163`: `/tmp/intent-lab-check.qfoLPY/continue-common-tasks.mjs`, separate per-catalog attempts on Alpine and then Arch, excluding their already-failed nginx case. Logs are named `HOST-CATALOG.log`; ineligible cases are distinguished from failures. Stops that host if cleanup needs separate review.
+
+The existing validator is fail-fast within each host. A stopped host has **not** passed or tested all later catalog cases.
+
+## Changes made during validation
+
+- `scripts/validate-linux-common-tasks.js`: resolve fingerprint-based history directories; journal real applies; use a distinct task record for the second apply so recovery does not silently skip the intended idempotence test; require a separately approved plan for the deliberate second rollback. No completed history is deleted or rewritten.
+- `scripts/linux-reliability-worker.js`: guarded crash-injection worker. It accepts only explicit lab configuration and reliability fixture tasks. It can kill its own process after preparation, observed remote completion, persisted completion, or job acknowledgment.
+- `test/linux-reliability.integration.test.js`: new opt-in suite covering per-host common diagnostics, all four real process-crash boundaries, real job/master disconnection, immutable revisions with stale approval, real failed common-task probes for loop protection, staged canary failure and selected continuation, planning-time pause, and authenticated console/SSE/export replay with real task history. Local lint and the default skip passed. **First live run started; results pending** in `/tmp/intent-lab-check.qfoLPY/linux-reliability.log`, launched by `run-reliability.mjs`. It selects the eight verified hosts with Debian first and lets crashed execution leases expire naturally.
+
+Lint passed after adding both new test files. Typecheck and full unit/package checks must be rerun after the suite is finalized.
+
+Additional regression found during coverage review: rollback proposals containing changing commands incorrectly required their own rollback plan. `OperatorController.propose` now validates rollback proposals with `requireRevert: false` while retaining all command policies and explicit approval. Added a deterministic regression in `test/operator-controller.test.js`; execution result pending at this checkpoint.
+
+04:42 UTC update: all 12 operator-controller unit tests, including that new changing-rollback regression, passed. The first live reliability run passed boundary pause/lease/resume checks on Debian, AlmaLinux, Alpine, Arch, Oracle, Rocky, and Ubuntu. Fedora's maintenance diagnostic timed out after 120 seconds while its package update was active; its outcome must not be automatically replayed. The integration fixture now omits only the package-maintenance diagnostic to avoid competing with the separate update suite; the full catalog health check remains covered by catalog validation. This change and the subsequently added failed-after-change rollback, abort/revision, and in-flight job-pause cases require a second live run. First run is still exercising actual child-process crash cases.
+
+Alpine WordPress failed at `verify-artifacts` with a transport/timeout error. Its driver is expected to stop that host when cleanup needs review; inspect the journal and verify remote state before cleanup or retry. This is not a completed WordPress validation.
+
+First reliability run finished: 15 passed checks and three failed checks (the runner also reports the failed parent, totaling four failures). All four actual process-crash boundaries, real-job SSH master recovery, immutable revision/stale approval, loop protection, and queued-run pause passed. Failures: Fedora maintenance probe contention; a test incorrectly assumed run-host array order; authenticated SSE disconnected under a large backlog. Corrected the fixture's ordering assumption. Fixed actual SSE backpressure handling to wait for `drain` and resume from the written cursor rather than destroying the response. Added a large-frame regression in `test/operator-controller.test.js`. Second live run started with additional cases and bounded non-maintenance diagnostic fixtures; progress is in `/tmp/intent-lab-check.qfoLPY/linux-reliability-v2.log`.
+
+Authoritative signed status probes confirmed the AlmaLinux, Debian, and Fedora update jobs were still `running`, not failed. Retained remote IDs: AlmaLinux `261a88befaf2ed60fb29665495c472f0`; Debian `0e0dad83aa1a22c570af34749276ba77`; Fedora `d222d0f196d41917180007d086513a62`. Do not rerun these updates.
+
+## Latest verified results
+
+- **Second live reliability run: PASS, 22 reported tests, zero failures**, in 156 seconds. All eight hosts passed common diagnostic pause/resume/lease checks. All four real SIGKILL crash boundaries passed with natural lease expiry. Real-job/master disconnection, immutable revision, actual failed-probe loop gating, failed-after-change reviewed rollback, abort/new revision, in-flight pause, canary failure/selected continuation, queued planning pause, and authenticated console/SSE/replay passed. Log: `/tmp/intent-lab-check.qfoLPY/linux-reliability-v2.log`.
+- Added two final live cases for successful canary stage release and authenticated writable-console actions (CSRF, stale decisions, missing approval, forbidden generic commands, approved common diagnostics). Third run is in `/tmp/intent-lab-check.qfoLPY/linux-reliability-v3.log`; it explicitly skips the four unchanged crash cases already passed in run 2. Results pending.
+- All eight verified hosts now passed the reversible `system-user` catalog lifecycle. Oracle, Rocky, and Ubuntu were tested individually with two applies, two reverts, and exact baseline; logs are `HOST-system-user.log` in the temporary directory.
+- Arch additionally passed htop, jq, systemd service/timer, cron, logrotate, tmpfiles, host health, and current-release update. Its WordPress case subsequently failed with incomplete cleanup; it is not a pass. Alpine WordPress also remains failed and needs reviewed recovery.
+- All 13 controller unit tests passed after the SSE fix. A further common-task read-only-analysis unit test and crash-worker guard tests were added; rerun the final full suite to capture final counts.
+- Full raw SSH benchmark measurements, including p95 and connection acquisition metrics, are preserved at `/home/vscode/intent-linux-test-vault.6jq3DT/ssh-benchmark-results.json`.
+
+04:49 UTC: **third live run passed all 20 reported tests**, including the two final scenarios. The four previously passed real crash cases were excluded from this focused rerun. Across runs 2 and 3, all 23 distinct live scenarios passed. Run 3 log: `/tmp/intent-lab-check.qfoLPY/linux-reliability-v3.log`. No live Codex request was made; plan generation and analysis are deterministic fixtures. All 15 controller unit tests now pass, including an additional approval-response vault-redaction regression. The final full suite is running to capture its updated count.
+
+Final additional fixes: approval responses now use controller-level vault-secret redaction, not only generic field redaction. The common-task validator now rejects a successful-looking but incomplete command list instead of treating paused work as PASS. Crash-worker opt-in/unrelated-host guard tests pass.
+
+Follow-up run 4 added a real pseudo-terminal CLI startup/unlock/shutdown check for both read-only and action-enabled consoles. That run stopped at preflight before executing cases: AlmaLinux Stage 2 health returned HTTP/curl 22 while its later package-install test was active. Independent probes confirmed the other seven hosts active. A focused run 5 on Debian and Ubuntu is now testing the new CLI case and unchanged non-crash scenarios; log `/tmp/intent-lab-check.qfoLPY/linux-reliability-v5.log`. Preflight errors now identify the host in the test report. Do not erase run 4's failure.
+
+The original AlmaLinux catalog validator has now stopped: its current-release update completed successfully, then WordPress task 31 failed at `install-packages` with an uncertain timeout; automatic rollback correctly refused. Debian's current-release update also completed, then WordPress task 64 failed at `install-packages` with an uncertain timeout and blocked cleanup. The original two-worker driver may now advance to Oracle and Rocky. Read current journals before rerunning either failed task.
+
+**Correction from journal inspection:** AlmaLinux update task 21, Debian update task 20, and Fedora update task 20 have status `partial`, even though the old runner printed PASS after the install command completed. Recovery paused later verification commands. The install job finishing is not a full validation pass. The validator's new result-count assertion prevents this false PASS. Three new unit tests in `test/linux-common-task-validation.test.js` pass: incomplete/empty results rejection, separate journaled repeat applies, and explicit second rollback review. Importing the validator for these tests performs no vault/remote operations; direct invocation retains its normal main entry point.
+
+**Run 5: PASS, 15 reported tests** on Debian and Ubuntu, excluding the unchanged crash cases. The new real CLI pseudo-terminal case passed for both console modes: vault unlock without echo, token login, correct action-mode flag, and clean Ctrl+C exit. Together with the earlier eight-host and crash runs, all 24 distinct live scenarios implemented so far have passed. No test uses a real Codex completion; deterministic planner/analysis fixtures are explicitly separate from actual CLI terminal testing.
+
+Final source checks: **`npm test` passed 388 tests**, including the three new validator regressions. Lint, typecheck, package installation, and all five shipped artifact checksums passed. Native test rebuilds were restored to their pre-test artifacts. The rebuilt package checksum is `b0f799087b7cf6fa2ce124a5c003be4f98cea0d5c613fba4e8c56f243228ef53`.
+
+### Latest catalog state at 04:55 UTC
+
+| Host | Current catalog state |
+| --- | --- |
+| AlmaLinux | Original validator stopped. WordPress task 31 has uncertain `install-packages`; update task 21 is partial, not a full pass. Basic lifecycle cases and health passed. |
+| Debian | Original validator stopped. WordPress task 64 has uncertain `install-packages`; update task 20 is partial, not a full pass. Basic lifecycle cases and health passed. |
+| Fedora | WordPress task 24 running. Update task 20 partial. Basic lifecycle cases and health passed. |
+| Alpine | WordPress task 14 uncertain at `verify-artifacts`; no credentials/database/site steps were dispatched. Its package install did complete. Separate continuation driver stopped safely. |
+| Arch | WordPress task 21 uncertain at `install-packages`; later steps pending. Separate continuation driver stopped safely. |
+| Oracle | nginx task 6 and system-user task 3 passed. htop task 8 timed out with uncertain `capture-install`, cleanup blocked. Inspect before repeating. |
+| Rocky | Basic lifecycle cases and health passed; update task 25 running. |
+| Ubuntu | system-user task 3 and reliability/CLI-related host checks passed; full catalog still queued. |
+| openSUSE | Still excluded pending independently verified SSH host key. |
+
+The original two-worker driver (session `90164`, local PID `34776` at this checkpoint) remains active. Original AlmaLinux session `30084` exited with failure. Continuation session `36163` exited after safely stopping Alpine/Arch on failed cleanup. All live reliability test processes have completed. Do not interpret earlier table rows or buffered PASS output as authoritative over these journal states.
+
+04:58 UTC: reviewed the only pending update step on AlmaLinux/Debian/Fedora: `report-system-update`, which snapshots package versions into the task's own report directory and checks release metadata. No package install/upgrade step remains pending. `/tmp/intent-lab-check.qfoLPY/resume-update-reports.mjs` is using explicit fresh controller approval to resume that report only on healthy Debian and Fedora, asserting that the completed install step still has exactly one dispatch event. AlmaLinux remains excluded from continuation while its Stage 2 health probe fails. Result pending; do not mark those partial tasks completed until the script and journal confirm it.
+
+That real continuation exposed another regression: controller resume validated completed one-way update commands as if it were about to execute new changes, so it demanded nonexistent rollback commands before running the remaining report. `OperatorController.resume` now keeps full policy/approval validation but requires rollback only when a **pending** command changes state. Confirmed completed commands are still skipped; uncertain/failed commands still block continuation. Added a unit regression proving the report can resume but an unexecuted changing plan without rollback remains rejected. The first resume attempt dispatched no report command. A fresh reviewed continuation attempt is now running.
+
+**Verified continuation outcome:** Debian update task 20 and Fedora update task 20 are now `completed`. Both resumed only `report-system-update`; their install command still has exactly one dispatch event. The reporting snapshots may include packages from subsequent failed WordPress preparation because the old runner advanced prematurely; do not use those deltas as isolated update benchmarks. AlmaLinux update task 21 remains partial pending healthy Stage 2. A reusable opt-in regression was added using a reversible common fixture approved as one-way, followed by pending common diagnostics, then separately reviewed fixture cleanup. Focused run 6 is checking it alongside the other non-crash cases: `/tmp/intent-lab-check.qfoLPY/linux-reliability-v6.log`.
+
+**Run 6 passed all 16 reported tests**, including the new one-way continuation case. All 16 controller unit tests passed, and the updated full local suite passed **389 tests**, with lint/typecheck passing. A real headless Chrome UI case has now been added using only Node's built-in WebSocket/CDP support and the installed browser: token-fragment removal, login, task selection, read-only action hiding, replay slider, and a transport counter proving no remote execution. Chrome runs with a private disposable profile, receives no vault-password environment, and uses `--no-sandbox` only inside this test container. Run 7 is checking it on Debian/Ubuntu with the already-passed crash cases excluded: `/tmp/intent-lab-check.qfoLPY/linux-reliability-v7.log`. Browser case result pending.
+
+**Run 7 passed all 17 reported tests**, including the actual Chrome UI case. The complete implemented coverage now spans 26 distinct live scenarios across eight verified hosts and focused reruns. The crash worker now also mirrors the CLI's `markTaskRunning` step, with an explicit assertion that restart discovery lists the interrupted task. Full final run 8 on Debian/Ubuntu includes **all** crash cases (none excluded) plus the latest browser/CLI/one-way cases: `/tmp/intent-lab-check.qfoLPY/linux-reliability-v8.log`; final result pending. Expected count with two hosts is 21 tests including the parent. Latest successful rebuilt-package checksum: `d89bd460ea17d4d6992bf65d6d6e8844a98cb4f80cb4ab928253ac35fc5c86de`.
+
+**Run 8: PASS, all 21 reported tests, zero exclusions**, in 162 seconds. All four SIGKILL crash cases now explicitly verified interrupted-task discovery as well as lease ownership and recovery. CLI, Chrome, read-only continuation, and all other current cases passed together on Debian/Ubuntu. Together with eight-host run 2, all 26 distinct live checks implemented in the suite have passed. This completes the current Linux feature regression suite, not the full application catalog.
+
+05:09 UTC catalog update: AlmaLinux Stage 2 became healthy again, and update task 21's report-only continuation passed with exactly one install dispatch, so that update task is now completed. Fedora has additionally passed full WordPress, WooCommerce, Joomla, and Drupal two-apply/two-revert lifecycles; PrestaShop task 32 is running. Rocky's original validator correctly stopped at a recovered update pause (`2 !== 3`) rather than printing PASS; task 25's reviewed report-only continuation is now running. Ubuntu basic lifecycles and its update passed, but WordPress task 40 failed with a confirmed dpkg exit 1, not an uncertain transport outcome; automatic partial rollback remained blocked pending review. Oracle htop task 8 and the earlier WordPress timeouts on AlmaLinux/Debian/Alpine/Arch still need independent outcome review. These catalog failures have not been classified against a clean main-branch host baseline, so do not call them pre-existing bugs or new regressions without further evidence.
+
+## Existing tests and gaps against main
+
+Existing deterministic tests: `test/execution-journal.test.js`, `test/operator-controller.test.js`, `test/ssh-session-manager.test.js`, plus expanded system SSH, Netdata, multi-host, settings, and plan-validator tests. The full local suite passed 380 tests before the current validator edits; SSH-specific tests passed 31 and skipped the opt-in integration case.
+
+The new integration suite now implements much of the following checklist; its first live run is pending. Remaining extensions and verification still required:
+
+1. Real child-process crash before dispatch, after remote execution before confirmation, after durable completion, and after durable job acknowledgment. Let actual execution leases expire; do not reset journal/lease tables to fake recovery.
+2. Reconstruct confirmed state, reject uncertain replay, recover known jobs, demand operator evidence where ambiguous, and verify remote fixture baseline after reviewed cleanup.
+3. Disconnect only a test-owned master during a real signed job; reconnect and query the same job without replay; pause remaining work for approval.
+4. Pause at safe boundaries and while a job is running; immutable completed prefix; deterministic planner fixture for remaining-step revision; stale approval rejection; abort and reviewed rollback.
+5. Real common-task diagnostics for loop protection, with controlled failures and positive progress cases; no autonomous repair loop.
+6. Common-task canary/batch rollouts on multiple hosts: halt gates, queued pause, independent selected continuation, no completed-host rerun, per-host rollback evidence.
+7. Authenticated localhost console over actual task history: token/Origin/CSRF/read-only enforcement, version checks, SSE reconnect, sanitized exports and replay with a transport spy proving no remote calls.
+8. Run local unit/package checks and document which non-Linux platform/terminal/real-Codex checks remain untested. Do not claim tests exist or passed before running them.
+
+Use `host-health-linux` for harmless multi-step plans and `system-user` or another reversible common recipe for real state changes. Deterministic AI proposals are test fixtures, not evidence that a live Codex session was tested. Avoid overlap with active catalog fixtures.
+
+## SSH live validation already completed
+
+All eight verified hosts passed the real OpenSSH multiplexing integration (sequential/concurrent channels and lease ownership), owned-master termination/reconnection, and a simulated lost acknowledgment after a real successful command without replay. The acknowledgment test injected the returned transport status; it was not an actual dropped network packet.
+
+Read-only Netdata health/inventory passed on seven hosts before new activation; Ubuntu was initially inactive. New activation passed on all eight registered hosts.
+
+Five-repetition SSH benchmarks completed using AlmaLinux for single-host cases and all eight hosts for the multi-host case. Median end-to-end times (milliseconds):
+
+| Workload | Disabled | Per-workflow master | Pooled | Pooled + compression |
+| --- | ---: | ---: | ---: | ---: |
+| One command | 297.1 | 154.8 | 28.7 | 29.0 |
+| Ten sequential | 1645.1 | 233.8 | 103.1 | 108.6 |
+| Fifty sequential | 7557.8 | 581.8 | 448.4 | 469.9 |
+| Ten concurrent | 413.9 | 165.3 | 43.6 | 44.4 |
+| Small SCP | 598.0 | 180.8 | 51.8 | 52.0 |
+| Netdata health/inventory | 501.5 | 189.3 | 73.2 | 68.9 |
+| Eight-host operation | 424.9 | 222.2 | 53.4 | 50.2 |
+
+Both pooled modes established eight masters with 62 reuse hits, 440 channels, zero reconnects, and zero cleanup failures during the benchmark. Five repetitions on this local lab are not a general performance guarantee; keep compression off by default.
+
+## Commands for resuming
+
+```sh
+# Export only the directory, not the password. VAULT_TEST must already be set.
+export WEBMINAI_DATA_ROOT=/home/vscode/intent-linux-test-vault.6jq3DT
+node scripts/validate-linux-common-tasks.js --host=webminai-HOST --task=CATALOG_ID
+# Explicitly selected disposable hosts only. Crash cases wait for 30-second leases.
+INTENT_LINUX_LAB_ALLOW=1 INTENT_LINUX_TEST_HOSTS=webminai-debian-13,webminai-ubuntu-2404 npm run test:linux-reliability
+git diff main...HEAD --stat
+git diff -- scripts/validate-linux-common-tasks.js
+npm run lint
+npm run typecheck
+```
+
+TaskStore must be constructed with directory aliases from `settings.servers[host].historyId`. Query active task IDs and journals before resuming; do not infer a failed job from a buffered terminal. Keep test artifacts and private vault files outside git.

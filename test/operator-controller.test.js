@@ -10,6 +10,7 @@ import { startOperatorConsole } from '../src/operator-console.js'
 import { planFingerprint } from '../src/execution-journal.js'
 import { executeApprovedPlan } from '../src/plan-validator.js'
 import { MultiHostService } from '../src/multi-host-service.js'
+import { buildCommonTask } from '../src/common-tasks.js'
 
 const command = id => ({ id, command: `echo ${id}`, purpose: 'Inspect', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [] })
 const plan = ids => ({ summary: 'Inspect', changeOverview: 'Inspect state', modifiedFiles: [], commands: ids.map(command), revertCommands: [] })
@@ -131,6 +132,67 @@ test('public views exclude raw outputs, encoded database projections, and the va
   assert.doesNotMatch(JSON.stringify(controller.events()), /known-vault-passphrase|credential-value/u)
 })
 
+test('read-only analysis of a common-task plan redacts the vault secret and never executes commands', async t => {
+  const { tasks, task, controller, admin, calls } = await fixture(t)
+  const approved = buildCommonTask('host-health-linux', task.id, { platform: 'linux' }).plan
+  tasks.savePlan('host', task.id, approved)
+  controller.passphrase = 'known-vault-passphrase'
+  const version = tasks.stateVersion('host', task.id)
+  admin.consult = async options => {
+    assert.ok(!options.question.includes(controller.passphrase))
+    assert.match(options.question, /Recorded execution evidence/u)
+    return { answer: 'Only recorded observations were analyzed.' }
+  }
+  const answer = await controller.analyze('host', task.id, 'Inspect this task. known-vault-passphrase')
+  assert.equal(answer.answer, 'Only recorded observations were analyzed.')
+  assert.deepEqual(calls, [])
+  assert.equal(tasks.stateVersion('host', task.id), version)
+  assert.deepEqual(tasks.get('host', task.id).plan, approved)
+})
+
+test('a reviewed changing rollback does not require a rollback of its own', async t => {
+  const { tasks, task, controller, admin, calls } = await fixture(t)
+  const lease = tasks.acquireExecution('host', task.id, task.plan)
+  tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_completed', commandId: 'first', attemptId: 'confirmed' })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  admin.plan = async () => ({ ...plan(['cleanup']), commands: [{ ...command('cleanup'), command: 'rm -f /tmp/intent-fixture', risk: 'change' }] })
+  const before = controller.inspect('host', task.id)
+  const proposed = await controller.propose('host', task.id, 'Revert the confirmed fixture change', before.stateVersion, true)
+  assert.equal(proposed.proposed.operatorRollback, true)
+  assert.deepEqual(calls, [])
+  controller.approve('host', task.id, proposed.revisionId, proposed.expectedVersion, proposed.fingerprint)
+  const approved = controller.inspect('host', task.id)
+  await controller.rollback('host', task.id, approved.stateVersion, approved.reviewedRollbackFingerprint, proposed.revisionId)
+  assert.deepEqual(calls, ['rm -f /tmp/intent-fixture'])
+})
+
+test('revision approval responses redact a vault secret present in the original request', async t => {
+  const { tasks, controller } = await fixture(t)
+  controller.passphrase = 'known-vault-passphrase'
+  const task = tasks.savePlan('host', tasks.create('host', 'Inspect known-vault-passphrase').id, plan(['inspect']))
+  const before = controller.inspect('host', task.id)
+  const proposed = await controller.propose('host', task.id, 'Replace the pending inspection', before.stateVersion)
+  const approved = controller.approve('host', task.id, proposed.revisionId, proposed.expectedVersion, proposed.fingerprint)
+  assert.ok(!JSON.stringify(approved).includes(controller.passphrase))
+})
+
+test('an approved update can resume only its read-only report without reauthorizing changes', async t => {
+  const { tasks, controller, calls } = await fixture(t)
+  const approved = plan(['updated', 'report'])
+  approved.commands[0].risk = 'change'
+  const task = tasks.savePlan('host', tasks.create('host', 'Approved one-way update').id, approved)
+  const lease = tasks.acquireExecution('host', task.id, approved)
+  tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_completed', commandId: 'updated', attemptId: 'confirmed-update' })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  const before = controller.inspect('host', task.id)
+  await controller.resume('host', task.id, before.stateVersion, before.fingerprint)
+  assert.deepEqual(calls, ['echo report'])
+  const pending = tasks.savePlan('host', tasks.create('host', 'Unexecuted changing plan').id, approved)
+  const view = controller.inspect('host', pending.id)
+  await assert.rejects(controller.resume('host', pending.id, view.stateVersion, view.fingerprint), /requires revert commands/u)
+  assert.deepEqual(calls, ['echo report'])
+})
+
 test('aborted work requires a newly approved revision and competing approvals are rejected', async t => {
   const { task, controller } = await fixture(t)
   const original = controller.inspect('host', task.id)
@@ -232,4 +294,45 @@ test('boundary pause never interrupts an in-flight command', async () => {
   assert.deepEqual(calls, ['echo first'])
   released()
   assert.equal((await execution).length, 1)
+})
+
+test('console streams large recorded events through backpressure without dropping the connection', async t => {
+  const { controller } = await fixture(t)
+  controller.record({ type: 'large-frame', message: 'x'.repeat(96 * 1024) })
+  controller.record({ type: 'after-large-frame' })
+  const server = await startOperatorConsole({ controller })
+  t.after(() => server.close())
+  const login = await fetch(`${server.origin}/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: new URL(server.url).hash.slice(1) }) })
+  const cookie = login.headers.get('set-cookie').split(';')[0]
+  const stream = await fetch(`${server.origin}/events`, { headers: { Cookie: cookie }, signal: AbortSignal.timeout(5000) })
+  const reader = stream.body.getReader()
+  let body = ''
+  while (!body.includes('after-large-frame')) {
+    const chunk = await reader.read()
+    assert.equal(chunk.done, false)
+    body += new TextDecoder().decode(chunk.value)
+  }
+  assert.ok(body.includes('large-frame'))
+  assert.ok(body.includes('x'.repeat(96 * 1024)))
+  await reader.cancel()
+})
+
+test('console streams new events after an authenticated subscription is already open', async t => {
+  const { controller } = await fixture(t)
+  const server = await startOperatorConsole({ controller })
+  t.after(() => server.close())
+  const login = await fetch(`${server.origin}/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: new URL(server.url).hash.slice(1) }) })
+  const cookie = login.headers.get('set-cookie').split(';')[0]
+  await login.json()
+  const stream = await fetch(`${server.origin}/events`, { headers: { Cookie: cookie }, signal: AbortSignal.timeout(4000) })
+  const reader = stream.body.getReader()
+  assert.match(new TextDecoder().decode((await reader.read()).value), /connected/)
+  controller.record({ type: 'recorded-after-subscription' })
+  let body = ''
+  while (!body.includes('recorded-after-subscription')) {
+    const chunk = await reader.read()
+    assert.equal(chunk.done, false)
+    body += new TextDecoder().decode(chunk.value)
+  }
+  await reader.cancel()
 })

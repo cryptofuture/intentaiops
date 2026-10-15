@@ -42,6 +42,6 @@ The script compares disabled multiplexing, existing per-workflow sessions, poole
 
 JSON output includes total elapsed time, median and p95 channel latency, connection-acquisition latency, and transport counters. Per-workflow sessions include a new handshake each trial; pooled trials include an initial cold connection and subsequent warm acquisitions. Repeat the same host list and client conditions for comparisons. Multi-host measurements require at least two hosts to be meaningful.
 
-No real-host benchmark results are available while the test lab is offline. No speedup is claimed. Live compatibility and performance measurements remain opt-in follow-up checks.
+Linux live validation and five-repetition benchmarks have now run on eight verified disposable hosts. See [the lab checkpoint](linux-lab-validation-status.md) for measurements, host-specific failures, and remaining platform checks. Results describe this local lab only, not a general performance guarantee.
 
 Local validation passed: `npm test`, `npm run lint`, `npm run typecheck`, `npm run test:ssh`, and `npm run test:package-install`. SSH-specific tests passed 31 cases and skipped the opt-in OpenSSH case. Coverage includes coalesced establishment/reconnection, independent hosts and authentication contexts, lease lifetimes, idle expiry, private and missing socket checks, saved credentials, compression, and legacy SCP fallback. No production hosts were contacted.

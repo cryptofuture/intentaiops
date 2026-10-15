@@ -216,7 +216,7 @@ function installCommand (profile, state) {
     'rm -f -- "$bootstrap_candidate"',
     `address=$(${profile.primaryAddressCommand})`,
     '[ -n "$address" ]',
-    `${nativeInstallerInvocation(profile, state, 'database')} >/dev/null 2>&1`,
+    `if ${nativeInstallerInvocation(profile, state, 'database')} > ${quote(`${state}/install-prestashop-database.log`)} 2>&1; then :; else status=$?; printf '%s\\n' 'PRESTASHOP_DATABASE_INSTALL_FAILED: private diagnostics retained in task state' >&2; exit "$status"; fi`,
     `test -f ${quote(`${WEB_ROOT}/app/config/parameters.php`)}`,
     'fi',
     "printf '%s\n' prestashop-database-ready"

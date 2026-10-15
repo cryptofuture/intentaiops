@@ -3,10 +3,22 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { TaskStore } from '../src/task-store.js'
 import { executeApprovedPlan } from '../src/plan-validator.js'
 import { detectOperationLoop } from '../src/operation-loop-detector.js'
 import { AdminService } from '../src/admin-service.js'
+
+test('Linux crash worker requires explicit lab opt-in and rejects unrelated hosts', () => {
+  const worker = fileURLToPath(new URL('../scripts/linux-reliability-worker.js', import.meta.url))
+  const disabled = spawnSync(process.execPath, [worker, 'webminai-test', '1', 'prepared'], { env: { ...process.env, INTENT_LINUX_LAB_ALLOW: '0' }, encoding: 'utf8' })
+  assert.notEqual(disabled.status, 0)
+  assert.match(disabled.stderr, /explicit disposable lab configuration required/u)
+  const unrelated = spawnSync(process.execPath, [worker, 'production', '1', 'prepared'], { env: { ...process.env, INTENT_LINUX_LAB_ALLOW: '1', VAULT_TEST: 'fixture-only', WEBMINAI_DATA_ROOT: '/nonexistent-intent-test-vault' }, encoding: 'utf8' })
+  assert.notEqual(unrelated.status, 0)
+  assert.match(unrelated.stderr, /invalid crash fixture/u)
+})
 
 function plan () {
   return {

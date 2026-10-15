@@ -891,7 +891,8 @@ test('verified Moodle task resolves public-root nginx, PHP-FPM socket, off-web d
       }
       if (route.context.management.family === 'rhel') {
         const packages = built.plan.commands.find(item => item.id === 'install-packages').command
-        assert.match(packages, /remi-release-9\.rpm/u)
+        assert.match(packages, /remi-release-9\.8-1\.el9\.remi\.noarch\.rpm/u)
+        assert.match(packages, /21100d93098f5821ff21d7ed511c99d874ba895438c2b78d8c73937133158d73/u)
         assert.match(packages, /module enable mariadb:10\.11/u)
         assert.match(packages, /php84-php-fpm/u)
         assert.match(packages, /php84-php-sodium/u)

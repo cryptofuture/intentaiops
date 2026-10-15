@@ -45,6 +45,7 @@
     "benchmark:vault-kdf": "node scripts/benchmark-vault-kdf.js",
     "benchmark:ssh": "node scripts/benchmark-ssh.js",
     "test:ssh": "node --test test/system-ssh.test.js test/host-session-factory.test.js test/ssh-session-manager.test.js test/ssh-integration.test.js",
+    "test:linux-reliability": "node --test test/linux-reliability.integration.test.js",
     "check:checksums": "sh scripts/dist-checksums.sh verify",
     "check:plugin:freebsd": "sh scripts/build-native-plugin.sh freebsd-compat",
     "cli": "node bin/intentaiops.js",

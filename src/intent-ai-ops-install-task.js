@@ -2,28 +2,29 @@ const POSIX_INSTALLER = 'https://raw.githubusercontent.com/cryptofuture/intentai
 const WINDOWS_INSTALLER = 'https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.ps1'
 const PACKAGE_URL = 'https://raw.githubusercontent.com/cryptofuture/intentaiops/main/dist/intent-ai-ops.tgz'
 
-export function buildIntentAiOpsInstallTask (taskId, platform, source = {}) {
+export function buildIntentAiOpsInstallTask (taskId, platform, source = {}, linuxContext) {
   if (!Number.isInteger(taskId) || taskId < 1) throw new TypeError('task id must be a positive integer')
   if (!['linux', 'freebsd', 'macos', 'windows'].includes(platform)) throw new Error(`Intent AI Ops installation does not support ${platform}`)
   const resolvedSource = installSource(platform, source)
-  return platform === 'windows' ? windowsTask(taskId, resolvedSource) : posixTask(taskId, platform, resolvedSource)
+  return platform === 'windows' ? windowsTask(taskId, resolvedSource) : posixTask(taskId, platform, resolvedSource, linuxContext)
 }
 
-function posixTask (taskId, platform, source) {
+function posixTask (taskId, platform, source, linuxContext) {
   const state = platform === 'linux'
     ? `/var/lib/webminai/tasks/${taskId}/intent-ai-ops-install`
     : `/var/db/webminai/task-state/${taskId}-intent-ai-ops-install`
   const root = platform === 'linux' ? '/opt/intent-ai-ops' : '/usr/local/share/intent-ai-ops'
   const bin = '/usr/local/bin'
   const home = platform === 'macos' ? '/var/root' : '/root'
-  const packages = platform === 'freebsd' ? ['node24', 'npm-node24', 'python312', 'gmake'] : []
-  const packageBaseline = packages.map(name => `pkg info -e ${quote(name)} >/dev/null 2>&1 && : > ${quote(`${state}/pkg-${name}.existed`)} || true`).join('; ')
-  const removePackages = packages.slice().reverse().map(name => `[ -e ${quote(`${state}/pkg-${name}.existed`)} ] || pkg delete -y ${quote(name)} >/dev/null 2>&1 || true`).join('; ')
+  const alpine = platform === 'linux' && linuxContext?.identity?.id === 'alpine'
+  const packages = platform === 'freebsd' ? ['node24', 'npm-node24', 'python312', 'gmake'] : alpine ? ['nodejs', 'npm'] : []
+  const packageBaseline = packages.map(name => `${alpine ? 'apk' : 'pkg'} info -e ${quote(name)} >/dev/null 2>&1 && : > ${quote(`${state}/pkg-${name}.existed`)} || true`).join('; ')
+  const removePackages = packages.slice().reverse().map(name => `[ -e ${quote(`${state}/pkg-${name}.existed`)} ] || ${alpine ? 'apk del' : 'pkg delete -y'} ${quote(name)}${alpine ? '' : ' >/dev/null 2>&1 || true'}`).join('; ')
   const baseline = `set -eu; umask 077; install -d -m 0700 ${quote(state)}; if [ ! -e ${quote(`${state}/baseline`)} ]; then : > ${quote(`${state}/baseline`)}; command -v intentaiops > ${quote(`${state}/command.before`)} 2>/dev/null && : > ${quote(`${state}/preexisting`)} || true; [ ! -e ${quote(root)} ] || : > ${quote(`${state}/root.existed`)}; ${packageBaseline || ':'}; fi`
   const acquireInstaller = source.installerPath
     ? `cp -- ${quote(source.installerPath)} "$state/install.sh"`
     : `curl --fail --location --silent --show-error ${quote(source.installerUrl)} --output "$state/install.sh"`
-  const install = `set -eu; state=${quote(state)}; root=${quote(root)}; bin=${quote(bin)}; [ ! -e "$state/preexisting" ] || { printf '%s\n' 'Intent AI Ops is already installed; leaving it unchanged'; exit 0; }; [ ! -e "$state/root.existed" ] || { printf '%s\n' 'INSTALL_ROOT_ALREADY_EXISTS: refusing to overwrite an unowned Intent AI Ops directory' >&2; exit 78; }; : > "$state/owns-root"; ${acquireInstaller}; chmod 0700 "$state/install.sh"; grep -Fq 'INTENTAI_OPS_PACKAGE_URL' "$state/install.sh"; HOME=${quote(home)} INTENTAI_OPS_PACKAGE_URL=${quote(source.packageUrl)} INTENTAI_OPS_INSTALL_ROOT="$root" INTENTAI_OPS_BIN_DIR="$bin" sh "$state/install.sh"; "$bin/intentaiops" --help >/dev/null; : > "$state/installed"`
+  const install = `set -eu; state=${quote(state)}; root=${quote(root)}; bin=${quote(bin)}; [ ! -e "$state/preexisting" ] || { printf '%s\n' 'Intent AI Ops is already installed; leaving it unchanged'; exit 0; }; [ ! -e "$state/root.existed" ] || { printf '%s\n' 'INSTALL_ROOT_ALREADY_EXISTS: refusing to overwrite an unowned Intent AI Ops directory' >&2; exit 78; }; : > "$state/owns-root"; ${alpine ? 'apk add --no-cache nodejs npm; ' : ''}${acquireInstaller}; chmod 0700 "$state/install.sh"; grep -Fq 'INTENTAI_OPS_PACKAGE_URL' "$state/install.sh"; HOME=${quote(home)} INTENTAI_OPS_PACKAGE_URL=${quote(source.packageUrl)} INTENTAI_OPS_INSTALL_ROOT="$root" INTENTAI_OPS_BIN_DIR="$bin" sh "$state/install.sh"; "$bin/intentaiops" --help >/dev/null; : > "$state/installed"`
   const revert = `set -eu; state=${quote(state)}; root=${quote(root)}; bin=${quote(bin)}; [ -d "$state" ] || exit 0; if [ -e "$state/owns-root" ]; then rm -f -- "$bin/intentaiops" "$bin/intentops"; rm -rf -- "$root"; ${removePackages || ':'}; fi; rm -rf -- "$state"`
   return {
     plan: {

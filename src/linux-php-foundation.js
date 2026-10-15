@@ -92,12 +92,38 @@ function buildComposeFoundation ({ taskId, linuxContext, docker, application }) 
 }
 
 function nativeBaseline ({ state, family, profile, services, paths }) {
-  return ['set -eu', `state=${quote(state)}`, 'if [ ! -s "$state/packages.before" ]; then :', `for path in ${paths.filter(path => path !== state).map(quote).join(' ')}; do [ ! -e "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`, 'install -d -o root -g root -m 0700 "$state"', packageSnapshot(family, '"$state/packages.before"'), ...services.map((service, index) => `${serviceActive(service)} && : > "$state/service-${index}.active" || true`), '[ ! -d /var/lib/mysql/mysql ] || : > "$state/database-data.existed"', profile.nginxIncludeRequired ? `if [ -f ${quote(profile.nginxMainConfig)} ]; then cp -a ${quote(profile.nginxMainConfig)} "$state/nginx.conf.before"; fi` : ':', 'fi', "printf '%s\n' baseline-ready"].join('; ')
+  return ['set -eu', mariadbDataPreflight(), `state=${quote(state)}`, 'if [ ! -s "$state/packages.before" ]; then :', `for path in ${paths.filter(path => path !== state).map(quote).join(' ')}; do [ ! -e "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`, 'install -d -o root -g root -m 0700 "$state"', packageSnapshot(family, '"$state/packages.before"'), ...services.map((service, index) => `${serviceActive(service)} && : > "$state/service-${index}.active" || true`), '[ ! -d /var/lib/mysql/mysql ] || : > "$state/database-data.existed"', profile.nginxIncludeRequired ? `if [ -f ${quote(profile.nginxMainConfig)} ]; then cp -a ${quote(profile.nginxMainConfig)} "$state/nginx.conf.before"; fi` : ':', 'fi', "printf '%s\n' baseline-ready"].join('; ')
 }
 
 function installPackages ({ state, family, profile }) {
   const log = quote(`${state}/package-install.log`)
   return `set -eu; status=0; ( set -e; ${packageInstall(family, profile.packages)} ) > ${log} 2>&1 || status=$?; tail -n 20 ${log} || true; [ "$status" -eq 0 ] || exit "$status"; ${packageSnapshot(family, quote(`${state}/packages.after`))}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} | grep -Ev '^(curl|netdata|netdata-|openssh|openssh-|webminai|webminai-)' > ${quote(`${state}/packages.added`)} || true; printf '%s\n' packages-ready`
+}
+
+export function mariadbDataPreflight () {
+  return "if [ -f /var/lib/mysql/auto.cnf ] || [ -f /var/lib/mysql/mysql.ibd ] || { [ -f /var/lib/mysql/mysql_upgrade_info ] && grep -Eq '^[5-8][.]' /var/lib/mysql/mysql_upgrade_info; }; then printf '%s\\n' 'Existing MySQL data requires operator-reviewed migration before installing MariaDB; data was not modified.' >&2; exit 1; fi"
+}
+
+export function wordpressArtifactCommand (artifacts) {
+  return [
+    'set -eu',
+    `install -d -o root -g root -m 0755 ${quote(artifacts)}`,
+    `if [ -s ${quote(`${artifacts}/wordpress.tar.gz`)} ] && [ -s ${quote(`${artifacts}/wordpress.tar.gz.sha1`)} ] && [ -s ${quote(`${artifacts}/wp-cli.phar`)} ] && [ -s ${quote(`${artifacts}/wp-cli.phar.sha512`)} ]; then wp_expected=$(tr -d '\r\n' < ${quote(`${artifacts}/wordpress.tar.gz.sha1`)}); wp_actual=$(sha1sum ${quote(`${artifacts}/wordpress.tar.gz`)} | awk '{print $1}'); cli_expected=$(tr -d '\r\n' < ${quote(`${artifacts}/wp-cli.phar.sha512`)}); cli_actual=$(sha512sum ${quote(`${artifacts}/wp-cli.phar`)} | awk '{print $1}'); if [ "$wp_actual" = "$wp_expected" ] && [ "$cli_actual" = "$cli_expected" ]; then printf '%s\n' artifacts-already-verified; exit 0; fi; fi`,
+    `curl --fail --location --silent --show-error --output ${quote(`${artifacts}/wordpress.tar.gz`)} https://wordpress.org/latest.tar.gz`,
+    `curl --fail --location --silent --show-error --output ${quote(`${artifacts}/wordpress.tar.gz.sha1`)} https://wordpress.org/latest.tar.gz.sha1`,
+    `expected=$(tr -d '\\r\\n' < ${quote(`${artifacts}/wordpress.tar.gz.sha1`)})`,
+    'printf \'%s\' "$expected" | grep -Eq \'^[0-9A-Fa-f]{40}$\'',
+    `actual=$(sha1sum ${quote(`${artifacts}/wordpress.tar.gz`)} | awk '{print $1}')`,
+    '[ "$actual" = "$expected" ]',
+    `curl --fail --location --silent --show-error --output ${quote(`${artifacts}/wp-cli.phar`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar`,
+    `curl --fail --location --silent --show-error --output ${quote(`${artifacts}/wp-cli.phar.sha512`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar.sha512`,
+    `expected=$(tr -d '\\r\\n' < ${quote(`${artifacts}/wp-cli.phar.sha512`)})`,
+    'printf \'%s\' "$expected" | grep -Eq \'^[0-9A-Fa-f]{128}$\'',
+    `actual=$(sha512sum ${quote(`${artifacts}/wp-cli.phar`)} | awk '{print $1}')`,
+    '[ "$actual" = "$expected" ]',
+    `chmod 0755 ${quote(`${artifacts}/wp-cli.phar`)}`,
+    'printf \'%s\n\' artifacts-verified'
+  ].join('; ')
 }
 
 function credentialsCommand (root, names = ['db_password', 'admin_password']) {
@@ -169,7 +195,7 @@ function packageInstall (family, packages) {
   if (family === 'debian') return `env DEBIAN_FRONTEND=noninteractive apt-get update; env DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade -y ${list}`
   if (family === 'alpine') return `apk add --no-cache ${list}`
   if (family === 'arch') return `pacman -Sy --noconfirm --needed ${list}`
-  if (family === 'suse') return `zypper --non-interactive refresh --force; zypper --non-interactive install --no-recommends ${list}`
+  if (family === 'suse') return `zypper --non-interactive refresh; zypper --non-interactive install --no-recommends ${list}`
   return `dnf -y install ${list}`
 }
 

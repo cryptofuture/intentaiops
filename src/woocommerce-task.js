@@ -1,5 +1,5 @@
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
-import { buildLinuxPhpApplicationFoundation, linuxPhpApplicationProfile } from './linux-php-foundation.js'
+import { buildLinuxPhpApplicationFoundation, linuxPhpApplicationProfile, wordpressArtifactCommand } from './linux-php-foundation.js'
 
 const VERSION = '11.0.0'
 const PLUGIN_URL = `https://downloads.wordpress.org/plugin/woocommerce.${VERSION}.zip`
@@ -26,7 +26,7 @@ export function buildWooCommerceTask (taskId, linuxContext, docker = {}) {
   else configureNativeFoundation(built, linuxContext)
   const deltaCommands = compose
     ? composeDelta(taskId, linuxContext)
-    : [nativeDelta(linuxContext)]
+    : [{ ...nativeDelta(linuxContext), executionMode: 'job', timeoutMs: 1800000 }]
   validateApplicationDeltaPlan({ commands: deltaCommands, revertCommands: [] })
 
   const publish = built.plan.commands.find(command => command.id === 'initialize-wordpress-foundation')
@@ -99,7 +99,7 @@ function configureComposeFoundation (built, taskId, linuxContext) {
 }
 
 function wordpressArtifacts () {
-  return `set -eu; install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}; curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} https://wordpress.org/latest.tar.gz; curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)} https://wordpress.org/latest.tar.gz.sha1; expected=$(tr -d '\r\n' < ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)}); [ "$(sha1sum ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} | awk '{print $1}')" = "$expected" ]; curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wp-cli.phar`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar; curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar.sha512; expected=$(tr -d '\r\n' < ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)}); [ "$(sha512sum ${quote(`${ARTIFACTS}/wp-cli.phar`)} | awk '{print $1}')" = "$expected" ]; chmod 0755 ${quote(`${ARTIFACTS}/wp-cli.phar`)}; printf '%s\n' artifacts-verified`
+  return wordpressArtifactCommand(ARTIFACTS)
 }
 
 function extractWordpress (profile) {

@@ -22,8 +22,8 @@ const PROJECT = 'webminai-moodle-18106'
 const SWAP_FILE = `/var/lib/webminai/${SITE}.swap`
 const EPEL_RELEASE_URL = 'https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm'
 const EPEL_RELEASE_SHA256 = 'b434245bffd8b40ea486157e72363d08b36e38145c8f917c5c00adfca3f2101b'
-const REMI_EL9_RELEASE_URL = 'https://rpms.remirepo.net/enterprise/remi-release-9.rpm'
-const REMI_EL9_RELEASE_SHA256 = '3bb04ace9b538920d785d25202c48e96ad2148d98c58eb76324901c9b36034b9'
+const REMI_EL9_RELEASE_URL = 'https://rpms.remirepo.net/enterprise/9/remi/x86_64/remi-release-9.8-1.el9.remi.noarch.rpm'
+const REMI_EL9_RELEASE_SHA256 = '21100d93098f5821ff21d7ed511c99d874ba895438c2b78d8c73937133158d73'
 const REMI_FEDORA44_RELEASE_URL = 'https://rpms.remirepo.net/fedora/remi-release-44.rpm'
 const REMI_FEDORA44_RELEASE_SHA256 = '33ec50be86b32e78fdb0b948a2c39b657c51c1391d3203972426c055c8e4860f'
 
@@ -75,11 +75,11 @@ function configureNativePlan (built, taskId, linuxContext) {
   const state = `/var/lib/webminai/task-state/${taskId}-moodle-linux`
   if (linuxContext.management.family === 'rhel') {
     const baseline = built.plan.commands.find(item => item.id === 'capture-baseline')
-    baseline.command = rhelDatabaseBaselineCommand(baseline.command, state)
+    if (requiresEl9Streams(linuxContext)) baseline.command = rhelDatabaseBaselineCommand(baseline.command, state)
     const packages = built.plan.commands.find(item => item.id === 'install-packages')
     packages.command = rhelSclRepositoryCommand(packages.command, linuxContext, state)
     extendRhelKeyOwnership(built.plan, state)
-    extendRhelDatabaseRestore(built.plan, state)
+    if (requiresEl9Streams(linuxContext)) extendRhelDatabaseRestore(built.plan, state)
   }
   replaceCommand(built.plan, 'configure-php-fpm', nativeFpmCommand(built.plan.commands.find(item => item.id === 'configure-php-fpm').command), 'Configure Moodle PHP limits on the task-owned Unix socket pool')
   replaceCommand(built.plan, 'configure-nginx', nativeNginxCommand(built.plan.commands.find(item => item.id === 'configure-nginx').command), 'Serve only Moodle public/ through nginx and the task-owned PHP-FPM Unix socket')
@@ -195,9 +195,13 @@ function rhelSclRepositoryCommand (foundation, linuxContext, state) {
   const remiRpm = `${ARTIFACTS}/remi-release.rpm`
   const epelRpm = `${ARTIFACTS}/epel-release.rpm`
   const setup = [
-    `mariadb_stream=$(sed -n 1p ${quote(`${state}/mariadb-stream.before`)})`,
-    '[ -z "$mariadb_stream" ] || [ "$mariadb_stream" = 10.11 ] || [ "$mariadb_stream" = 11.8 ] || { printf \'%s\\n\' "unsupported pre-existing MariaDB module stream: $mariadb_stream" >&2; exit 1; }',
-    `[ -n "$mariadb_stream" ] || { dnf -y module enable mariadb:10.11; : > ${quote(`${state}/mariadb-stream.changed`)}; }`,
+    ...(fedora
+      ? []
+      : [
+      `mariadb_stream=$(sed -n 1p ${quote(`${state}/mariadb-stream.before`)})`,
+      '[ -z "$mariadb_stream" ] || [ "$mariadb_stream" = 10.11 ] || [ "$mariadb_stream" = 11.8 ] || { printf \'%s\\n\' "unsupported pre-existing MariaDB module stream: $mariadb_stream" >&2; exit 1; }',
+      `[ -n "$mariadb_stream" ] || { dnf -y module enable mariadb:10.11; : > ${quote(`${state}/mariadb-stream.changed`)}; }`
+        ]),
     `install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}`,
     fedora ? ':' : verifiedRepositoryRpm(EPEL_RELEASE_URL, EPEL_RELEASE_SHA256, epelRpm),
     verifiedRepositoryRpm(remiUrl, remiSha256, remiRpm),

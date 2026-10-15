@@ -37,7 +37,7 @@ function buildNativeTask (taskId, context) {
     item('install-runtime', 'packages', nativePackages(state, context, profile), `Install the reviewed ${profile.nodeDescription}, nginx, and required utilities`, ['capture-baseline'], 1800000, 'job'),
     item('install-n8n', 'acquire', nativeNpmInstall(state, profile), `Install n8n ${VERSION} into an isolated application prefix`, ['install-runtime'], 3600000, 'job'),
     item('generate-credentials', 'secrets', nativeCredentials(), 'Generate the n8n encryption key on-host without emitting it', ['capture-baseline']),
-    item('configure-services', 'configure', nativeConfigure(profile), 'Create the locked service account, n8n service, and isolated nginx marker vhost', ['install-n8n', 'generate-credentials']),
+    item('configure-services', 'configure', nativeConfigure(profile, state), 'Create the locked service account, n8n service, and isolated nginx marker vhost', ['install-n8n', 'generate-credentials']),
     item('verify-n8n', 'verify', nativeVerify(profile), 'Verify n8n health, SQLite persistence, and the nginx marker', ['configure-services'], 900000, 'job')
   ]
   const revertCommands = [
@@ -208,6 +208,7 @@ function nativeNpmInstall (state, profile) {
     : `cd ${quote(APP_ROOT)}; node -e ${quote("require('sqlite3')")}`
   return join([
     'set -eu', 'umask 022', `install -d -o root -g root -m 0755 ${quote(APP_ROOT)}`, `install -d -o root -g root -m 0755 ${quote(`${state}/npm-cache`)}`,
+    'export NODE_OPTIONS="${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000"', // eslint-disable-line no-template-curly-in-string
     `if [ ! -x ${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} ]; then npm_config_cache=${quote(`${state}/npm-cache`)} npm --prefix ${quote(APP_ROOT)} install --omit=dev --no-audit --no-fund --loglevel=error ${quote(`n8n@${VERSION}`)}; fi`,
     ensureSqlite,
     `chmod -R a+rX ${quote(APP_ROOT)}`,
@@ -219,7 +220,7 @@ function nativeCredentials () {
   return join(['set -eu', 'umask 077', `install -d -o root -g root -m 0700 ${quote(CREDENTIALS)}`, `[ -s ${quote(`${CREDENTIALS}/encryption_key`)} ] || openssl rand -hex 32 > ${quote(`${CREDENTIALS}/encryption_key`)}`, `chmod 0600 ${quote(`${CREDENTIALS}/encryption_key`)}`, `printf '%s\\n' ${quote(CREDENTIALS)}`])
 }
 
-function nativeConfigure (profile) {
+function nativeConfigure (profile, state) {
   const nginx = [
     'server {', `    listen ${PORT};`, '    server_name _;', '    default_type text/plain;', `    location = / { return 200 "${MARKER}\\n"; }`, '}'
   ].join('\n')
@@ -233,7 +234,7 @@ function nativeConfigure (profile) {
     '#!/bin/sh', 'set -eu', `export N8N_ENCRYPTION_KEY="$(cat ${CREDENTIALS}/encryption_key)"`, `export HOME=${DATA_ROOT}`, `export N8N_USER_FOLDER=${DATA_ROOT}`, `export N8N_PORT=${N8N_PORT}`, 'export N8N_LISTEN_ADDRESS=127.0.0.1', 'export N8N_DIAGNOSTICS_ENABLED=false', 'export N8N_VERSION_NOTIFICATIONS_ENABLED=false', 'export N8N_SECURE_COOKIE=false', `exec su-exec webminai-n8n:webminai-n8n ${APP_ROOT}/node_modules/.bin/n8n start`
   ].join('\n')
   const pieces = [
-    'set -eu', 'id webminai-n8n >/dev/null 2>&1 || useradd -r -d ' + quote(DATA_ROOT) + ' -s /usr/sbin/nologin webminai-n8n 2>/dev/null || adduser -S -D -H -h ' + quote(DATA_ROOT) + ' -s /sbin/nologin webminai-n8n',
+    'set -eu', `if ! id webminai-n8n >/dev/null 2>&1; then useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-n8n 2>/dev/null || adduser -S -D -H -h ${quote(DATA_ROOT)} -s /sbin/nologin webminai-n8n; : > ${quote(`${state}/user-created`)}; fi`,
     `install -d -o webminai-n8n -g webminai-n8n -m 0700 ${quote(DATA_ROOT)}`,
     `key=$(cat ${quote(`${CREDENTIALS}/encryption_key`)}); umask 077; printf 'N8N_ENCRYPTION_KEY=%s\\n' "$key" > ${quote(`${CREDENTIALS}/service.env`)}`,
     `printf '%s\\n' ${nginx.split('\n').map(quote).join(' ')} > ${quote(profile.nginxVhost)}`, `chmod 0644 ${quote(profile.nginxVhost)}`
@@ -263,13 +264,13 @@ function nativeStop (profile) {
 }
 
 function nativeRestore (state, context, profile) {
-  const commands = ['set -eu']
+  const commands = ['set -eu', `[ -d ${quote(state)} ] || exit 0`]
   profile.repositoryPaths.forEach((path, index) => commands.push(`if [ -e ${quote(`${state}/repo-${index}.existed`)} ]; then rm -rf -- ${quote(path)}; cp -a -- ${quote(`${state}/repo-backup/${index}`)} ${quote(path)}; else rm -rf -- ${quote(path)}; fi`))
   commands.push(`if [ -s ${quote(`${state}/packages.before`)} ]; then ${packageList(profile.family)} > ${quote(`${state}/packages.current`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.current`)} | grep -Ev '^(netdata|openssh|webminai)(-|$)' > ${quote(`${state}/packages.added`)} || true; fi`)
   commands.push(removeAddedPackages(profile.family, `${state}/packages.added`))
   if (profile.systemd) commands.push(`if systemctl cat ${quote(profile.nginxService)} >/dev/null 2>&1; then if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable ${quote(profile.nginxService)} >/dev/null 2>&1 || true; else systemctl disable ${quote(profile.nginxService)} >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start ${quote(profile.nginxService)}; else systemctl stop ${quote(profile.nginxService)} 2>/dev/null || true; fi; fi`)
   else commands.push(`if [ -e ${quote(`${state}/nginx.enabled`)} ]; then rc-update add nginx default >/dev/null 2>&1 || true; else rc-update del nginx default >/dev/null 2>&1 || true; fi`, `if [ -e ${quote(`${state}/nginx.active`)} ]; then rc-service nginx start >/dev/null; else rc-service nginx stop >/dev/null 2>&1 || true; fi`)
-  commands.push('id webminai-n8n >/dev/null 2>&1 && { userdel webminai-n8n 2>/dev/null || deluser webminai-n8n 2>/dev/null || true; } || true', `rm -rf -- ${quote(state)}`)
+  commands.push(`if [ -e ${quote(`${state}/user-created`)} ]; then id webminai-n8n >/dev/null 2>&1 && { userdel webminai-n8n 2>/dev/null || deluser webminai-n8n 2>/dev/null || true; } || true; fi`, `rm -rf -- ${quote(state)}`)
   return join(commands)
 }
 
@@ -314,7 +315,7 @@ function removeCompose (state) {
 }
 
 function restoreDocker (state) {
-  return join(['set -eu', `if [ ! -e ${quote(`${state}/docker.existed`)} ]; then`, `if [ -s ${quote(`${state}/packages.added`)} ]; then xargs -r apt-get purge -y < ${quote(`${state}/packages.added`)}; fi`, 'rm -f /etc/apt/sources.list.d/docker.sources /etc/apt/keyrings/docker.asc', 'apt-get autoremove -y', 'rm -rf /var/lib/docker /var/lib/containerd /etc/docker', `elif [ -e ${quote(`${state}/docker.active`)} ]; then systemctl start docker; else systemctl stop docker 2>/dev/null || true; fi`, `rm -rf -- ${quote(state)}`])
+  return join(['set -eu', `[ -d ${quote(state)} ] || exit 0`, `if [ ! -e ${quote(`${state}/docker.existed`)} ]; then`, `if [ -s ${quote(`${state}/packages.added`)} ]; then xargs -r apt-get purge -y < ${quote(`${state}/packages.added`)}; fi`, 'rm -f /etc/apt/sources.list.d/docker.sources /etc/apt/keyrings/docker.asc', 'apt-get autoremove -y', 'rm -rf /var/lib/docker /var/lib/containerd /etc/docker', `elif [ -e ${quote(`${state}/docker.active`)} ]; then systemctl start docker; else systemctl stop docker 2>/dev/null || true; fi`, `rm -rf -- ${quote(state)}`])
 }
 
 function waitHealth () {

@@ -607,7 +607,7 @@ const DEFINITIONS = [
     description: 'Install the reviewed GitHub CLI package and bootstrap Node.js 24 only when Node is absent.',
     category: 'application',
     platform,
-    build: (taskId, definition, options) => ({ ...buildIntentAiOpsInstallTask(taskId, platform, options.intentAiOpsInstallSource), definition })
+    build: (taskId, definition, options) => ({ ...buildIntentAiOpsInstallTask(taskId, platform, options.intentAiOpsInstallSource, options.linuxContext), definition })
   }))
 ]
 
@@ -806,14 +806,14 @@ function packageTask (id, label, packageName, binaryPath) {
         ? `if rpm -q oracle-epel-release-el9 >/dev/null 2>&1; then : > ${quote(`${state}/oracle-epel-was-present`)}; else dnf -y install oracle-epel-release-el9; fi; dnf -y install ${quote(packageName)}`
         : packageInstall(packageName)
       const removeRepository = oracleEpel
-        ? `; if [ ! -e ${quote(`${state}/oracle-epel-was-present`)} ] && rpm -q oracle-epel-release-el9 >/dev/null 2>&1; then dnf -y remove oracle-epel-release-el9; fi`
+        ? `; if [ -d ${quote(state)} ] && [ ! -e ${quote(`${state}/oracle-epel-was-present`)} ] && rpm -q oracle-epel-release-el9 >/dev/null 2>&1; then dnf -y remove oracle-epel-release-el9; fi`
         : ''
       const repositoryProbe = oracleEpel ? `; ${packageStateProbe('oracle-epel-release-el9')}` : ''
       return {
         plan: {
           changeOverview: `Install ${packageName} while recording whether it existed before the task.`,
           modifiedFiles: [binaryPath, state],
-          commands: [command('capture-install', `set -eu; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${packageCapture(state, packageName)}; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${install}; fi; : > ${quote(`${state}/apply-complete`)}; fi`, `Install ${packageName} only when absent`, 'change', 300000)],
+          commands: [{ ...command('capture-install', `set -eu; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${packageCapture(state, packageName)}; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${install}; fi; : > ${quote(`${state}/apply-complete`)}; fi`, `Install ${packageName} only when absent`, 'change', 1800000), executionMode: 'job' }],
           revertCommands: [command('remove-if-added', `set -eu; if [ -d ${quote(state)} ] && [ ! -e ${quote(`${state}/was-present`)} ] && ${packagePresent(packageName)}; then ${packageRemove(packageName, state)}; fi${removeRepository}; rm -rf -- ${quote(state)}`, `Remove ${packageName} and dependencies introduced only by this task`, 'change', 300000)]
         },
         verifyApplied: `command -v ${packageName} >/dev/null 2>&1`,
@@ -863,15 +863,15 @@ function buildNginxSite (taskId, definition) {
   return {
     plan: {
       changeOverview: 'Install nginx if absent and deploy an isolated static website on port 18080.',
-      modifiedFiles: [root, config, alpineConfig, '/etc/nginx/nginx.conf', state],
+      modifiedFiles: [root, config, alpineConfig, '/etc/nginx/nginx.conf', '/run/nginx', state],
       commands: [
-        command('prepare-nginx', `set -eu; if [ ! -e ${quote(`${state}/prepare-complete`)} ]; then test ! -e ${quote(root)}; test ! -e ${quote(config)}; test ! -e ${quote(alpineConfig)}; ${packageCapture(state, 'nginx')}; if ${serviceIsActive('nginx')}; then : > ${quote(`${state}/was-active`)}; fi; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall('nginx')}; fi; : > ${quote(`${state}/prepare-complete`)}; fi`, 'Capture nginx state and install it only when absent', 'change', 300000),
-        command('write-site', `set -eu; config=${quote(config)}; if [ -d /etc/nginx/http.d ]; then config=${quote(alpineConfig)}; elif [ ! -d /etc/nginx/conf.d ]; then cp -a /etc/nginx/nginx.conf ${quote(`${state}/nginx-conf-before`)}; install -d -o root -g root -m 0755 /etc/nginx/conf.d; : > ${quote(`${state}/created-config-directory`)}; sed -i '$i\\    include /etc/nginx/conf.d/*.conf;' /etc/nginx/nginx.conf; fi; install -d -o root -g root -m 0755 ${quote(root)}; printf '%s\n' '<!doctype html><title>WebminAI test</title><h1>WebminAI nginx task</h1>' > ${quote(`${root}/index.html`)}; chmod 0644 ${quote(`${root}/index.html`)}; printf '%s\n' 'server {' '    listen 18080;' '    server_name _;' '    root /var/www/webminai-test-site;' '    location / { try_files $uri $uri/ =404; }' '}' > "$config"; chmod 0644 "$config"; printf '%s\n' "$config" > ${quote(`${state}/config-path`)}`, 'Write the website and nginx server block', 'change', 30000, ['prepare-nginx']),
+        { ...command('prepare-nginx', `set -eu; if [ ! -e ${quote(`${state}/prepare-complete`)} ]; then test ! -e ${quote(root)}; test ! -e ${quote(config)}; test ! -e ${quote(alpineConfig)}; ${packageCapture(state, 'nginx')}; if ${serviceIsActive('nginx')}; then : > ${quote(`${state}/was-active`)}; fi; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall('nginx')}; fi; : > ${quote(`${state}/prepare-complete`)}; fi`, 'Capture nginx state and install it only when absent', 'change', 1800000), executionMode: 'job' },
+        command('write-site', `set -eu; config=${quote(config)}; if [ -d /etc/nginx/http.d ]; then config=${quote(alpineConfig)}; else if [ ! -d /etc/nginx/conf.d ]; then install -d -o root -g root -m 0755 /etc/nginx/conf.d; : > ${quote(`${state}/created-config-directory`)}; fi; if ! grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/conf[.]d/[*][.]conf[[:space:]]*;' /etc/nginx/nginx.conf; then [ -f ${quote(`${state}/nginx-conf-before`)} ] || cp -a /etc/nginx/nginx.conf ${quote(`${state}/nginx-conf-before`)}; sed -i '$i\\    include /etc/nginx/conf.d/*.conf;' /etc/nginx/nginx.conf; fi; fi; if [ ! -d /run/nginx ]; then install -d -o root -g root -m 0755 /run/nginx; : > ${quote(`${state}/created-runtime-directory`)}; fi; install -d -o root -g root -m 0755 ${quote(root)}; printf '%s\n' '<!doctype html><title>WebminAI test</title><h1>WebminAI nginx task</h1>' > ${quote(`${root}/index.html`)}; chmod 0644 ${quote(`${root}/index.html`)}; printf '%s\n' 'server {' '    listen 18080;' '    server_name _;' '    root /var/www/webminai-test-site;' '    location / { try_files $uri $uri/ =404; }' '}' > "$config"; chmod 0644 "$config"; printf '%s\n' "$config" > ${quote(`${state}/config-path`)}`, 'Write the website and nginx server block', 'change', 30000, ['prepare-nginx']),
         command('verify-nginx', `set -eu; nginx -t; ${serviceStartOrReload('nginx')}; curl --fail --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 --max-time 10 http://127.0.0.1:18080/ | grep -q 'WebminAI nginx task'`, 'Load the nginx configuration and fetch the new website', 'change', 30000, ['write-site'])
       ],
       revertCommands: [
         command('remove-site', `set -eu; rm -rf -- ${quote(root)}; rm -f -- ${quote(config)} ${quote(alpineConfig)}; if [ -f ${quote(`${state}/nginx-conf-before`)} ]; then cp -a ${quote(`${state}/nginx-conf-before`)} /etc/nginx/nginx.conf; fi; if [ -e ${quote(`${state}/created-config-directory`)} ]; then rmdir /etc/nginx/conf.d; fi`, 'Remove the test website and restore the nginx configuration', 'change', 30000),
-        command('restore-nginx', `set -eu; if [ -d ${quote(state)} ]; then if [ -e ${quote(`${state}/was-active`)} ]; then ${serviceReload('nginx')}; else ${serviceStop('nginx')}; fi; if [ ! -e ${quote(`${state}/was-present`)} ] && ${packagePresent('nginx')}; then ${packageRemove('nginx', state)}; fi; fi; rm -rf -- ${quote(state)}`, 'Restore nginx package, dependency, and service state', 'change', 300000, ['remove-site'])
+        command('restore-nginx', `set -eu; if [ -d ${quote(state)} ]; then if [ -e ${quote(`${state}/was-active`)} ]; then ${serviceReload('nginx')}; else ${serviceStop('nginx')}; fi; if [ ! -e ${quote(`${state}/was-present`)} ] && ${packagePresent('nginx')}; then ${packageRemove('nginx', state)}; fi; if [ -e ${quote(`${state}/created-runtime-directory`)} ] && [ -d /run/nginx ]; then rmdir /run/nginx; fi; fi; rm -rf -- ${quote(state)}`, 'Restore nginx package, dependency, and service state', 'change', 300000, ['remove-site'])
       ]
     },
     verifyApplied: 'curl --fail --silent --max-time 10 http://127.0.0.1:18080/ | grep -q \'WebminAI nginx task\'',

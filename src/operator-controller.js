@@ -113,7 +113,7 @@ export class OperatorController {
       const completed = task.plan.commands.filter(command => completedIds.includes(command.id))
       const plan = { ...replacement, commands: rollback ? replacement.commands : [...completed, ...replacement.commands], ...(rollback ? { operatorRollback: true } : {}) }
       const rules = await admin.workspace.loadRules(hostId)
-      validateCommandPlan(plan, rules.policy)
+      validateCommandPlan(plan, rules.policy, { requireRevert: !rollback })
       this.checkVersion(hostId, taskId, expectedVersion)
       const revisionId = this.tasks.proposeRevision(hostId, taskId, plan, expectedVersion)
       this.record({ type: 'revision_proposed', hostId, taskId, revisionId })
@@ -125,7 +125,7 @@ export class OperatorController {
     this.checkVersion(hostId, taskId, expectedVersion)
     const result = this.tasks.approveRevision(hostId, taskId, revisionId, expectedVersion, fingerprint)
     this.record({ type: 'revision_approved', hostId, taskId, revisionId })
-    return sanitizePlannerData(result)
+    return this.sanitize(result)
   }
 
   async resume (hostId, taskId, expectedVersion, fingerprint, onProgress) {
@@ -139,11 +139,13 @@ export class OperatorController {
       await admin.reconcileTask({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, onProgress })
       const state = this.tasks.executionState(hostId, taskId)
       if (state.some(command => ['uncertain', 'failed'].includes(command.status))) throw new Error('reconciliation or reviewed revision required')
+      const completedIds = new Set(state.filter(command => command.status === 'completed').map(command => command.commandId))
+      const remainingChanges = task.plan.commands.some(command => !completedIds.has(command.id) && command.risk !== 'read')
       const control = this.tasks.control(hostId, taskId)
       if (control.action === 'abort') throw new Error('execution was aborted; request a reviewed revision')
       this.tasks.setControl(hostId, taskId, 'run', originalControl.version)
       this.tasks.markRunning(hostId, taskId)
-      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, approve: async () => true, onProgress, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
+      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, requireRevert: remainingChanges, approve: async () => true, onProgress, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
       const saved = this.tasks.saveResults(hostId, taskId, results)
       if (task.groupRunId) this.runs.updateHost(task.groupRunId, hostId, { status: saved.status })
       if (task.groupRunId) {

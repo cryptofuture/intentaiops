@@ -81,7 +81,9 @@ Local automated tests cover pre-dispatch failure, unknown dispatch, durable job 
 
 Executed locally: npm test, npm run lint, npm run typecheck, npm run test:package-install. The tarball and SHA-256 sidecar are rebuilt. Packaging verifies console assets and installed CLI/SQLite operation. Native plugin behavior is unchanged; generated native test rebuilds are not retained.
 
-Only environment-dependent validation is deferred:
+Linux live validation now includes all four real process-crash boundaries, retained-job/master recovery, common-task pause/revision/rollback, actual failed-probe loop protection, canary failure and success gates, selected continuation, writable-console authorization, and authenticated SSE/replay against real history. See [the lab checkpoint](linux-lab-validation-status.md) for per-host status and exact run results. The complete application catalog matrix is not yet finished.
+
+The following environment-dependent checks remain distinct from those completed Linux scenarios:
 
 1. Exercise Linux, FreeBSD, Windows, and macOS direct/job execution, identity checks, and rollback on disposable or explicitly selected SSH hosts.
 2. Kill the CLI before dispatch, during execution, and after remote completion; disconnect SSH and reconcile retained job results. Verify uncertain non-idempotent changes are never repeated.
