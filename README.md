@@ -211,6 +211,8 @@ Intent AI Ops records execution progress so you can inspect interrupted work and
 
 If SSH drops during execution, recovery tries to reconnect up to three times, waiting 1 then 2 seconds between attempts. For a recorded background job, it checks that same job rather than starting it again. Progress shows when it is reconnecting, when the job is still running, and when operator review is needed. After recovery, remaining commands stay paused until you review and approve continuation. If the result cannot be confirmed, investigate the host before resuming.
 
+Failure details now separate **what happened** from **why it may have happened**. Reports identify confirmed timeouts, cancellation, transport errors and explicit resource errors, plus suspected causes such as a new OOM kill in the host's cgroup. Evidence appears in task history, recovery, console events and diagnostic exports. A suspected cause never confirms a command's outcome or authorizes a retry. Available evidence varies by platform; see [diagnostic coverage and limits](docs/execution-diagnostics.md).
+
 ### Recover or change a task
 
 1. Open **Task history and reverts**, select the task, then choose **Operator controls** or **Inspect and recover interrupted execution**.

@@ -107,6 +107,22 @@ test('Linux common-task reliability and operator workflows', { skip: !allowed, t
     })
   }
 
+  await t.test('signed remote deadlines permit only the two explicitly reviewed retry attempts', async () => {
+    const value = fixture(firstHost, { job: true })
+    value.plan.commands[0] = { ...value.plan.commands[0], timeoutMs: 1000, command: 'sleep 3', retry: { attempts: 2, intervalMs: 0, exitCodes: [143], states: ['timed_out'] } }
+    value.admin.saveTaskPlan(firstHost, value.taskId, value.plan)
+    const results = await execute(value)
+    assert.equal(results[0].status, 'failed')
+    assert.equal(results[0].attempts, 2)
+    assert.ok(results[0].diagnostics.some(item => item.code === 'EXECUTION_TIMEOUT' && item.confidence === 'confirmed'))
+    const events = tasks.allExecutionEvents(firstHost, value.taskId)
+    const prepared = events.filter(event => event.type === 'command_prepared')
+    assert.equal(prepared.length, 2)
+    assert.equal(new Set(prepared.map(event => event.attemptId)).size, 2)
+    assert.equal(events.filter(event => event.type === 'command_failed').length, 2)
+    assert.equal(events.filter(event => event.type === 'command_outcome_unknown').length, 0)
+  })
+
   for (const phase of ['prepared', 'completed', 'remote-completed', 'job-acknowledged']) {
     await t.test(`real process crash at ${phase} preserves common-task execution evidence`, async () => {
       const mutate = ['remote-completed', 'job-acknowledged'].includes(phase)

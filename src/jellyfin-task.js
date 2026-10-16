@@ -212,7 +212,7 @@ function credentialsCommand () {
 function nativeAcquire (state, profile) {
   if (profile.package) {
     return join([
-      'set -eu', 'export DEBIAN_FRONTEND=noninteractive', `apt-get install -y ${quote(`jellyfin=${profile.version}`)}`, 'systemctl disable --now jellyfin 2>/dev/null || true', `[ "$(dpkg-query -W -f=${quote(DPKG_VERSION_FORMAT)} jellyfin)" = ${quote(profile.version)} ]`, `dpkg-query -W -f=${quote(`${DPKG_VERSION_FORMAT}\\n`)} jellyfin-server jellyfin-web | grep -F ${quote(VERSION)}`, packageSnapshot(profile, `${state}/packages.after`), packageAdded(profile, state)
+      'set -eu', 'export DEBIAN_FRONTEND=noninteractive', `apt-get install -y --allow-downgrades ${['jellyfin', 'jellyfin-server', 'jellyfin-web'].map(name => quote(`${name}=${profile.version}`)).join(' ')}`, 'systemctl disable --now jellyfin 2>/dev/null || true', `for package in jellyfin jellyfin-server jellyfin-web; do actual=$(dpkg-query -W -f=${quote(DPKG_VERSION_FORMAT)} "$package"); if [ "$actual" != ${quote(profile.version)} ]; then printf 'PACKAGE_VERSION_MISMATCH: %s expected %s, observed %s\\n' "$package" ${quote(profile.version)} "$actual" >&2; exit 1; fi; done`, packageSnapshot(profile, `${state}/packages.after`), packageAdded(profile, state)
     ])
   }
   const artifact = `${state}/${PORTABLE_ARCHIVE}`
@@ -224,7 +224,7 @@ function nativeAcquire (state, profile) {
 function portableFfmpeg (state, profile) {
   const artifact = `${state}/${FFMPEG_ARCHIVE}`
   return join([
-    'set -eu', `if ! [ -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(FFMPEG_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then curl --fail --location --retry 5 --retry-delay 2 --silent --show-error --output ${quote(`${artifact}.tmp`)} ${quote(FFMPEG_URL)}; printf '%s  %s\\n' ${quote(FFMPEG_SHA256)} ${quote(`${artifact}.tmp`)} | sha256sum -c -; mv -f -- ${quote(`${artifact}.tmp`)} ${quote(artifact)}; fi`, `tar -xJf ${quote(artifact)} -C ${quote(APP_ROOT)}`, `test -x ${quote(profile.ffmpeg)}`
+    'set -eu', `if ! [ -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(FFMPEG_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error --output ${quote(`${artifact}.tmp`)} ${quote(FFMPEG_URL)}; printf '%s  %s\\n' ${quote(FFMPEG_SHA256)} ${quote(`${artifact}.tmp`)} | sha256sum -c -; mv -f -- ${quote(`${artifact}.tmp`)} ${quote(artifact)}; fi`, `tar -xJf ${quote(artifact)} -C ${quote(APP_ROOT)}`, `test -x ${quote(profile.ffmpeg)}`
   ])
 }
 
@@ -269,7 +269,7 @@ function nativeRestore (state, profile) {
   commands.push(removeAddedPackages(profile, `${state}/packages.added`))
   if (profile.package) commands.push('rm -f /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg', 'apt-get update >/dev/null 2>&1 || true')
   commands.push(`if getent passwd ${quote(profile.user)} >/dev/null; then userdel ${quote(profile.user)} 2>/dev/null || true; fi`)
-  commands.push(`if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx >/dev/null 2>&1 || true; else systemctl disable nginx >/dev/null 2>&1 || true; fi`, `if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx 2>/dev/null || true; fi`, `rm -rf -- ${quote(state)}`)
+  commands.push(`if systemctl cat nginx >/dev/null 2>&1; then if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx >/dev/null 2>&1 || true; else systemctl disable nginx >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx 2>/dev/null || true; fi; fi`, `rm -rf -- ${quote(state)}`)
   return join(commands)
 }
 
@@ -339,13 +339,14 @@ function packageAdded (profile, state) {
 
 function removeAddedPackages (profile, list) {
   if (profile.family === 'debian') return removeDebianPackages(list)
-  if (profile.family === 'arch') return `if [ -s ${quote(list)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || pacman -Rns --noconfirm $packages || true; fi`
+  if (profile.family === 'arch') return `if [ -s ${quote(list)} ]; then if grep -Fxq nginx ${quote(list)}; then systemctl stop nginx; fi; packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || pacman -Rns --noconfirm $packages || true; fi`
   if (profile.family === 'suse') return `if [ -s ${quote(list)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || zypper --non-interactive remove --clean-deps $packages || true; fi`
   return `if [ -s ${quote(list)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || dnf remove -y $packages || true; fi`
 }
 
 function removeDebianPackages (list) {
-  return `if [ -s ${quote(list)} ]; then packages=$(awk '{print $1}' ${quote(list)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages || true; fi`
+  const before = list.replace(/packages\.added$/u, 'packages.before')
+  return `if [ -s ${quote(list)} ]; then test -s ${quote(before)}; packages=$(awk 'FILENAME == ARGV[1] { before[$1]=1; next } !($1 in before) { print $1 }' ${quote(before)} ${quote(list)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages || true; fi`
 }
 
 function composeCommand () {

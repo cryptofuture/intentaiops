@@ -1,9 +1,66 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { execute, recoverIncomplete, requireCompleted, revert, stageInstallSource } from '../scripts/validate-linux-common-tasks.js'
+import { spawnSync } from 'node:child_process'
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { completedValidationResults, execute, recoverIncomplete, requireCompleted, revert, stageInstallSource, validationBaseline } from '../scripts/validate-linux-common-tasks.js'
 
 const plan = { summary: 'Common fixture', changeOverview: 'Test fixture', modifiedFiles: [], commands: [{ id: 'apply' }], revertCommands: [{ id: 'undo' }] }
 const completed = id => ({ id, status: 'completed' })
+
+test('invalid resume arguments stop before opening a vault or selecting real hosts', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-validation-resume-'))
+  try {
+    for (const args of [['--resume-validation'], ['--resume-validation=1'], ['--resume-validation=1', '--host=webminai-debian-13', '--task=wordpress-linux'], ['--resume-validation=0', '--host=webminai-debian-13', '--task=n8n-linux']]) {
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/validate-linux-common-tasks.js', import.meta.url)), ...args], { encoding: 'utf8', env: { ...process.env, VAULT_TEST: 'fixture', WEBMINAI_DATA_ROOT: root } })
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, /use --resume-validation=TASK_ID|resume-validation requires/u)
+      assert.deepEqual(await readdir(root), [])
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('recovered n8n validation accepts only confirmed results and unchanged catalog scope', () => {
+  const expected = { commands: [{ id: 'install', command: 'install-fixed-catalog' }], modifiedFiles: ['/fixture'] }
+  const task = { catalogId: 'n8n-linux', status: 'completed', plan: structuredClone(expected), results: [completed('install')] }
+  const state = [{ commandId: 'install', status: 'completed' }]
+  assert.deepEqual(completedValidationResults(task, state, [], expected), task.results)
+  assert.throws(() => completedValidationResults({ ...task, status: 'partial' }, state, [], expected), /operator-reviewed recovery/u)
+  assert.throws(() => completedValidationResults(task, [{ ...state[0], status: 'uncertain' }], [], expected), /operator review/u)
+  assert.throws(() => completedValidationResults(task, state, [{}], expected), /rollback already started/u)
+  assert.throws(() => completedValidationResults({ ...task, results: [] }, state, [], expected), /results are missing/u)
+  assert.throws(() => completedValidationResults(task, [{ commandId: 'old-attempt', status: 'completed' }], [], expected))
+  assert.throws(() => completedValidationResults({ ...task, plan: { ...expected, modifiedFiles: ['/other'] } }, state, [], expected), /managed paths/u)
+  assert.throws(() => completedValidationResults({ ...task, plan: { ...expected, commands: [{ id: 'install', command: 'changed' }] } }, state, [], expected), /catalog commands/u)
+  const revised = { ...task, plan: { ...expected, commands: [{ ...expected.commands[0], id: 'reviewed-install' }] }, results: [completed('reviewed-install')] }
+  assert.deepEqual(completedValidationResults(revised, [{ commandId: 'reviewed-install', status: 'completed' }], [], expected), revised.results)
+})
+
+test('validation baselines are private, immutable, bounded and reject changed or missing evidence', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-validation-baseline-'))
+  try {
+    const plan = { commands: [{ id: 'install', command: 'printf PAYLOAD_NOT_IN_BASELINE' }], revertCommands: [], modifiedFiles: ['/fixture'] }
+    const options = { serverId: 'webminai-debian-13', taskId: 1, plan }
+    assert.equal(await validationBaseline(root, { ...options, baseline: 'n8n=absent\n' }), 'n8n=absent\n')
+    assert.equal(await validationBaseline(root, options), 'n8n=absent\n')
+    await assert.rejects(validationBaseline(root, { ...options, baseline: 'overwritten' }), { code: 'EEXIST' })
+    await assert.rejects(validationBaseline(root, { ...options, taskId: 2 }), { code: 'ENOENT' })
+    await assert.rejects(validationBaseline(root, { ...options, plan: { ...plan, commands: [] } }), /catalog commands changed/u)
+    await assert.rejects(validationBaseline(root, { ...options, plan: { ...plan, modifiedFiles: ['/other'] } }), /managed paths changed/u)
+    await assert.rejects(validationBaseline(root, { ...options, serverId: '../outside', baseline: '' }))
+    await assert.rejects(validationBaseline(root, { ...options, taskId: 0, baseline: '' }))
+    await assert.rejects(validationBaseline(root, { ...options, taskId: 2, baseline: 'x'.repeat(65537) }))
+    const file = path.join(root, 'lab-validation-baselines/webminai-debian-13-1.json')
+    assert.ok(!(await readFile(file, 'utf8')).includes('PAYLOAD_NOT_IN_BASELINE'))
+    if (process.platform !== 'win32') assert.equal((await stat(file)).mode & 0o777, 0o600)
+    await writeFile(file, 'invalid KNOWN_SECRET')
+    await assert.rejects(validationBaseline(root, options), error => error.message === 'saved validation baseline is invalid')
+    await writeFile(file, 'x'.repeat(131073))
+    await assert.rejects(validationBaseline(root, options), /size limit/u)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 test('installer validation stages the current checkout and rejects an unsafe remote temporary path', async () => {
   const copies = []

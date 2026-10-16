@@ -13,6 +13,7 @@ const DATABASE_USER = 'webminai_mattermost'
 const ARCHIVE = `mattermost-team-${VERSION}-linux-amd64.tar.gz`
 const ARCHIVE_URL = `https://releases.mattermost.com/${VERSION}/${ARCHIVE}`
 const ARCHIVE_SHA256 = '0fc1637ca6cec0a53fc7112a22f67651dba50fe3667e5ed957acf0d3bbb9da93'
+const ARCHIVE_BYTES = 411962109
 const MATTERMOST_IMAGE = 'mattermost/mattermost-team-edition@sha256:65c8e3fa5122307b833eb08d3ea402b2f829a0fd43a82f6e2ccea0e14225c970'
 const POSTGRES_IMAGE = 'postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94'
 const NGINX_IMAGE = 'nginx@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
@@ -58,10 +59,11 @@ function buildNativeTask (taskId, context, profile) {
     item('install-stack', 'packages', nativePackages(state, profile), `Install nginx and PostgreSQL ${profile.postgresMajor}+ through the reviewed ${profile.family} route`, ['capture-baseline'], 1200000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(), 'Generate the PostgreSQL password on-host without emitting it', ['capture-baseline']),
     item('initialize-database', 'database', nativeDatabase(profile), 'Initialize PostgreSQL and create the isolated Mattermost database role', ['install-stack', 'generate-credentials']),
-    item('install-mattermost', 'acquire', nativeAcquire(state), `Download, checksum, and install the official Mattermost Team Edition ${VERSION} tarball`, ['install-stack'], 1800000, 'job'),
+    item('install-mattermost', 'acquire', nativeAcquire(state), `Download, checksum, and install the official Mattermost Team Edition ${VERSION} tarball`, ['install-stack'], 3600000, 'job'),
     item('configure-mattermost', 'configure', nativeConfigure(paths, profile), 'Create protected runtime configuration, systemd service, storage, and nginx proxy', ['initialize-database', 'install-mattermost']),
     item('verify-mattermost', 'verify', nativeVerify(profile), 'Verify Mattermost health, PostgreSQL persistence, version, marker, and restart recovery', ['configure-mattermost'], 1200000, 'job')
   ]
+  commands.find(command => command.id === 'install-mattermost').retry = { attempts: 2, intervalMs: 2000, exitCodes: [143], states: ['timed_out'] }
   const revertCommands = [
     item('stop-mattermost', 'cleanup', nativeStop(paths), 'Stop and remove only the task-owned Mattermost service and nginx site', [], 300000, undefined, 'destructive'),
     item('drop-database', 'cleanup', nativeDropDatabase(profile), 'Drop only the task-owned PostgreSQL database and role', ['stop-mattermost'], 300000, undefined, 'destructive'),
@@ -229,8 +231,8 @@ function nativeAcquire (state) {
   const artifact = `${state}/${ARCHIVE}`
   return join([
     'set -eu', `if [ ! -x ${quote(`${APP_ROOT}/bin/mattermost`)} ]; then`, `rm -rf -- ${quote(`${APP_ROOT}.new`)}`, `install -d -o root -g root -m 0755 ${quote(`${APP_ROOT}.new`)}`,
-    `if [ ! -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then rm -f -- ${quote(artifact)}; curl --fail --location --retry 5 --retry-delay 2 --silent --show-error --output ${quote(artifact)} ${quote(ARCHIVE_URL)}; fi`,
-    `printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(artifact)} | sha256sum -c -`, `tar -xzf ${quote(artifact)} -C ${quote(`${APP_ROOT}.new`)} --strip-components=1`,
+    `if [ ! -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then if [ -f ${quote(artifact)} ] && [ "$(wc -c < ${quote(artifact)})" -ge ${ARCHIVE_BYTES} ]; then rm -f -- ${quote(artifact)}; fi; curl --fail --location --continue-at - --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error --output ${quote(artifact)} ${quote(ARCHIVE_URL)}; fi`,
+    `printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(artifact)} | sha256sum -c - || { rm -f -- ${quote(artifact)}; exit 1; }`, `tar -xzf ${quote(artifact)} -C ${quote(`${APP_ROOT}.new`)} --strip-components=1`,
     `test -x ${quote(`${APP_ROOT}.new/bin/mattermost`)}`, `mv ${quote(`${APP_ROOT}.new`)} ${quote(APP_ROOT)}`, 'fi',
     `${quote(`${APP_ROOT}/bin/mattermost`)} version | grep -F ${quote(VERSION)}`, 'printf \'%s\\n\' mattermost-installed'
   ])

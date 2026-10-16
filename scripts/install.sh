@@ -16,6 +16,11 @@ fi
 
 mkdir -p "$INSTALL_ROOT" "$BIN_DIRECTORY"
 
+if ! command -v node >/dev/null 2>&1 && [ -x "$INSTALL_ROOT/runtime/bin/node" ] && [ -x "$INSTALL_ROOT/runtime/bin/npm" ] && "$INSTALL_ROOT/runtime/bin/node" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 24 || (major === 24 && minor >= 7) ? 0 : 1)'; then
+  PATH="$INSTALL_ROOT/runtime/bin:$PATH"
+  export PATH
+fi
+
 if command -v node >/dev/null 2>&1; then
   node_version=$(node -p 'process.versions.node')
   node_major=$(printf '%s' "$node_version" | cut -d. -f1)
@@ -65,8 +70,8 @@ else
     runtime="$INSTALL_ROOT/runtime"
     temporary=$(mktemp -d "${TMPDIR:-/tmp}/intentaiops-install.XXXXXXXX")
     trap 'rm -rf "$temporary"' EXIT HUP INT TERM
-    curl --fail --location --silent --show-error "https://nodejs.org/dist/v${NODE_VERSION}/$archive" --output "$temporary/$archive"
-    curl --fail --location --silent --show-error "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" --output "$temporary/SHASUMS256.txt"
+    curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --silent --show-error "https://nodejs.org/dist/v${NODE_VERSION}/$archive" --output "$temporary/$archive"
+    curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --silent --show-error "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" --output "$temporary/SHASUMS256.txt"
     expected=$(awk -v file="$archive" '$2 == file { print $1 }' "$temporary/SHASUMS256.txt")
     [ -n "$expected" ] || { printf '%s\n' 'ERROR: Node.js checksum is unavailable.' >&2; exit 1; }
     if command -v sha256sum >/dev/null 2>&1; then

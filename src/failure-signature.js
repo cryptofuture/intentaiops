@@ -1,5 +1,6 @@
 const FAILURE_CODES = new Set([
   'PACKAGE_NOT_FOUND',
+  'PACKAGE_VERSION_MISMATCH',
   'PACKAGE_MANAGER_FAILED',
   'ARTIFACT_DOWNLOAD_FAILED',
   'CHECKSUM_MISMATCH',
@@ -26,7 +27,8 @@ export function classifyFailure ({ item, result, error }) {
   const text = [error?.message, result?.stderr, result?.stdout].filter(Boolean).join('\n').slice(0, 8192)
   const lower = text.toLowerCase()
   let code = 'COMMAND_FAILED'
-  if (/firmware_virtualization_disabled/u.test(lower)) code = 'FIRMWARE_VIRTUALIZATION_DISABLED'
+  if (result?.timedOut === true || result?.state === 'timed_out') code = 'TIMEOUT'
+  else if (/firmware_virtualization_disabled/u.test(lower)) code = 'FIRMWARE_VIRTUALIZATION_DISABLED'
   else if (/unsupported_windows_version/u.test(lower)) code = 'UNSUPPORTED_WINDOWS_VERSION'
   else if (/insufficient_memory/u.test(lower)) code = 'INSUFFICIENT_MEMORY'
   else if (/slat_unavailable/u.test(lower)) code = 'SLAT_UNAVAILABLE'
@@ -34,6 +36,7 @@ export function classifyFailure ({ item, result, error }) {
   else if (/webminai_reboot_required|reboot_required/u.test(lower)) code = 'REBOOT_REQUIRED'
   else if (/docker_service_not_ready/u.test(lower)) code = 'DOCKER_SERVICE_NOT_READY'
   else if (/windows_interactive_user_required/u.test(lower)) code = 'WINDOWS_INTERACTIVE_USER_REQUIRED'
+  else if (/\bpackage_version_mismatch\b/u.test(lower)) code = 'PACKAGE_VERSION_MISMATCH'
   else if (/unable to locate package|no match for argument|target not found|no such package|nothing provides|package .* not found/u.test(lower)) code = 'PACKAGE_NOT_FOUND'
   else if (/apt(?:-get)?:|dnf:|yum:|apk:|pacman:|zypper:/u.test(lower) && item.phase === 'packages') code = 'PACKAGE_MANAGER_FAILED'
   else if (/checksum|sha(?:1|256|512).*(?:mismatch|failed)|digest.*(?:mismatch|failed)/u.test(lower)) code = 'CHECKSUM_MISMATCH'
@@ -51,7 +54,7 @@ export function classifyFailure ({ item, result, error }) {
     phase: item.phase ?? 'application',
     commandId: item.id,
     exitCode: Number.isInteger(result?.exitCode) ? result.exitCode : null,
-    evidence: safeEvidence(text)
+    evidence: safeEvidence(text || (code === 'TIMEOUT' ? 'Execution exceeded its configured timeout.' : ''))
   }
 }
 

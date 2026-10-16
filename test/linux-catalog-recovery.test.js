@@ -8,8 +8,125 @@ import test from 'node:test'
 import { buildCommonTask } from '../src/common-tasks.js'
 import { LinuxHostContextService } from '../src/linux-host-context.js'
 import { mariadbDataPreflight, wordpressArtifactCommand } from '../src/linux-php-foundation.js'
-import { n8nRelease } from '../src/n8n-task.js'
+import { buildN8nTask, n8nRelease } from '../src/n8n-task.js'
 import { moodleRelease } from '../src/moodle-task.js'
+import { buildMattermostTask, mattermostRelease } from '../src/mattermost-task.js'
+import { buildJellyfinTask } from '../src/jellyfin-task.js'
+
+test('Jellyfin rejects a mismatched server or web package even when its meta-package is pinned', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-jellyfin-pins-'))
+  try {
+    writeFileSync(path.join(root, 'packages.before'), '')
+    const built = buildJellyfinTask(316, { identity: { id: 'debian', versionId: '13', architecture: 'x86_64' }, management: { family: 'debian' } })
+    const command = built.plan.commands.find(c => c.id === 'install-jellyfin').command.replaceAll('/var/lib/webminai/task-state/316-jellyfin-linux', root).replaceAll('apt-get', 'mock_apt_get').replaceAll('dpkg-query', 'mock_dpkg_query')
+    for (const mismatched of ['', 'jellyfin-server', 'jellyfin-web']) {
+      const result = spawnSync('/bin/sh', ['-c', `mock_apt_get () { case "$*" in *'jellyfin=10.11.11+deb13'*'jellyfin-server=10.11.11+deb13'*'jellyfin-web=10.11.11+deb13'*) return 0;; *) return 99;; esac; }; systemctl () { return 0; }; mock_dpkg_query () { if [ "$#" -eq 2 ]; then return 0; fi; if [ "$3" = '${mismatched}' ]; then printf '12.2+deb13'; else printf '10.11.11+deb13'; fi; }; ` + command], { encoding: 'utf8' })
+      assert.equal(result.status, mismatched ? 1 : 0, result.stderr)
+      if (mismatched) assert.match(result.stderr, new RegExp(`PACKAGE_VERSION_MISMATCH: ${mismatched}`))
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Jellyfin rollback tolerates a removed nginx unit but still restores an installed service', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-jellyfin-rollback-'))
+  try {
+    const built = buildJellyfinTask(314, { identity: { id: 'arch', architecture: 'x86_64' }, management: { family: 'arch' } })
+    const state = path.join(root, 'state')
+    const command = built.plan.revertCommands.find(c => c.id === 'restore-foundation').command.replaceAll('/var/lib/webminai/task-state/314-jellyfin-linux', state)
+    for (const installed of [false, true]) {
+      mkdirSync(state)
+      writeFileSync(path.join(state, 'nginx.active'), '')
+      writeFileSync(path.join(state, 'nginx.enabled'), '')
+      const result = spawnSync('/bin/sh', ['-c', `getent () { return 2; }; systemctl () { printf '%s\\n' "$*" >> '${root}/calls'; case "$1" in cat) ${installed ? 'return 0' : 'return 1'};; start) ${installed ? 'return 0' : 'return 5'};; esac; }; ` + command], { encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(existsSync(state), false)
+      assert.equal(readFileSync(path.join(root, 'calls'), 'utf8').includes('start nginx'), installed)
+      rmSync(path.join(root, 'calls'))
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Jellyfin rollback never purges an upgraded pre-existing Debian package and rejects missing or empty baselines', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-jellyfin-package-baseline-'))
+  try {
+    const built = buildJellyfinTask(317, { identity: { id: 'debian', versionId: '13', architecture: 'x86_64' }, management: { family: 'debian' } })
+    const state = path.join(root, 'state')
+    const command = built.plan.revertCommands.find(c => c.id === 'restore-foundation').command.replaceAll('/var/lib/webminai/task-state/317-jellyfin-linux', state).replaceAll('/etc/apt/sources.list.d/jellyfin.sources', path.join(root, 'jellyfin.sources')).replaceAll('/etc/apt/keyrings/jellyfin.gpg', path.join(root, 'jellyfin.gpg')).replaceAll('apt-get', 'mock_apt_get')
+    const mocks = `getent () { return 2; }; systemctl () { return 0; }; mock_apt_get () { if [ "$1" = purge ]; then printf '%s\\n' "$*" > '${root}/removed'; fi; }; `
+    for (const baseline of ['present', 'missing', 'empty']) {
+      mkdirSync(state)
+      if (baseline !== 'missing') writeFileSync(path.join(state, 'packages.before'), baseline === 'present' ? 'libc6 1\ncurl 1\n' : '')
+      writeFileSync(path.join(state, 'packages.added'), 'libc6 2\ncurl 2\njellyfin 10.11.11+deb13\n')
+      const result = spawnSync('/bin/sh', ['-c', mocks + command], { encoding: 'utf8' })
+      assert.equal(result.status, baseline === 'present' ? 0 : 1, result.stderr)
+      assert.equal(existsSync(path.join(root, 'removed')), baseline === 'present')
+      if (baseline === 'present') {
+        assert.equal(readFileSync(path.join(root, 'removed'), 'utf8'), 'purge -y jellyfin\n')
+        rmSync(path.join(root, 'removed'))
+      }
+      if (existsSync(state)) rmSync(state, { recursive: true })
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Arch rollback stops only task-added nginx before removal and refuses removal if stopping fails', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-arch-nginx-'))
+  const context = { identity: { id: 'arch', architecture: 'x86_64' }, management: { family: 'arch', serviceManager: 'systemd' } }
+  try {
+    for (const [catalog, builder, step] of [['n8n', buildN8nTask, 'restore-packages'], ['jellyfin', buildJellyfinTask, 'restore-foundation']]) {
+      for (const [owned, denied] of [[false, false], [true, false], [true, true]]) {
+        const state = path.join(root, `${catalog}-${owned}-${denied}`)
+        mkdirSync(state)
+        writeFileSync(path.join(state, 'packages.before'), owned ? 'curl\n' : 'curl\nnginx\n')
+        writeFileSync(path.join(state, 'packages.added'), owned ? 'nginx\n' : 'xz\n')
+        const built = builder(315, context)
+        const command = built.plan.revertCommands.find(c => c.id === step).command.replaceAll(`/var/lib/webminai/task-state/315-${catalog}-linux`, state)
+        const result = spawnSync('/bin/sh', ['-c', `getent () { return 2; }; systemctl () { case "$1" in cat) return 1;; stop) printf 'stop\\n' >> '${root}/calls'; return ${denied ? 7 : 0};; esac; }; pacman () { if [ "$1" = -Qq ]; then printf 'curl\\nnginx\\n'; else printf 'remove\\n' >> '${root}/calls'; fi; }; xargs () { printf 'remove\\n' >> '${root}/calls'; }; ` + command], { encoding: 'utf8' })
+        assert.equal(result.status, denied ? 7 : 0, result.stderr)
+        const calls = existsSync(path.join(root, 'calls')) ? readFileSync(path.join(root, 'calls'), 'utf8') : ''
+        if (owned) assert.equal(calls, denied ? 'stop\n' : 'stop\nremove\n')
+        else assert.doesNotMatch(calls, /stop/u)
+        if (existsSync(path.join(root, 'calls'))) rmSync(path.join(root, 'calls'))
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Mattermost resumes partial downloads and never extracts an invalid complete archive', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-mattermost-acquire-'))
+  try {
+    const app = path.join(root, 'application')
+    const state = path.join(root, 'state')
+    mkdirSync(state)
+    const archive = path.join(state, 'mattermost-team-11.7.8-linux-amd64.tar.gz')
+    const content = 'verified archive'
+    const digest = createHash('sha256').update(content).digest('hex')
+    const binary = path.join(root, 'mattermost')
+    writeFileSync(binary, '#!/bin/sh\nprintf 11.7.8\n', { mode: 0o755 })
+    const built = buildMattermostTask(313, { identity: { id: 'ubuntu', versionId: '24.04' }, management: { family: 'debian' } })
+    const command = built.plan.commands.find(c => c.id === 'install-mattermost').command.replaceAll('/opt/webminai-mattermost-18111', app).replaceAll('/var/lib/webminai/task-state/313-mattermost-linux', state).replaceAll(mattermostRelease().archiveSha256, digest).replace('-ge 411962109', `-ge ${content.length}`).replaceAll('-o root -g root ', '')
+    const mocks = `curl () { case "$*" in *'--continue-at -'*) :;; *) return 97;; esac; if [ -s '${archive}' ]; then [ "$(cat '${archive}')" = verified ] || return 98; printf ' archive' >> '${archive}'; else printf '${content}' > '${archive}'; fi; }; tar () { mkdir -p '${app}.new/bin'; cp '${binary}' '${app}.new/bin/mattermost'; }; `
+    writeFileSync(archive, 'verified')
+    const resumed = spawnSync('/bin/sh', ['-c', mocks + command], { encoding: 'utf8' })
+    assert.equal(resumed.status, 0, resumed.stderr)
+    assert.equal(readFileSync(archive, 'utf8'), content)
+    rmSync(app, { recursive: true })
+    writeFileSync(archive, 'x'.repeat(content.length))
+    const restarted = spawnSync('/bin/sh', ['-c', mocks + command], { encoding: 'utf8' })
+    assert.equal(restarted.status, 0, restarted.stderr)
+    assert.equal(readFileSync(archive, 'utf8'), content)
+    rmSync(app, { recursive: true })
+    writeFileSync(archive, 'verified')
+    const failed = spawnSync('/bin/sh', ['-c', `curl () { printf 'partial' > '${archive}'; return 56; }; ` + command], { encoding: 'utf8' })
+    assert.equal(failed.status, 56)
+    assert.equal(readFileSync(archive, 'utf8'), 'partial')
+    const corrupt = spawnSync('/bin/sh', ['-c', `curl () { printf corrupt > '${archive}'; }; tar () { touch '${root}/unexpected-extraction'; }; ` + command], { encoding: 'utf8' })
+    assert.equal(corrupt.status, 1)
+    assert.equal(existsSync(archive), false)
+    assert.equal(existsSync(app), false)
+    assert.equal(existsSync(path.join(root, 'unexpected-extraction')), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 test('Moodle retries truncated acquisition within a bound and never publishes a failed digest', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'intent-moodle-acquire-'))
@@ -19,6 +136,8 @@ test('Moodle retries truncated acquisition within a bound and never publishes a 
       execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'ubuntu', VERSION_ID: '24.04' }, commands: { apt: true } }
     })
     const built = buildCommonTask('moodle-linux', 312, { platform: 'linux', linuxContext: context, docker: { preferred: false } })
+    assert.equal(built.plan.commands.find(c => c.id === 'verify-artifacts').timeoutMs, 3600000)
+    assert.equal(built.plan.commands.find(c => c.id === 'verify-artifacts').executionMode, 'job')
     const digest = createHash('sha256').update('verified fixture').digest('hex')
     const command = built.plan.commands.find(c => c.id === 'verify-artifacts').command.replaceAll('/var/lib/webminai/webminai-moodle-18106', root).replaceAll(moodleRelease().sha256, digest).replaceAll('-o root -g root ', '')
     const mock = `calls=0; curl () { calls=$((calls+1)); printf x >> '${root}/calls'; if [ "$calls" -eq 1 ]; then printf truncated; else printf 'verified fixture'; fi > '${root}/moodle.tar.gz.tmp'; }; `
@@ -32,6 +151,9 @@ test('Moodle retries truncated acquisition within a bound and never publishes a 
     assert.equal(failed.status, 1)
     assert.equal(readFileSync(path.join(root, 'failures'), 'utf8'), 'xxx')
     assert.match(failed.stderr, /ARTIFACT_DOWNLOAD_FAILED/)
+    const expired = spawnSync('/bin/sh', ['-c', `clock=0; date () { clock=$((clock+1)); if [ -f '${root}/clock' ]; then printf 4301; else touch '${root}/clock'; printf 1000; fi; }; curl () { touch '${root}/unexpected-download'; }; ` + command], { encoding: 'utf8' })
+    assert.equal(expired.status, 1)
+    assert.equal(existsSync(path.join(root, 'unexpected-download')), false)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

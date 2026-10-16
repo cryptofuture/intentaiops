@@ -1,5 +1,7 @@
 import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { parseLinuxExecutionInventory } from './linux-host-context.js'
+import { collectHostEvidence } from './host-execution-evidence.js'
+import { collectComposeEvidence, collectContainerEvidence } from './container-execution-evidence.js'
 
 const API_PATH = /^\/api\/v3\/[A-Za-z0-9_./?&=%:,*|~-]+$/
 
@@ -20,6 +22,16 @@ export class NetdataClient {
 
   async info () {
     return this.getJson('/api/v3/info?options=full')
+  }
+
+  async collectExecutionEvidence ({ item, before } = {}) {
+    const evidence = await collectHostEvidence(this, item?.diagnostic?.kind === 'filesystem' ? { filesystemTarget: item.diagnostic.target } : {})
+    if (before && item?.diagnostic?.kind === 'compose') evidence.workloadDiagnostics = await collectComposeEvidence(this, item.diagnostic, before.observedAt)
+    return evidence
+  }
+
+  async collectContainerEvidence (reference) {
+    return collectContainerEvidence(this, reference)
   }
 
   async contexts () {
@@ -309,7 +321,7 @@ export class NetdataClient {
     if (!JOB_STATES.has(result?.state) || result.jobId !== jobId) {
       throw new Error('Netdata job status returned an invalid response')
     }
-    const orphaned = result.state === 'failed' && result.exitCode === 125 && result.stderr?.trim() === 'detached job controller exited before recording a result'
+    const orphaned = result.state === 'failed' && result.exitCode === 125 && ['detached job controller exited before recording a result', 'job worker exited without a result'].includes(result.stderr?.trim())
     if (result.state === 'unknown' || orphaned) return { ...result, state: 'unknown', exitCode: null, recoveryRequired: true }
     return result
   }

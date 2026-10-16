@@ -14,6 +14,19 @@
 /** @typedef {'job'} CommandExecutionMode */
 
 /**
+ * @typedef {object} ExecutionObservation
+ * @property {number} version
+ * @property {string} code
+ * @property {'confirmed' | 'suspected' | 'unknown'} confidence
+ * @property {'local-client' | 'transport' | 'remote-command' | 'host' | 'container' | 'kubernetes-workload'} scope
+ * @property {string} source
+ * @property {string} observedAt
+ * @property {string} explanation
+ * @property {Record<string, string | number | boolean>} evidence
+ * @property {string} nextAction
+ */
+
+/**
  * @typedef {object} CommandSource
  * @property {'verified-foundation' | 'verified-application' | 'ai-planned'} type
  * @property {string} [id]
@@ -25,6 +38,7 @@
  * @property {number} attempts
  * @property {number} intervalMs
  * @property {number[]} exitCodes
+ * @property {Array<'failed' | 'timed_out'>} [states]
  */
 
 /**

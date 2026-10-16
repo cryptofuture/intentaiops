@@ -2264,6 +2264,7 @@ async function approveCommand (ui, item, prefix = 'Approve') {
   renderWrappedField(ui, 'Purpose', item.purpose)
   ui.line('Risk', item.risk)
   ui.line('Timeout', `${item.timeoutMs}ms`)
+  if (item.retry) ui.line('Retry policy', `${item.retry.attempts} attempts, ${item.retry.intervalMs}ms delay, exits ${item.retry.exitCodes.join(', ')}${item.retry.states ? `, states ${item.retry.states.join(', ')}` : ''}; never unknown or cancelled`)
   ui.line('Root required', item.requiresSudo ? 'yes' : 'no')
   ui.separator()
   writeRaw(ui, item.command)
@@ -2539,6 +2540,7 @@ function renderCommandList (ui, commands, heading) {
     renderWrappedField(ui, 'Purpose', item.purpose)
     ui.line('Risk', item.risk)
     ui.line('Timeout', `${item.timeoutMs}ms`)
+    if (item.retry) ui.line('Retry policy', `${item.retry.attempts} attempts, ${item.retry.intervalMs}ms delay, exits ${item.retry.exitCodes.join(', ')}${item.retry.states ? `, states ${item.retry.states.join(', ')}` : ''}; never unknown or cancelled`)
     ui.line('Root required', item.requiresSudo ? 'yes' : 'no')
     if (item.source) ui.line('Source', commandSourceLabel(item.source))
     ui.output.write('Command\n-------\n')
@@ -2558,6 +2560,7 @@ export function renderResults (ui, results, heading = 'Execution results') {
     ui.separator()
     ui.line('Command', result.id)
     ui.line('Status', result.status)
+    if (result.diagnostics?.length) for (const diagnostic of result.diagnostics) ui.line(`${diagnostic.code} (${diagnostic.confidence})`, `${diagnostic.explanation} ${diagnostic.nextAction}`)
     ui.output.write(`\n${ui.paint('info', 'stdout')}\n${ui.paint('separator', '------')}\n`)
     writeRaw(ui, result.result?.stdout || '(empty)')
     ui.output.write(`\n${ui.paint('error', 'stderr')}\n${ui.paint('separator', '------')}\n`)
@@ -2567,7 +2570,7 @@ export function renderResults (ui, results, heading = 'Execution results') {
 }
 
 function renderTaskProgress (ui, event) {
-  const prefix = event.phase === 'execution-recovery' ? `Recovery / ${event.commandId}` : event.type === 'reasoning' ? 'Codex reasoning' : `Codex ${event.type}`
+  const prefix = event.phase === 'execution-retry' ? `Retry / ${event.commandId}` : event.phase === 'execution-diagnostics' ? `Evidence / ${event.commandId} / ${event.outcome}` : event.phase === 'execution-recovery' ? `Recovery / ${event.commandId}` : event.type === 'reasoning' ? 'Codex reasoning' : `Codex ${event.type}`
   ui.output.write(`\n${ui.paint('muted', `[${prefix}]`)} ${event.message}\n`)
 }
 

@@ -40,7 +40,9 @@ for (const [family, linuxContext] of Object.entries(contexts)) {
     assert.doesNotMatch(commands, /N8N_ENCRYPTION_KEY=[a-f0-9]{32,}/u)
     assert.equal(built.plan.commands.find(item => item.id === 'install-n8n').executionMode, 'job')
     assert.equal(built.plan.commands.find(item => item.id === 'install-n8n').timeoutMs, 3600000)
+    assert.deepEqual(built.plan.commands.find(item => item.id === 'install-n8n').retry, { attempts: 2, intervalMs: 2000, exitCodes: [143], states: ['timed_out'] })
     assert.equal(built.plan.commands.find(item => item.id === 'install-runtime').timeoutMs, 1800000)
+    assert.deepEqual(built.plan.commands.find(item => item.id === 'install-runtime').retry, { attempts: 2, intervalMs: 2000, exitCodes: [143], states: ['timed_out'] })
     const restore = built.plan.revertCommands.find(item => item.id === 'restore-packages').command
     assert.match(restore, /packages\.current/u)
     assert.match(restore, /comm -13/u)
@@ -52,6 +54,17 @@ for (const [family, linuxContext] of Object.entries(contexts)) {
     }
   })
 }
+
+test('Alpine creates nginx runtime state before validation and cleans only its owned directory', () => {
+  const built = buildN8nTask(1, contexts.alpine, { preferred: false })
+  const configure = built.plan.commands.find(item => item.id === 'configure-services').command
+  const restore = built.plan.revertCommands.find(item => item.id === 'restore-packages').command
+  assert.ok(built.plan.modifiedFiles.includes('/run/nginx'))
+  assert.match(configure, /if \[ ! -d \/run\/nginx \]; then install -d[^;]+\/run\/nginx; : > '[^']+created-runtime-directory'; fi/u)
+  assert.ok(configure.indexOf('created-runtime-directory') < configure.indexOf('nginx -t'))
+  assert.match(restore, /if \[ -e '[^']+created-runtime-directory' \] && \[ ! -e '[^']+nginx\.active' \] && \[ -d \/run\/nginx \]; then rmdir \/run\/nginx; fi/u)
+  assert.doesNotMatch(restore, /rm -rf[^;]*\/run\/nginx/u)
+})
 
 test('native package routes avoid incompatible Node versions', () => {
   const alpine = buildN8nTask(1, contexts.alpine, { preferred: false }).plan.commands.find(item => item.id === 'install-runtime').command

@@ -65,6 +65,8 @@ pkg-config --modversion openssl
 
 The cross-platform bootstrap installs a private Node.js 24 runtime only when Node is absent, then installs the committed package tarball:
 
+On repeat POSIX installs, a compatible private runtime under the same install root is reused when no system Node exists. An incompatible system Node still requires an explicit upgrade; an incomplete or incompatible private runtime is not reused. The Intent AI Ops Linux installation task has a 30-minute signed-job limit, without automatic retry of the installation command after interruption. Public Node downloads have three bounded retries and retain SHA-256 verification.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.sh | sh
 ```
@@ -489,6 +491,8 @@ Execute this command? [y/N]: y
 ```
 
 Rejected commands are not executed. Commands depending on a rejected or failed command are marked as blocked. Output is returned through the signed Netdata function and displayed in the terminal.
+
+Native n8n runtime/package acquisition and Mattermost archive acquisition declare at most two attempts, visible during plan review. A second attempt is allowed only after an authoritative `timed_out` result with exit 143, never after cancellation, transport loss or an unknown outcome. The n8n runtime limit is 30 minutes per attempt; n8n and Mattermost acquisition allow one hour per attempt. The two-second retry delay and existing task-owned npm cache/resumable checksum-verified archive keep slow downloads from starting over. Each attempt has its own journal identifier. These policies do not authorize replay of uncertain work or bypass plan approval.
 
 Tasks and consultations are saved immediately in the selected server's `tasks.sqlite3`. A consultation record includes its question, live Codex progress, answer, compact summary, and the task or later consultation that consumed it. A task record includes the request, linked consultation summary, live Codex progress, plan, change overview, expected modified paths, every forward result as it arrives, errors, saved revert plan, every revert result, and final status. An interrupted execution therefore retains the results completed before interruption. On the next run, use Up/Down in the editor to recall request text, or open `Task history and reverts` to search task metadata, preview a selected record, ask a saved consultation again, retry a task, edit its request as a separate task, or approve its displayed revert plan in bulk or one command at a time. Result stdout and stderr remain separate and complete. This database stays local and is mode `0600`.
 

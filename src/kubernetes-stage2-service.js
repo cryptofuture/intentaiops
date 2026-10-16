@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { KubernetesApiError } from './kubernetes-client.js'
 import { KubernetesNetdataClient } from './kubernetes-netdata-client.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
+import { diagnosticSummary } from './execution-diagnostics.js'
 
 const SYSTEM_NAMESPACE = 'webminai-system'
 const TASK_NAMESPACE = 'webminai-tasks'
@@ -87,7 +88,9 @@ export class KubernetesStage2Service {
       kubernetes: this.kubernetes,
       actionKey,
       namespace: this.systemNamespace,
-      service: SERVICE_NAME
+      service: SERVICE_NAME,
+      taskNamespace: this.taskNamespace,
+      onDiagnostics: diagnostics => this.progress('execution-diagnostics', diagnosticSummary(diagnostics))
     })
     const health = await this.waitForPlugin(netdata)
     if (health.platform !== 'kubernetes' || health.executionMode !== 'kubernetes-api' || health.version !== this.pluginVersion) {

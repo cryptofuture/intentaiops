@@ -13,6 +13,8 @@ import { SystemSsh } from './system-ssh.js'
 import { TaskStore } from './task-store.js'
 import { planFingerprint } from './execution-journal.js'
 import { detectOperationLoop } from './operation-loop-detector.js'
+import { executionDiagnostics, diagnosticSummary } from './execution-diagnostics.js'
+import { captureExecutionEvidence } from './host-execution-evidence.js'
 
 export class AdminService {
   constructor ({
@@ -429,7 +431,7 @@ export class AdminService {
       const server = await this.serverSecrets({ settings, passphrase, serverId })
       const netdata = this.netdata(server)
       for (const command of [...this.tasks.executionState(serverId, taskId), ...this.tasks.rollbackState(serverId, taskId)]) {
-        if (command.status !== 'uncertain' || !command.jobId || !netdata.jobStatus) continue
+        if (command.status !== 'uncertain') continue
         this.tasks.renewExecution(serverId, taskId, lease.owner)
         const report = progress => {
           const state = progress.state === 'running' ? 'job_running' : progress.state
@@ -440,8 +442,20 @@ export class AdminService {
           this.tasks.appendProgress(serverId, taskId, event)
           return onProgress?.(event)
         }
-        let remote
-        try { remote = await netdata.jobStatus(command.jobId, { onRecovery: report }) } catch (error) { await report({ state: 'operator_review_required' }); throw error }
+        let remote = { state: 'unknown', exitCode: null }
+        let reconciliationError
+        try { if (command.jobId && netdata.jobStatus) remote = await netdata.jobStatus(command.jobId, { onRecovery: report }) } catch (error) { reconciliationError = error; await report({ state: 'operator_review_required' }) }
+        const prepared = this.tasks.allExecutionEvents(serverId, taskId).find(event => event.type === 'command_prepared' && event.commandId === command.commandId && event.attemptId === command.attemptId && (event.metadata.rollbackRevision ?? null) === (command.rollbackRevision ?? null))
+        const item = (command.rollbackRevision ? task.plan?.revertCommands : task.plan?.commands)?.find(item => item.id === command.commandId)
+        const after = await captureExecutionEvidence(netdata, { item, before: prepared?.metadata.evidenceBefore })
+        const diagnostics = executionDiagnostics({ item, result: remote, error: reconciliationError, before: prepared?.metadata.evidenceBefore, after })
+        if (diagnostics.length) {
+          this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_recovery', commandId: command.commandId, attemptId: command.attemptId, metadata: { diagnostics, jobId: command.jobId, ...(after ? { evidenceAfter: after } : {}), ...(command.rollbackRevision ? { operation: 'rollback', rollbackRevision: command.rollbackRevision } : {}) } })
+          const progress = { phase: 'execution-diagnostics', commandId: command.commandId, outcome: remote.state, message: diagnosticSummary(diagnostics), diagnostics }
+          this.tasks.appendProgress(serverId, taskId, progress)
+          await onProgress?.(progress)
+        }
+        if (reconciliationError) throw reconciliationError
         if (remote.state === 'running') await report(remote)
         if (remote.state === 'unknown') await report({ state: 'operator_review_required' })
         if (!['succeeded', 'failed', 'cancelled', 'timed_out'].includes(remote.state)) continue
@@ -450,9 +464,9 @@ export class AdminService {
           type: completed ? 'command_completed' : 'command_failed',
           commandId: command.commandId,
           attemptId: command.attemptId,
-          metadata: { jobId: command.jobId, state: remote.state, exitCode: remote.exitCode, reconciled: true, ...(command.rollbackRevision ? { operation: 'rollback', rollbackRevision: command.rollbackRevision } : {}) }
+          metadata: { jobId: command.jobId, state: remote.state, exitCode: remote.exitCode, reconciled: true, ...(diagnostics.length ? { diagnostics } : {}), ...(command.rollbackRevision ? { operation: 'rollback', rollbackRevision: command.rollbackRevision } : {}) }
         })
-        const result = { id: command.commandId, status: completed ? 'completed' : 'failed', result: { exitCode: remote.exitCode, stdout: '[remote output omitted during reconciliation]', stderr: '' } }
+        const result = { id: command.commandId, status: completed ? 'completed' : 'failed', result: { exitCode: remote.exitCode, stdout: '[remote output omitted during reconciliation]', stderr: '' }, ...(diagnostics.length ? { diagnostics } : {}) }
         if (command.rollbackRevision) this.tasks.appendRevertResult(serverId, taskId, result)
         else this.tasks.appendResult(serverId, taskId, result)
       }

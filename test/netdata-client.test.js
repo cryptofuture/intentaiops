@@ -168,15 +168,15 @@ test('Netdata client runs a durable job through short signed polling requests an
   assert.equal(calls.every(call => call.options.timeoutMs === 15000), true)
 })
 
-for (const state of ['unknown', 'failed']) {
-  test(`Netdata client preserves ${state} orphaned job uncertainty without cleanup or replay`, async () => {
+for (const [state, message] of [['unknown', 'detached job controller exited before recording a result'], ['failed', 'detached job controller exited before recording a result'], ['failed', 'job worker exited without a result']]) {
+  test(`Netdata client preserves ${state} ${message} uncertainty without cleanup or replay`, async () => {
     const jobId = 'ab'.repeat(16)
     const calls = []
     const client = new NetdataClient({
       ssh: {
         async execute (connectionUrl, command) {
           calls.push(command)
-          const body = calls.length === 1 ? { status: 'accepted', state: 'running', jobId } : { status: 'ok', state, jobId, exitCode: 125, stdout: '', stderr: 'detached job controller exited before recording a result' }
+          const body = calls.length === 1 ? { status: 'accepted', state: 'running', jobId } : { status: 'ok', state, jobId, exitCode: 125, stdout: '', stderr: message }
           return { stdout: JSON.stringify(body) }
         }
       },

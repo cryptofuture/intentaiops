@@ -1,6 +1,8 @@
 import { buildSafeDiagnosticCommand, isDeploymentPhase, validateDiagnostic } from './deployment-phases.js'
 import { classifyFailure } from './failure-signature.js'
 import { randomUUID } from 'node:crypto'
+import { executionDiagnostics, diagnosticSummary } from './execution-diagnostics.js'
+import { captureExecutionEvidence } from './host-execution-evidence.js'
 
 const RISK = new Set(['read', 'change', 'destructive'])
 
@@ -180,10 +182,12 @@ export async function executeApprovedPlan ({
     const startedAt = Date.now()
     await onExecutionEvent?.({ type: 'plan_approved', commandId: item.id })
     const execution = await runCommandWithRetry(item, netdata, onExecutionEvent, onProgress)
-    const { rawResult, executionError, attempts, recoveryRequired } = execution
+    const { rawResult, executionError, attempts, recoveryRequired, diagnostics } = execution
     const result = redactSensitiveResult(item.command, rawResult)
-    const status = rawResult.exitCode === 0 ? 'completed' : 'failed'
+    const status = rawResult.exitCode === 0 && !rawResult.timedOut && !['failed', 'timed_out', 'cancelled', 'unknown'].includes(rawResult.state) ? 'completed' : 'failed'
     const entry = /** @type {any} */ ({ id: item.id, phase: item.phase ?? null, status, durationMs: Date.now() - startedAt, result, ...(attempts > 1 ? { attempts } : {}), ...(recoveryRequired ? { recoveryRequired: true } : {}) })
+    if (diagnostics?.length) entry.diagnostics = diagnostics
+    if (diagnostics?.length && (status === 'failed' || recoveryRequired)) await onProgress?.({ phase: 'execution-diagnostics', commandId: item.id, outcome: rawResult.exitCode === null || rawResult.state === 'unknown' ? 'unknown' : status, message: diagnosticSummary(diagnostics), diagnostics })
     if (status === 'failed') {
       entry.failure = classifyFailure({ item, result, error: executionError })
       if (item.diagnostic && !recoveryRequired) entry.diagnostic = await runSafeDiagnostic(netdata, item.diagnostic)
@@ -191,7 +195,7 @@ export async function executeApprovedPlan ({
     results.push(entry)
     await onResult(entry)
     statuses.set(item.id, status)
-    if (rawResult.exitCode !== 0 || recoveryRequired) break
+    if (status !== 'completed' || recoveryRequired) break
   }
 
   return results
@@ -206,6 +210,8 @@ function validateRetry (item) {
     throw new TypeError(`command ${item.id} has invalid retry exit codes`)
   }
   if ((attempts - 1) * intervalMs > 15 * 60 * 1000) throw new TypeError(`command ${item.id} has an excessive retry window`)
+  const states = item.retry.states
+  if (states !== undefined && (!Array.isArray(states) || states.length < 1 || states.length > 2 || states.some(state => !['failed', 'timed_out'].includes(state)) || new Set(states).size !== states.length)) throw new TypeError(`command ${item.id} has invalid retry states`)
 }
 
 async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress) {
@@ -236,7 +242,8 @@ async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress)
       await event('execution_recovery', metadata)
       await onProgress?.({ phase: 'execution-recovery', commandId: item.id, ...metadata })
     }
-    await event('command_prepared')
+    const before = await captureExecutionEvidence(netdata, { item })
+    await event('command_prepared', before ? { evidenceBefore: before } : {})
     await event('command_dispatched')
     executionError = undefined
     try {
@@ -257,15 +264,21 @@ async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress)
       executionError = error
       rawResult = { exitCode: null, stdout: '', stderr: String(error?.message ?? error) }
     }
-    recoveryRequired ||= rawResult.recoveryRequired === true || Boolean(executionError) || rawResult.exitCode === null
-    await event(executionError || rawResult.exitCode === null ? 'command_outcome_unknown' : rawResult.exitCode === 0 ? 'command_completed' : 'command_failed', { exitCode: rawResult.exitCode })
+    recoveryRequired ||= rawResult.recoveryRequired === true || Boolean(executionError) || rawResult.exitCode === null || rawResult.state === 'unknown'
+    const after = executionError && !executionError.reconnected && !executionError.cause?.reconnected
+      ? { version: 1, availability: 'unavailable', observedAt: new Date().toISOString() }
+      : await captureExecutionEvidence(netdata, { item, before })
+    const diagnostics = executionDiagnostics({ item, result: rawResult, error: executionError, before, after })
+    const completed = rawResult.exitCode === 0 && !rawResult.timedOut && !['failed', 'timed_out', 'cancelled', 'unknown'].includes(rawResult.state)
+    await event(executionError || rawResult.exitCode === null || rawResult.state === 'unknown' ? 'command_outcome_unknown' : completed ? 'command_completed' : 'command_failed', { exitCode: rawResult.exitCode, ...(after ? { evidenceAfter: after } : {}), ...(diagnostics.length ? { diagnostics } : {}) })
     if (recoveryRequired) {
       await recovery({ state: 'operator_review_required' })
       await onExecutionEvent?.({ type: 'execution_paused', metadata: { reason: 'recovery_requires_approval' } })
-      return { rawResult, executionError, attempts: attempt, recoveryRequired }
+      return { rawResult, executionError, attempts: attempt, recoveryRequired, diagnostics }
     }
-    const retryable = retry.exitCodes.includes(rawResult.exitCode)
-    if (!retryable || attempt === retry.attempts) return { rawResult, executionError, attempts: attempt, recoveryRequired }
+    const retryable = rawResult.state !== 'cancelled' && retry.exitCodes.includes(rawResult.exitCode) && (!retry.states || retry.states.includes(rawResult.state))
+    if (!retryable || attempt === retry.attempts) return { rawResult, executionError, attempts: attempt, recoveryRequired, diagnostics }
+    await onProgress?.({ phase: 'execution-retry', commandId: item.id, attempt: attempt + 1, attempts: retry.attempts, message: `Recorded ${rawResult.state ?? 'failure'} (exit ${rawResult.exitCode}). Starting declared attempt ${attempt + 1}/${retry.attempts}; uncertain work is never retried.` })
     if (retry.intervalMs > 0) await new Promise(resolve => setTimeout(resolve, retry.intervalMs))
   }
 }

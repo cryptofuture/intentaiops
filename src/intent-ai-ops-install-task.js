@@ -36,7 +36,7 @@ function posixTask (taskId, platform, source, linuxContext) {
       requiresConfirmation: true,
       commands: [
         item('capture-intent-ai-ops-baseline', baseline, 'Capture the existing CLI, install root, and package baseline'),
-        item('install-intent-ai-ops', install, 'Install Node.js only when absent, install Intent AI Ops, and verify its CLI', ['capture-intent-ai-ops-baseline'], 900000, 'job')
+        item('install-intent-ai-ops', install, 'Install Node.js only when absent, install Intent AI Ops, and verify its CLI', ['capture-intent-ai-ops-baseline'], platform === 'linux' ? 1800000 : 900000, 'job')
       ],
       revertCommands: [item('remove-task-owned-intent-ai-ops', revert, 'Remove only the CLI, runtime, links, and FreeBSD packages introduced by this task', [], 300000, 'job', 'destructive')]
     },

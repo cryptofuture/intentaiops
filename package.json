@@ -28,6 +28,7 @@
     "scripts/install-better-sqlite3.js",
     "src",
     "docs/execution-milestones.md",
+    "docs/execution-diagnostics.md",
     "docs/ssh-connection-reuse.md",
     "README.md"
   ],

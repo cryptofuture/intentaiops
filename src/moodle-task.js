@@ -84,6 +84,9 @@ function configureNativePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'configure-php-fpm', nativeFpmCommand(built.plan.commands.find(item => item.id === 'configure-php-fpm').command), 'Configure Moodle PHP limits on the task-owned Unix socket pool')
   replaceCommand(built.plan, 'configure-nginx', nativeNginxCommand(built.plan.commands.find(item => item.id === 'configure-nginx').command), 'Serve only Moodle public/ through nginx and the task-owned PHP-FPM Unix socket')
   replaceCommand(built.plan, 'verify-artifacts', artifactCommand(), 'Acquire and verify the exact Moodle source commit archive')
+  const acquisition = built.plan.commands.find(item => item.id === 'verify-artifacts')
+  acquisition.executionMode = 'job'
+  acquisition.timeoutMs = 60 * 60 * 1000
   renameCommand(built.plan, 'extract-application', 'extract-moodle', extractCommand(profile), 'Extract the verified Moodle release and create off-web-root data storage')
   renameCommand(built.plan, 'install-application', 'install-moodle', installCommand(profile, state), 'Install Moodle through its official CLI using protected credential-file indirection')
   renameCommand(built.plan, 'verify-application', 'verify-moodle')
@@ -272,8 +275,9 @@ function artifactCommand () {
     'set -eu',
     `install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}`,
     `if [ -s ${quote(archive)} ] && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(archive)} | sha256sum -c - >/dev/null 2>&1; then printf '%s\n' artifact-already-verified; exit 0; fi`,
-    'for attempt in 1 2 3; do :',
-    `if curl --fail --location --silent --show-error --connect-timeout 15 --max-time 600 --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)} && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(`${archive}.tmp`)} | sha256sum -c - >/dev/null; then :`,
+    'deadline=$(($(date +%s) + 3300))',
+    'for attempt in 1 2 3; do remaining=$((deadline - $(date +%s))); [ "$remaining" -gt 0 ] || break; [ "$remaining" -le 3300 ] || remaining=3300',
+    `if curl --fail --location --silent --show-error --connect-timeout 15 --max-time "$remaining" --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)} && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(`${archive}.tmp`)} | sha256sum -c - >/dev/null; then :`,
     `mv -f -- ${quote(`${archive}.tmp`)} ${quote(archive)}`,
     "printf '%s\n' artifact-verified; exit 0",
     'fi; done',

@@ -82,6 +82,29 @@ test('replay and exports have no remote effects and stable event cursors', async
   assert.deepEqual(calls, [])
 })
 
+test('attempt-bound memory evidence survives reconciliation, streaming and sanitized replay without authorizing work', async t => {
+  const { controller, tasks, task, calls, admin } = await fixture(t)
+  const baseline = { availability: 'available', platform: 'linux', bootId: 'boot-a', scopeId: 'scope-a', oomKills: 0, observedAt: '2026-10-16T01:00:00Z' }
+  const lease = tasks.acquireExecution('host', task.id, task.plan)
+  tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_prepared', commandId: 'first', attemptId: 'old', metadata: { evidenceBefore: { ...baseline, oomKills: 99 } } })
+  tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_prepared', commandId: 'first', attemptId: 'current', metadata: { evidenceBefore: baseline } })
+  tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_dispatched', commandId: 'first', attemptId: 'current' })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  admin.netdata = () => ({ collectExecutionEvidence: async () => ({ ...baseline, oomKills: 1, observedAt: '2026-10-16T01:05:00Z' }) })
+  await controller.reconcile('host', task.id, tasks.stateVersion('host', task.id))
+  assert.equal(tasks.executionState('host', task.id)[0].status, 'uncertain')
+  const events = controller.events()
+  const evidence = events.find(event => event.metadata.diagnostics?.some(value => value.code === 'OOM_KILL'))
+  assert.equal(evidence.attemptId, 'current')
+  assert.equal(evidence.metadata.diagnostics.find(value => value.code === 'OOM_KILL').evidence.delta, 1)
+  assert.equal(controller.inspect('host', task.id).task.executionDiagnostics.length, 1)
+  const run = controller.runs.create({ request: 'Inspect', serverIds: ['host'] })
+  controller.runs.updateHost(run.id, 'host', { taskId: task.id })
+  const bundle = controller.exportRun(run.id)
+  assert.match(JSON.stringify(bundle), /OOM_KILL/u)
+  assert.deepEqual(calls, [])
+})
+
 test('unknown dispatch requires remote evidence or explicit attestation, never an automatic rerun', async t => {
   const { tasks, task, controller, calls, admin } = await fixture(t)
   const lease = tasks.acquireExecution('host', task.id, task.plan)
@@ -90,6 +113,7 @@ test('unknown dispatch requires remote evidence or explicit attestation, never a
   let view = controller.inspect('host', task.id)
   await assert.rejects(controller.resume('host', task.id, view.stateVersion, view.fingerprint), /reconciliation/u)
   assert.deepEqual(calls, [])
+  view = controller.inspect('host', task.id)
   assert.throws(() => controller.resolve('host', task.id, view.stateVersion, 'first', 'pending', 'Remote evidence'), /reviewed/u)
   controller.resolve('host', task.id, view.stateVersion, 'first', 'completed', 'Confirmed against remote audit record')
   view = controller.inspect('host', task.id)

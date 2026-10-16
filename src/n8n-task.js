@@ -40,6 +40,7 @@ function buildNativeTask (taskId, context) {
     item('configure-services', 'configure', nativeConfigure(profile, state), 'Create the locked service account, n8n service, and isolated nginx marker vhost', ['install-n8n', 'generate-credentials']),
     item('verify-n8n', 'verify', nativeVerify(profile), 'Verify n8n health, SQLite persistence, and the nginx marker', ['configure-services'], 900000, 'job')
   ]
+  for (const id of ['install-runtime', 'install-n8n']) commands.find(command => command.id === id).retry = { attempts: 2, intervalMs: 2000, exitCodes: [143], states: ['timed_out'] }
   const revertCommands = [
     item('stop-n8n', 'cleanup', nativeStop(profile), 'Stop and remove only the task-owned n8n service and nginx vhost', [], 300000, undefined, 'destructive'),
     item('remove-n8n-files', 'cleanup', `set -eu; rm -rf -- ${quote(APP_ROOT)} ${quote(DATA_ROOT)} ${quote(CREDENTIALS)}`, 'Remove task-owned application data and protected credentials', ['stop-n8n'], 300000, undefined, 'destructive'),
@@ -50,7 +51,7 @@ function buildNativeTask (taskId, context) {
     state,
     route: `native-${family}`,
     overview: `Install n8n ${VERSION} with ${profile.nodeDescription}, an isolated service, SQLite persistence, and nginx on port ${PORT}.`,
-    files: [state, APP_ROOT, DATA_ROOT, CREDENTIALS, profile.serviceFile, profile.nginxVhost, ...profile.repositoryPaths],
+    files: [state, APP_ROOT, DATA_ROOT, CREDENTIALS, profile.serviceFile, profile.nginxVhost, ...profile.repositoryPaths, ...(!profile.systemd ? ['/run/nginx'] : [])],
     commands,
     revertCommands,
     verifyApplied: nativeVerify(profile),
@@ -244,6 +245,7 @@ function nativeConfigure (profile, state) {
   if (profile.systemd) {
     pieces.push(`printf '%s\\n' ${systemd.split('\n').map(quote).join(' ')} > ${quote(profile.serviceFile)}`, `chmod 0644 ${quote(profile.serviceFile)}`, 'systemctl daemon-reload', `systemctl enable --now ${quote(SERVICE)}`, 'nginx -t', startOrReload(profile.nginxService, true))
   } else {
+    pieces.push(`if [ ! -d /run/nginx ]; then install -d -o root -g root -m 0755 /run/nginx; : > ${quote(`${state}/created-runtime-directory`)}; fi`)
     pieces.push(`printf '%s\\n' ${alpineWrapper.split('\n').map(quote).join(' ')} > ${quote(`${APP_ROOT}/start-openrc.sh`)}`, `chmod 0755 ${quote(`${APP_ROOT}/start-openrc.sh`)}`, `printf '%s\\n' ${openrc.split('\n').map(quote).join(' ')} > ${quote(profile.serviceFile)}`, `chmod 0755 ${quote(profile.serviceFile)}`, `rc-update add ${quote(SERVICE)} default >/dev/null`, `rc-service ${quote(SERVICE)} start >/dev/null`, 'nginx -t', startOrReload(profile.nginxService, false))
   }
   return join(pieces)
@@ -270,6 +272,7 @@ function nativeRestore (state, context, profile) {
   commands.push(removeAddedPackages(profile.family, `${state}/packages.added`))
   if (profile.systemd) commands.push(`if systemctl cat ${quote(profile.nginxService)} >/dev/null 2>&1; then if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable ${quote(profile.nginxService)} >/dev/null 2>&1 || true; else systemctl disable ${quote(profile.nginxService)} >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start ${quote(profile.nginxService)}; else systemctl stop ${quote(profile.nginxService)} 2>/dev/null || true; fi; fi`)
   else commands.push(`if [ -e ${quote(`${state}/nginx.enabled`)} ]; then rc-update add nginx default >/dev/null 2>&1 || true; else rc-update del nginx default >/dev/null 2>&1 || true; fi`, `if [ -e ${quote(`${state}/nginx.active`)} ]; then rc-service nginx start >/dev/null; else rc-service nginx stop >/dev/null 2>&1 || true; fi`)
+  if (!profile.systemd) commands.push(`if [ -e ${quote(`${state}/created-runtime-directory`)} ] && [ ! -e ${quote(`${state}/nginx.active`)} ] && [ -d /run/nginx ]; then rmdir /run/nginx; fi`)
   commands.push(`if [ -e ${quote(`${state}/user-created`)} ]; then id webminai-n8n >/dev/null 2>&1 && { userdel webminai-n8n 2>/dev/null || deluser webminai-n8n 2>/dev/null || true; } || true; fi`, `rm -rf -- ${quote(state)}`)
   return join(commands)
 }
@@ -336,7 +339,7 @@ function packageList (family) {
 function removeAddedPackages (family, file) {
   if (family === 'debian') return `if [ -s ${quote(file)} ]; then export DEBIAN_FRONTEND=noninteractive; xargs -r apt-get purge -y < ${quote(file)}; apt-get autoremove -y; fi`
   if (family === 'alpine') return `if [ -s ${quote(file)} ]; then xargs -r apk del < ${quote(file)}; fi`
-  if (family === 'arch') return `if [ -s ${quote(file)} ]; then xargs -r pacman -Rns --noconfirm < ${quote(file)}; fi`
+  if (family === 'arch') return `if [ -s ${quote(file)} ]; then if grep -Fxq nginx ${quote(file)}; then systemctl stop nginx; fi; xargs -r pacman -Rns --noconfirm < ${quote(file)}; fi`
   if (family === 'suse') return `if [ -s ${quote(file)} ]; then xargs -r zypper --non-interactive remove -u -y < ${quote(file)}; fi`
   return `if [ -s ${quote(file)} ]; then installed=; while IFS= read -r package; do [ -z "$package" ] || ! rpm -q -- "$package" >/dev/null 2>&1 || installed="$installed $package"; done < ${quote(file)}; [ -z "$installed" ] || dnf remove -y $installed; fi`
 }

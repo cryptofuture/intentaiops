@@ -55,6 +55,7 @@ export class OperatorController {
     this.assertHost(hostId)
     const task = this.tasks.get(hostId, taskId)
     const revisions = this.tasks.revisions(hostId, taskId)
+    task.executionDiagnostics = this.tasks.allExecutionEvents(hostId, taskId).filter(event => event.metadata.diagnostics?.length).map(event => ({ commandId: event.commandId, attemptId: event.attemptId, revision: event.revision, timestamp: event.timestamp, diagnostics: event.metadata.diagnostics }))
     const rollback = [...revisions].reverse().find(item => item.approved && item.plan.operatorRollback)
     return { ...this.sanitize({ version: 1, hostId, task, control: this.tasks.control(hostId, taskId), commands: this.tasks.executionState(hostId, taskId), rollbackCommands: this.tasks.rollbackState(hostId, taskId), revisions, rollbackAvailable: Boolean(task.plan?.revertCommands?.length || rollback) }), stateVersion: this.tasks.stateVersion(hostId, taskId), fingerprint: planFingerprint(task.plan), rollbackFingerprint: planFingerprint(task.plan?.revertCommands), reviewedRollbackFingerprint: rollback ? planFingerprint(rollback.plan) : null }
   }
