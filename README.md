@@ -215,7 +215,7 @@ Failure details now separate **what happened** from **why it may have happened**
 
 ### Recover or change a task
 
-1. Open **Task history and reverts**, select the task, then choose **Operator controls** or **Inspect and recover interrupted execution**.
+1. Open **Task history and reverts**, select the task, then choose **Operator controls** or **Inspect durable execution and recovery**. An unfinished task may still be active in another session.
 2. Inspect what completed and what remains. If a connection was lost, use **Reconcile durable remote outcomes** to check recorded remote jobs. If the outcome is still unknown, investigate the host before continuing. Do not assume the command failed or rerun it blindly.
 3. Choose **Review and resume** to continue, or **Revise remaining steps** to change the plan. Review the differences, approve the replacement, then resume. Completed commands stay unchanged.
 

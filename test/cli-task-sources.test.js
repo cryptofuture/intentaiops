@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import { eligibleInteractiveCommonTasks } from '../src/cli.js'
+
+test('single and multi-host routing share verified health and update candidates', async () => {
+  const source = await readFile(new URL('../src/cli.js', import.meta.url), 'utf8')
+  assert.match(source, /candidates: eligibleInteractiveCommonTasks\(\{ platform, inventory \}\)/)
+  for (const platform of ['linux', 'freebsd', 'macos', 'windows']) {
+    const candidates = eligibleInteractiveCommonTasks({ platform })
+    assert.ok(candidates.some(task => task.id === `host-health-${platform}`), platform)
+    assert.equal(candidates.some(task => task.id === `system-update-${platform}`), platform !== 'macos', platform)
+    assert.ok(candidates.every(task => (task.platform ?? 'linux') === platform))
+  }
+})
 
 test('interactive task menus expose verified platform applications and AI-assisted tasks', async () => {
   const source = [
@@ -10,6 +22,7 @@ test('interactive task menus expose verified platform applications and AI-assist
 
   assert.match(source, /Run an AI-assisted task/)
   assert.match(source, /Run a verified common task/)
+  assert.match(source, /Unfinished execution \(may still be active\)/)
   assert.match(source, /Verified \$\{taskPlatform\} tasks eligible for this host/)
   assert.match(source, /eligibleInteractiveCommonTasks/)
   assert.match(source, /category: 'maintenance'/)

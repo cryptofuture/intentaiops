@@ -243,7 +243,6 @@ export class TerminalUi {
     if (!this.input.isTTY || !this.output.isTTY || typeof this.input.setRawMode !== 'function') {
       throw new Error('secret input requires an interactive terminal')
     }
-    this.output.write(`${label}: `)
     return new Promise((resolve, reject) => {
       let value = ''
       let settled = false
@@ -275,6 +274,7 @@ export class TerminalUi {
       this.input.setRawMode(true)
       this.input.resume()
       this.input.on('data', onData)
+      try { this.output.write(`${label}: `) } catch (error) { finish(error) }
     })
   }
 
@@ -891,7 +891,6 @@ export class TerminalUi {
       this.output.write('\nKubeconfig captured (hidden)\n\n')
       this.renderKeyHints([['Ctrl+D', 'validate and continue'], ['Esc', 'cancel']])
     }
-    render()
     const result = await this.readRawKey((string, key, finish) => {
       if (key.ctrl && key.name === 'c') return finish(new Error('interrupted'))
       if (key.name === 'escape') return finish(null, null)
@@ -902,14 +901,14 @@ export class TerminalUi {
       }
       if (key.name === 'backspace' && value.length > 0) value.pop()
       else if (string && !key.meta) value.push(...Array.from(string))
-    })
+    }, render)
     value.fill('\0')
     value = []
     this.clear()
     return result
   }
 
-  readRawKey (onKeypress) {
+  readRawKey (onKeypress, onReady) {
     emitKeypressEvents(this.input)
     const inputState = this.captureInputState()
     this.input.setRawMode(true)
@@ -934,6 +933,7 @@ export class TerminalUi {
       }
       this.rawReaders.add(finish)
       this.input.on('keypress', handle)
+      try { onReady?.() } catch (error) { finish(error) }
     })
   }
 

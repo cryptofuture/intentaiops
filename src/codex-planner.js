@@ -84,6 +84,7 @@ export class CodexPlanner {
         const proposed = JSON.parse(output)
         for (const command of [...(proposed.commands ?? []), ...(proposed.revertCommands ?? [])]) {
           command.command = disableShellTracing(command.command)
+          if (command.executionMode === null) delete command.executionMode
         }
         if (/\bWEBMINAI_(?:N8N|GHOST)_OK\b/u.test(request)) {
           for (const command of [...(proposed.commands ?? []), ...(proposed.revertCommands ?? [])]) command.diagnostic = null
@@ -291,6 +292,7 @@ function buildPrompt (request, taskId, inventory, { previousAttempts, retryInstr
       ? 'When another Windows service or account must access files created by a command, explicitly configure the required ACL; never rely on inherited access accidentally being sufficient.'
       : 'The remote root executor may inherit a restrictive umask. When a non-root service must read or traverse files or directories created by a command, explicitly set the required ownership and modes; never rely on default creation permissions.',
     'A diagnostic is optional and runs only after its command fails. A package, service, or database diagnostic target must be exactly one identifier without spaces or prose. Never combine targets such as "mc htop" or use descriptions such as "task-added packages". Split independently diagnosable operations into separate commands, select one relevant target, or set diagnostic to null when no single target applies. Filesystem and Compose targets must be absolute safe paths; HTTP targets must be loopback URLs.',
+    'For native command execution, use executionMode "job" for long acquisition, installation or verification steps, with timeoutMs at most 3600000 and within policy. Otherwise use executionMode null and timeoutMs at most 300000. Intent AI Ops starts and observes signed durable jobs itself. Do not detach acquisition through systemd-run, nohup, shell backgrounding or another untracked launcher. Service configuration explicitly requested by the task is separate from command transport.',
     'Do not list, back up, rewrite, chmod, chown, or restore an unrelated file merely as a precaution. For every existing path the task actually changes, preserve the content and metadata needed to restore its exact prior state.',
     ...platformPrompt(targetPlatform),
     ...softwarePrompt(request, targetPlatform, taskStateDirectory),
@@ -307,7 +309,7 @@ function buildPrompt (request, taskId, inventory, { previousAttempts, retryInstr
           'Keep package installation, upstream artifact retrieval/verification, credential generation, application/database configuration, service changes, and verification in separate commands. A command that reads or writes a credentials directory must do only the smallest secret-dependent operation, suppress credential values, and emit a fixed non-secret stage failure message.',
           'Never enable shell tracing (`set -x`, `set -eux`, or `set -o xtrace`) in a command that creates, reads, exports, passes, or removes credential material. Use `set -eu` without xtrace.',
           'Commands execute independently and do not share shell variables. Every secret-dependent command must load each credential variable it references from the protected credential file in that same command. Never assume a password variable assigned by an earlier command still exists.',
-          'Give package installation commands timeoutMs 300000. On Debian and Ubuntu set DEBIAN_FRONTEND=noninteractive for apt/apt-get installation. When a package-difference pipeline may validly produce no rows, terminate it with || true so an empty added-package list is success.',
+          'Give synchronous package installation commands timeoutMs 300000; use executionMode "job" with a policy-bounded longer timeout for slow installations. On Debian and Ubuntu set DEBIAN_FRONTEND=noninteractive for apt/apt-get installation. When a package-difference pipeline may validly produce no rows, terminate it with || true so an empty added-package list is success.',
           'Before a command connects to MariaDB/MySQL or issues CREATE DATABASE, a preceding command must explicitly initialize when required, start the database service, and wait with a bounded retry loop until a non-secret SELECT 1 succeeds; the database command must depend on it. A package install or successful service start does not imply the database socket is ready.',
           'Use local socket authentication for the database administrative root account without setting MYSQL_PWD to the application password and without changing the root account password. Generate and apply a password only for the task-owned application database user. On Arch, restart MariaDB after initialization instead of merely starting an already-active unit, then require the socket SELECT 1 probe to pass. Ensure /run/mariadb and /run/mysqld exist with mysql:mysql ownership before restart; Fedora galera_recovery needs /run/mariadb during ExecStartPre.',
           'Preserve useful non-secret diagnostics. For nginx -t, PHP-FPM validation, package installation, and service start failures, return or tail the bounded diagnostic output instead of replacing it with only a generic marker. Never include credential-bearing database or application-bootstrap logs.',
@@ -392,6 +394,7 @@ function buildConsultationPrompt (question, inventory, consultationContext) {
     'Follow policy.json. Never request or infer SSH credentials, connection strings, keys, or secrets.',
     ...platformPrompt(targetPlatform),
     'Use the supplied Netdata inventory when it materially improves the advice. Do not invent host state that is absent from it.',
+    'Read inventory.json before declaring evidence unavailable. The capability index below is abbreviated; approved health and update evidence, when collected, is in webminaiHealthEvidence and webminaiSystemUpdateEvidence in that file.',
     'The answer field is the user-facing consultation response.',
     'The contextSummary field is compact, standalone context for a later command-planning turn. Preserve only relevant decisions, constraints, preferences, and unresolved risks; omit conversational detail and secrets.',
     'Keep contextSummary under 1200 characters when possible.',
@@ -683,6 +686,8 @@ function summarizeNetdataInventory (inventory) {
     webminaiExecution: sanitized?.webminaiExecution,
     webminaiDocker: sanitized?.webminaiDocker,
     webminaiLinuxContext: sanitized?.webminaiLinuxContext,
+    webminaiHealthEvidence: boundPlannerData(sanitized?.webminaiHealthEvidence),
+    webminaiSystemUpdateEvidence: boundPlannerData(sanitized?.webminaiSystemUpdateEvidence),
     agents,
     contextIds: contexts && typeof contexts === 'object' ? Object.keys(contexts).slice(0, 2000) : [],
     functions
@@ -893,7 +898,7 @@ function validateWordPressPlan (plan, request, inventory, previousAttempts) {
     if (/\bzypper\b[^;\n]*--no-recommends[^;\n]*\binstall\b/iu.test(item.command)) {
       throw new Error(`command ${item.id} puts zypper --no-recommends before install; Leap 16 accepts it only after the install subcommand`)
     }
-    if (/\b(?:apt|apt-get|apk|dnf|yum|zypper|pacman)\b[^;\n]*(?:install|add|-S)\b/iu.test(item.command) && item.timeoutMs !== 300000) {
+    if (/\b(?:apt|apt-get|apk|dnf|yum|zypper|pacman)\b[^;\n]*(?:install|add|-S)\b/iu.test(item.command) && item.executionMode !== 'job' && item.timeoutMs !== 300000) {
       throw new Error(`command ${item.id} must use timeoutMs 300000 for package installation`)
     }
     if (/(?:\bwp\b|wp-cli\.phar|["']?\$wp["']?)\s+(?:config|core|post|option|db)\b/iu.test(item.command) && !/(?:--allow-root\b|WP_CLI_ALLOW_ROOT\s*=\s*1)/iu.test(item.command)) {

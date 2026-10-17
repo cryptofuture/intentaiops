@@ -207,6 +207,15 @@ test('multi-host events label stdout and stderr and run summaries retain host er
   assert.match(output.text, /ERROR: \[production\] HTTP validation failed/)
 })
 
+test('rollout events show their run and stage without an undefined host or message', () => {
+  const { ui, output } = plainUi()
+  renderMultiHostEvent(ui, { type: 'rollout-stage', runId: 2, stage: 'canary', pendingHosts: 7 })
+  renderMultiHostEvent(ui, { type: 'rollout-halted', runId: 2, stage: 'canary', message: 'Remaining hosts await operator review' })
+  assert.match(output.text, /\[run #2\] Starting rollout stage canary; 7 hosts pending\./)
+  assert.match(output.text, /\[run #2\] Remaining hosts await operator review/)
+  assert.doesNotMatch(output.text, /undefined/)
+})
+
 test('Phase 2 remains a plain TerminalUi ESM interface without palette or alternate screen', async () => {
   const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
   const dependencies = { ...packageJson.dependencies, ...packageJson.devDependencies }

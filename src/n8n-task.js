@@ -148,7 +148,7 @@ function nativeProfile (context) {
 function nativeBaseline (state, profile) {
   const paths = [APP_ROOT, DATA_ROOT, CREDENTIALS, profile.serviceFile, profile.nginxVhost, ...(profile.nginxEnableLink ? [profile.nginxEnableLink] : [])]
   return join([
-    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...paths.map(path => `test ! -e ${quote(path)}`),
+    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...paths.map(path => `if [ -e ${quote(path)} ] || [ -L ${quote(path)} ]; then printf '%s\\n' ${quote(`BASELINE_DRIFT: managed path already exists: ${path}`)} >&2; exit 1; fi`),
     `install -d -o root -g root -m 0700 ${quote(`${state}/repo-backup`)}`,
     `${packageList(profile.family)} > ${quote(`${state}/packages.before`)}`,
     serviceActive(profile.nginxService, profile.systemd, `${state}/nginx.active`),
@@ -208,7 +208,7 @@ function nativeNpmInstall (state) {
   return join([
     'set -eu', 'umask 022', `install -d -o root -g root -m 0755 ${quote(APP_ROOT)}`, `install -d -o root -g root -m 0755 ${quote(`${state}/npm-cache`)}`,
     'export NODE_OPTIONS="${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000"', // eslint-disable-line no-template-curly-in-string
-    `if [ ! -f ${quote(`${APP_ROOT}/.webminai-npm-complete`)} ]; then rm -rf -- ${quote(`${APP_ROOT}/node_modules`)}; rm -f -- ${quote(`${APP_ROOT}/package-lock.json`)}; npm_config_cache=${quote(`${state}/npm-cache`)} npm --prefix ${quote(APP_ROOT)} install --prefer-offline --maxsockets=4 --omit=dev --no-audit --no-fund --loglevel=error ${quote(`n8n@${VERSION}`)}; fi`,
+    `if [ ! -f ${quote(`${APP_ROOT}/.webminai-npm-complete`)} ]; then rm -rf -- ${quote(`${APP_ROOT}/node_modules`)}; rm -f -- ${quote(`${APP_ROOT}/package-lock.json`)}; npm_config_cache=${quote(`${state}/npm-cache`)} npm --prefix ${quote(APP_ROOT)} install --prefer-offline --maxsockets=4 --omit=dev --no-audit --no-fund --loglevel=error --fetch-retries=5 --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=30000 --fetch-timeout=120000 ${quote(`n8n@${VERSION}`)}; fi`,
     ensureSqlite,
     `chmod -R a+rX ${quote(APP_ROOT)}`,
     `${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} --version | grep -Fx ${quote(VERSION)}`,

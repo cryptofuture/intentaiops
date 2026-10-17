@@ -4,6 +4,8 @@ import { MultiHostRunStore } from './multi-host-run-store.js'
 import { buildRolloutStages } from './canary-scheduler.js'
 import { detectOperationLoop } from './operation-loop-detector.js'
 import { OperatorController } from './operator-controller.js'
+import { isHostHealthTask, sanitizeHealthResult } from './host-health-task.js'
+import { isSystemUpdateTask } from './system-update-task.js'
 
 export class MultiHostService {
   /** @param {import('./public-api-contracts.js').MultiHostServiceOptions} options */
@@ -190,6 +192,7 @@ export class MultiHostService {
     this.runs.updateRun(run.id, 'running')
     const executeHost = async host => {
       const { admin, serverId, taskId, plan } = host
+      const reportTask = isHostHealthTask(run.catalogId) || isSystemUpdateTask(run.catalogId)
       if (this.runs.control(run.id).action === 'pause') return
       try {
         this.runs.updateHost(run.id, serverId, { status: 'running', error: null })
@@ -201,16 +204,18 @@ export class MultiHostService {
           serverId,
           taskId,
           plan,
+          requireRevert: !isSystemUpdateTask(run.catalogId),
           approve: async () => true,
           onProgress: event => onEvent({ type: 'execution-recovery', runId: run.id, serverId, taskId, ...event }),
           beforeCommand: () => this.runs.control(run.id).action === 'run',
           onResult: result => {
+            if (reportTask) result = sanitizeHealthResult(result)
             admin.appendTaskResult(serverId, taskId, result)
             this.recordScorecard({ run, serverId, taskId, plan, result, operation: 'apply' })
             onEvent({ type: 'command-result', runId: run.id, serverId, taskId, result, message: `${result.id}: ${result.status}` })
           }
         })
-        const task = admin.saveTaskResults(serverId, taskId, results)
+        const task = admin.saveTaskResults(serverId, taskId, reportTask ? results.map(sanitizeHealthResult) : results)
         if (results.some(result => result.recoveryRequired)) this.runs.setControl(run.id, 'pause', this.runs.control(run.id).version)
         if (task.status !== 'completed' && (this.runs.control(run.id).action === 'pause' || (admin.tasks && admin.tasks.control(serverId, taskId).action !== 'run'))) {
           this.runs.updateHost(run.id, serverId, { status: 'partial', error: null })

@@ -31,7 +31,7 @@ import { updateIntentAiOps } from './self-update.js'
 import { TerminalUi } from './terminal-ui.js'
 import { FALLBACK_ADMIN_EMAIL, normalizeAdminEmailPreset } from './application-defaults.js'
 import { CLI_NAME, DATA_DIRECTORY_NAME, LEGACY_DATA_DIRECTORY_NAME, PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_URL } from './product.js'
-import { hostHealthProfile, isHostHealthTask } from './host-health-task.js'
+import { hostHealthProfile, isHostHealthTask, redactHealthText, sanitizeHealthResult } from './host-health-task.js'
 import { detectOperationLoop } from './operation-loop-detector.js'
 import { normalizeTerminalControls } from './terminal-controls.js'
 import {
@@ -60,6 +60,8 @@ import {
 } from './cli-workflow-display.js'
 
 const VAULT_PASSPHRASE_GUIDANCE = 'Use at least 12 characters; prefer five or more random words or 20+ password-manager-generated characters.'
+
+export { redactHealthText } from './host-health-task.js'
 
 export async function runCli ({ argv = process.argv.slice(2), input, output, selfUpdate = updateIntentAiOps } = {}) {
   const cliOptions = parseArguments(argv)
@@ -170,7 +172,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
         ]),
         `Kubernetes clusters: ${clusterIds.length}`,
         `Codex: ${settings.codex.model} / ${settings.codex.reasoningEffort} reasoning`,
-        ...(interrupted.length ? [`Interrupted execution: ${interrupted.join(', ')}. Open host task history to inspect.`] : []),
+        ...(interrupted.length ? [`Unfinished execution (may still be active): ${interrupted.join(', ')}. Inspect task history.`] : []),
         applicationDefaults.adminEmail
           ? `Default administrator email: ${applicationDefaults.adminEmail}`
           : ui.styleToken(`Default administrator email: ${FALLBACK_ADMIN_EMAIL}`, FALLBACK_ADMIN_EMAIL, 'warning')
@@ -1042,7 +1044,7 @@ async function executeMultiHostRun ({
     let effectiveCatalogId = catalogId
     const planningHints = {}
     if (kind === 'ai' && retryOfRunId === null) {
-      ui.info('Asking Codex whether the request matches or can reuse a verified application task for each host platform...')
+      ui.info('Asking Codex whether the request matches or can reuse a verified common task for each host platform...')
       const routed = await Promise.allSettled(serverIds.map(async serverId => {
         const admin = await adminFor(serverId)
         const inventory = await admin.refreshInventory({ settings, passphrase, serverId })
@@ -1054,7 +1056,7 @@ async function executeMultiHostRun ({
             serverId,
             request,
             inventory,
-            candidates: listEligibleCommonTasks({ ...commonTaskContext({ platform, inventory }), category: 'application' }),
+            candidates: eligibleInteractiveCommonTasks({ platform, inventory }),
             onProgress: event => renderMultiHostEvent(ui, { serverId, message: event.message })
           })
           : ordinaryTaskRouting('No verified candidate catalog is available for this host platform.')
@@ -1110,11 +1112,33 @@ async function executeMultiHostRun ({
       review: ({ run, hosts }) => reviewMultiHostPlans(ui, run, hosts, 'Execute')
     })
     renderMultiHostRun(ui, run)
+    await renderMultiHostReports({ ui, run, adminFor, settings, passphrase })
     if (run.status === 'completed') ui.success(`Multi-host run #${run.id} completed on every selected host.`)
     else if (run.status === 'cancelled') ui.warn(`Multi-host run #${run.id} was cancelled.`)
     else ui.warn(`Multi-host run #${run.id} finished ${run.status}; retry only the affected hosts from Multi-host run history.`)
   })
   await ui.pause()
+}
+
+export async function renderMultiHostReports ({ ui, run, adminFor, settings, passphrase }) {
+  const render = isHostHealthTask(run.catalogId)
+    ? renderAndSaveHostHealthReport
+    : isSystemUpdateTask(run.catalogId) ? renderAndSaveSystemUpdateReport : null
+  if (!render) return
+  const platform = run.catalogId.split('-').at(-1)
+  for (const host of run.hosts.filter(host => host.status === 'completed')) {
+    try {
+      const admin = await adminFor(host.serverId)
+      const task = admin.getTask(host.serverId, host.taskId)
+      const results = completedReportResults(task)
+      if (!results) continue
+      const inventory = await admin.refreshInventory({ settings, passphrase, serverId: host.serverId })
+      ui.heading(`${host.serverId} / task #${host.taskId}`)
+      await render({ ui, admin, settings, passphrase, serverId: host.serverId, task, platform, inventory, results })
+    } catch (error) {
+      ui.warn(`[${host.serverId}] Report unavailable; command outcomes remain recorded: ${redactHealthText(error.message)}`)
+    }
+  }
 }
 
 async function browseMultiHostHistory ({ context, debug }) {
@@ -1309,7 +1333,9 @@ export async function reviewMultiHostPlans (ui, run, hosts, verb) {
 }
 
 export function renderMultiHostEvent (ui, event) {
-  ui.output.write(`\n${ui.paint('info', `[${event.serverId}]`)} ${event.message}\n`)
+  const label = event.serverId ?? `run #${event.runId}`
+  const message = event.message ?? (event.type === 'rollout-stage' ? `Starting rollout stage ${event.stage}; ${event.pendingHosts} hosts pending.` : event.type)
+  ui.output.write(`\n${ui.paint('info', `[${label}]`)} ${message}\n`)
   const result = event.result?.result
   for (const [label, stream] of [['stdout', result?.stdout], ['stderr', result?.stderr]]) {
     if (!stream) continue
@@ -2025,7 +2051,8 @@ async function runTask ({
     admin.saveTaskResults(serverId, task.id, savedResults)
     renderResults(ui, savedResults)
     if (admin.tasks.control(serverId, task.id).action !== 'run') await manageExecution({ ui, controller, serverId, taskId: task.id })
-    if (isHostHealthTask(effectiveCatalogId) && results.every(result => result.status === 'completed')) {
+    const reportResults = completedReportResults(admin.getTask(serverId, task.id))
+    if (healthTask && reportResults) {
       await renderAndSaveHostHealthReport({
         ui,
         admin,
@@ -2035,10 +2062,10 @@ async function runTask ({
         task,
         platform: status.capabilities.platform?.os,
         inventory,
-        results
+        results: reportResults
       })
     }
-    if (updateTask && results.every(result => result.status === 'completed')) {
+    if (updateTask && reportResults) {
       const postInventory = await admin.refreshInventory({ settings, passphrase, serverId })
       await renderAndSaveSystemUpdateReport({
         ui,
@@ -2049,7 +2076,7 @@ async function runTask ({
         task,
         platform: status.capabilities.platform?.os,
         inventory: postInventory,
-        results
+        results: reportResults
       })
     }
   } catch (error) {
@@ -2115,7 +2142,7 @@ async function browseTaskHistory ({ ui, admin, settings, passphrase, serverId, s
   renderTaskRecord(ui, task)
   const actions = taskHistoryActions(task, { catalogTask: Boolean(task.catalogId) })
   if (task.plan) actions.unshift({ label: 'Operator controls: inspect, pause, revise and resume', value: 'operator' })
-  if (task.plan && ['running', 'partial', 'failed'].includes(task.status)) actions.unshift({ label: 'Inspect and recover interrupted execution', value: 'recover' })
+  if (task.plan && ['running', 'partial', 'failed'].includes(task.status)) actions.unshift({ label: 'Inspect durable execution and recovery', value: 'recover' })
   const action = await ui.choose('History action', actions)
   if (action === 'operator') {
     const controller = new OperatorController({ dataRoot: admin.dataRoot, settings, passphrase, tasks: admin.tasks, adminFor: async () => admin })
@@ -2264,6 +2291,7 @@ async function approveCommand (ui, item, prefix = 'Approve') {
   renderWrappedField(ui, 'Purpose', item.purpose)
   ui.line('Risk', item.risk)
   ui.line('Timeout', `${item.timeoutMs}ms`)
+  if (item.executionMode === 'job') ui.line('Execution', 'durable signed job')
   if (item.retry) ui.line('Retry policy', `${item.retry.attempts} attempts, ${item.retry.intervalMs}ms delay, exits ${item.retry.exitCodes.join(', ')}${item.retry.states ? `, states ${item.retry.states.join(', ')}` : ''}; never unknown or cancelled`)
   ui.line('Root required', item.requiresSudo ? 'yes' : 'no')
   ui.separator()
@@ -2316,7 +2344,7 @@ function commonTaskContext ({ platform, inventory = null, status = {} }) {
   }
 }
 
-function eligibleInteractiveCommonTasks (options) {
+export function eligibleInteractiveCommonTasks (options) {
   const context = commonTaskContext(options)
   return [
     ...listEligibleCommonTasks({ ...context, category: 'maintenance' }),
@@ -2441,33 +2469,19 @@ async function renderAndSaveHostHealthReport ({ ui, admin, settings, passphrase,
   renderWrappedField(ui, 'Reusable diagnostic context', safeReport.contextSummary)
 }
 
+export function completedReportResults (task) {
+  if (task.status !== 'completed' || !task.plan?.commands?.length) return null
+  const byId = new Map((task.results ?? []).map(result => [result.id, result]))
+  const results = task.plan.commands.map(command => byId.get(command.id))
+  return results.every(result => result?.status === 'completed') ? results : null
+}
+
 function healthEvidence (results) {
   const sections = results.filter(item => item.id.startsWith('collect-health-'))
   return {
     stdout: sections.map(item => `=== ${item.id} ===\n${redactHealthText(item.result?.stdout).slice(0, 48 * 1024)}`).join('\n').slice(0, 128 * 1024),
     stderr: sections.map(item => item.result?.stderr ? `=== ${item.id} ===\n${redactHealthText(item.result.stderr).slice(0, 16 * 1024)}` : '').filter(Boolean).join('\n').slice(0, 32 * 1024)
   }
-}
-
-function sanitizeHealthResult (entry) {
-  if (!entry?.result) return entry
-  return {
-    ...entry,
-    result: {
-      ...entry.result,
-      stdout: redactHealthText(entry.result.stdout),
-      stderr: redactHealthText(entry.result.stderr)
-    }
-  }
-}
-
-export function redactHealthText (value) {
-  return redactDiagnosticText(String(value ?? ''))
-    .replace(/\b(password|passwd|token|secret|authorization|api[_-]?key)\s*[:=]\s*[^\s,;]+/giu, '$1=[redacted]')
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=-]+/giu, '$1 [redacted]')
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@[^\s"'<>]+/giu, '[redacted-url]')
-    .replace(/\b(?:postgres(?:ql)?|mysql|mariadb|mongodb|redis):\/\/[^\s"']+/giu, '[redacted-service-url]')
-    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/giu, '[redacted-private-key]')
 }
 
 function hostHealthQuestion () {
@@ -2540,6 +2554,7 @@ function renderCommandList (ui, commands, heading) {
     renderWrappedField(ui, 'Purpose', item.purpose)
     ui.line('Risk', item.risk)
     ui.line('Timeout', `${item.timeoutMs}ms`)
+    if (item.executionMode === 'job') ui.line('Execution', 'durable signed job')
     if (item.retry) ui.line('Retry policy', `${item.retry.attempts} attempts, ${item.retry.intervalMs}ms delay, exits ${item.retry.exitCodes.join(', ')}${item.retry.states ? `, states ${item.retry.states.join(', ')}` : ''}; never unknown or cancelled`)
     ui.line('Root required', item.requiresSudo ? 'yes' : 'no')
     if (item.source) ui.line('Source', commandSourceLabel(item.source))

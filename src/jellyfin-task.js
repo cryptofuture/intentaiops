@@ -6,6 +6,7 @@ const SERVICE = 'webminai-jellyfin-18113'
 const APP_ROOT = '/opt/webminai-jellyfin-18113'
 const DATA_ROOT = '/var/lib/webminai-jellyfin-18113'
 const CREDENTIALS = '/root/jellyfin_credentials'
+const PACKAGE_DATA_PATHS = ['/etc/jellyfin', '/var/lib/jellyfin', '/var/cache/jellyfin', '/var/log/jellyfin']
 const SERVICE_ROOT = '/opt/webminai/services/jellyfin'
 const PROJECT = 'webminai-jellyfin-18113'
 const PORTABLE_ARCHIVE = `jellyfin_${VERSION}-amd64.tar.gz`
@@ -72,15 +73,15 @@ function buildNativeTask (taskId, context, profile) {
     item('verify-jellyfin', 'verify', nativeVerify(profile), 'Verify Jellyfin health, public system information, web UI, persistence, identity, and restart recovery', ['initialize-jellyfin'], 900000, 'job')
   ]
   const revertCommands = [
-    item('stop-jellyfin', 'cleanup', nativeStop(paths), 'Stop and remove only the task-owned Jellyfin and nginx services', [], 300000, undefined, 'destructive'),
-    item('remove-jellyfin-files', 'cleanup', `set -eu; rm -rf -- ${quote(APP_ROOT)} ${quote(DATA_ROOT)} ${quote(CREDENTIALS)} /etc/jellyfin /var/lib/jellyfin /var/cache/jellyfin /var/log/jellyfin`, 'Remove task-owned application, media, cache, configuration, logs, and credentials', ['stop-jellyfin'], 300000, undefined, 'destructive'),
+    item('stop-jellyfin', 'cleanup', nativeStop(paths, profile), 'Stop and remove only the task-owned Jellyfin and nginx services', [], 300000, undefined, 'destructive'),
+    item('remove-jellyfin-files', 'cleanup', `set -eu; rm -rf -- ${[APP_ROOT, DATA_ROOT, CREDENTIALS, ...(profile.package ? PACKAGE_DATA_PATHS : [])].map(quote).join(' ')}`, 'Remove task-owned application, media, cache, configuration, logs, and credentials', ['stop-jellyfin'], 300000, undefined, 'destructive'),
     item('restore-foundation', 'cleanup', nativeRestore(state, profile), 'Restore packages, repository, users, and nginx state from the factual baseline', ['remove-jellyfin-files'], 1200000, 'job', 'destructive')
   ]
   return envelope({
     context,
     route: profile.route,
     overview: `Deploy Jellyfin ${VERSION} with isolated state and nginx on port ${PORT}.`,
-    files: [state, APP_ROOT, DATA_ROOT, CREDENTIALS, paths.serviceFile, paths.nginxVhost, ...(paths.nginxEnableLink ? [paths.nginxEnableLink] : []), ...(profile.package ? ['/etc/apt/keyrings/jellyfin.gpg', '/etc/apt/sources.list.d/jellyfin.sources', '/etc/jellyfin', '/var/lib/jellyfin', '/var/cache/jellyfin', '/var/log/jellyfin'] : [])],
+    files: [state, APP_ROOT, DATA_ROOT, CREDENTIALS, paths.serviceFile, paths.nginxVhost, ...(paths.nginxEnableLink ? [paths.nginxEnableLink] : []), ...(profile.family === 'arch' ? ['/etc/nginx/nginx.conf'] : []), ...(profile.package ? ['/etc/apt/keyrings/jellyfin.gpg', '/etc/apt/sources.list.d/jellyfin.sources', ...PACKAGE_DATA_PATHS] : [])],
     commands,
     revertCommands,
     verifyApplied: nativeVerify(profile),
@@ -171,7 +172,7 @@ function nativePaths (profile) {
   const name = `${SERVICE}.conf`
   return profile.family === 'debian'
     ? { serviceFile: `/etc/systemd/system/${SERVICE}.service`, nginxVhost: `/etc/nginx/sites-available/${name}`, nginxEnableLink: `/etc/nginx/sites-enabled/${name}` }
-    : { serviceFile: `/etc/systemd/system/${SERVICE}.service`, nginxVhost: `/etc/nginx/conf.d/${name}`, nginxEnableLink: null }
+    : { serviceFile: `/etc/systemd/system/${SERVICE}.service`, nginxVhost: `/etc/nginx/${profile.family === 'suse' ? 'vhosts.d' : 'conf.d'}/${name}`, nginxEnableLink: null }
 }
 
 function ownedAbsent () {
@@ -180,10 +181,11 @@ function ownedAbsent () {
 
 function nativeBaseline (state, paths, profile) {
   const owned = [APP_ROOT, DATA_ROOT, CREDENTIALS, paths.serviceFile, paths.nginxVhost, ...(paths.nginxEnableLink ? [paths.nginxEnableLink] : [])]
-  if (profile.package) owned.push('/etc/apt/keyrings/jellyfin.gpg', '/etc/apt/sources.list.d/jellyfin.sources', '/etc/jellyfin', '/var/lib/jellyfin', '/var/cache/jellyfin', '/var/log/jellyfin')
+  if (profile.family === 'suse') owned.push(`/etc/nginx/conf.d/${SERVICE}.conf`)
+  if (profile.package) owned.push('/etc/apt/keyrings/jellyfin.gpg', '/etc/apt/sources.list.d/jellyfin.sources', ...PACKAGE_DATA_PATHS, '/etc/systemd/system/jellyfin.service', '/etc/systemd/system/jellyfin.service.d')
   const snapshot = packageSnapshot(profile, `${state}/packages.before`)
   return join([
-    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...owned.map(path => `test ! -e ${quote(path)}`), `! getent passwd ${quote(profile.user)} >/dev/null`, '! command -v jellyfin >/dev/null 2>&1', `! ss -lnt 2>/dev/null | awk '$4 ~ /:${APP_PORT}$/ { found=1 } END { exit !found }'`,
+    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...owned.map(path => `if [ -e ${quote(path)} ] || [ -L ${quote(path)} ]; then printf '%s\\n' ${quote(`BASELINE_DRIFT: managed path already exists: ${path}`)} >&2; exit 1; fi`), `if getent passwd ${quote(profile.user)} >/dev/null; then printf '%s\\n' 'BASELINE_DRIFT: Jellyfin service account already exists' >&2; exit 1; fi`, "if command -v jellyfin >/dev/null 2>&1; then printf '%s\\n' 'BASELINE_DRIFT: Jellyfin executable already exists' >&2; exit 1; fi", ...(profile.package ? ["if systemctl cat jellyfin.service >/dev/null 2>&1; then printf '%s\\n' 'BASELINE_DRIFT: Jellyfin service already exists' >&2; exit 1; fi"] : []), `if ss -lnt 2>/dev/null | awk '$4 ~ /:${APP_PORT}$/ { found=1 } END { exit !found }'; then printf '%s\\n' 'BASELINE_DRIFT: Jellyfin port is already in use' >&2; exit 1; fi`,
     `install -d -o root -g root -m 0700 ${quote(state)}`, snapshot, `systemctl is-active --quiet nginx 2>/dev/null && : > ${quote(`${state}/nginx.active`)} || true`, `systemctl is-enabled --quiet nginx 2>/dev/null && : > ${quote(`${state}/nginx.enabled`)} || true`, 'fi', 'printf \'%s\\n\' baseline-ready'
   ])
 }
@@ -257,9 +259,9 @@ function nativeVerify (profile) {
   ])
 }
 
-function nativeStop (paths) {
+function nativeStop (paths, profile) {
   return join([
-    'set -eu', `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, 'systemctl disable --now jellyfin 2>/dev/null || true', `rm -f -- ${quote(paths.serviceFile)} ${quote(paths.nginxVhost)}`, ...(paths.nginxEnableLink ? [`rm -f -- ${quote(paths.nginxEnableLink)}`] : []), 'systemctl daemon-reload', 'if command -v nginx >/dev/null 2>&1; then nginx -t', 'systemctl is-active --quiet nginx && systemctl reload nginx || true', 'fi'
+    'set -eu', `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, ...(profile.package ? ['systemctl disable --now jellyfin 2>/dev/null || true'] : []), `rm -f -- ${quote(paths.serviceFile)} ${quote(paths.nginxVhost)}`, ...(paths.nginxEnableLink ? [`rm -f -- ${quote(paths.nginxEnableLink)}`] : []), 'systemctl daemon-reload', 'if command -v nginx >/dev/null 2>&1; then nginx -t', 'systemctl is-active --quiet nginx && systemctl reload nginx || true', 'fi'
   ])
 }
 

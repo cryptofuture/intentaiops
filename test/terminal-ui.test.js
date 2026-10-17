@@ -90,6 +90,24 @@ test('terminal multi-select toggles hosts and accepts them in display order', as
   assert.equal(input.isPaused(), true)
 })
 
+test('secret prompt is shown only after echo suppression and its input handler are ready', async () => {
+  const { input, output } = terminalPair()
+  const write = output.write.bind(output)
+  output.write = value => {
+    write(value)
+    if (value === 'Secret: ') {
+      assert.equal(input.isRaw, true)
+      assert.ok(input.listenerCount('data') > 0)
+      input.emit('data', Buffer.from('private-value\n'))
+    }
+  }
+  const ui = new TerminalUi({ input, output })
+  assert.equal(await ui.secret('Secret'), 'private-value')
+  assert.doesNotMatch(output.text, /private-value/)
+  assert.equal(input.isRaw, false)
+  assert.equal(input.isPaused(), true)
+})
+
 test('secret input restores raw mode and paused stdin', async () => {
   const { input, output } = terminalPair()
   const ui = new TerminalUi({ input, output })
@@ -102,6 +120,14 @@ test('secret input restores raw mode and paused stdin', async () => {
 
 test('hidden multiline editor accepts pasted kubeconfig without rendering it', async () => {
   const { input, output } = terminalPair()
+  const write = output.write.bind(output)
+  output.write = value => {
+    if (String(value).includes('Paste Kubernetes kubeconfig')) {
+      assert.equal(input.isRaw, true)
+      assert.ok(input.listenerCount('keypress') > 0)
+    }
+    return write(value)
+  }
   const ui = new TerminalUi({ input, output })
   const editing = ui.secretEditor('Paste Kubernetes kubeconfig')
   const kubeconfig = 'apiVersion: v1\nclusters:\n- name: production\n'
@@ -113,6 +139,25 @@ test('hidden multiline editor accepts pasted kubeconfig without rendering it', a
   assert.match(output.text, /contents remain hidden/)
   assert.equal(input.isRaw, false)
   assert.equal(input.isPaused(), true)
+})
+
+test('a hidden prompt render failure restores terminal state', async () => {
+  const { input, output } = terminalPair()
+  const ui = new TerminalUi({ input, output })
+  output.write = () => { throw new Error('output disconnected') }
+  await assert.rejects(ui.secretEditor('Hidden input'), /output disconnected/)
+  assert.equal(input.isRaw, false)
+  assert.equal(input.isPaused(), true)
+})
+
+test('a secret prompt write failure restores terminal state', async () => {
+  const { input, output } = terminalPair()
+  const ui = new TerminalUi({ input, output })
+  output.write = () => { throw new Error('output disconnected') }
+  await assert.rejects(ui.secret('Secret'), /output disconnected/)
+  assert.equal(input.isRaw, false)
+  assert.equal(input.isPaused(), true)
+  assert.equal(input.listenerCount('data'), 0)
 })
 
 test('line prompts restore paused stdin', async () => {

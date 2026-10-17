@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -12,6 +12,124 @@ import { buildN8nTask, n8nRelease } from '../src/n8n-task.js'
 import { moodleRelease } from '../src/moodle-task.js'
 import { buildMattermostTask, mattermostRelease } from '../src/mattermost-task.js'
 import { buildJellyfinTask } from '../src/jellyfin-task.js'
+import { buildOdooTask } from '../src/odoo-task.js'
+
+test('Odoo baseline actually stops for an existing executable and dangling data path', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-odoo-baseline-'))
+  try {
+    const built = buildOdooTask(321, { identity: { id: 'ubuntu', versionId: '24.04', architecture: 'x86_64' }, management: { family: 'debian' } })
+    const command = built.plan.commands[0].command.replaceAll('/opt/', `${root}/opt/`).replaceAll('/var/', `${root}/var/`).replaceAll('/root/', `${root}/root/`).replaceAll('/etc/', `${root}/etc/`).replace('command -v odoo', 'mock_odoo_probe')
+    const installed = spawnSync('/bin/sh', ['-c', 'mock_odoo_probe () { return 0; }; ' + command], { encoding: 'utf8' })
+    assert.equal(installed.status, 1)
+    assert.match(installed.stderr, /BASELINE_DRIFT: Odoo executable already exists/)
+    assert.equal(existsSync(`${root}/var/lib/webminai/task-state/321-odoo-linux`), false)
+    mkdirSync(`${root}/var/lib`, { recursive: true })
+    symlinkSync(path.join(root, 'missing-data'), `${root}/var/lib/odoo`)
+    const linked = spawnSync('/bin/sh', ['-c', 'mock_odoo_probe () { return 1; }; ' + command], { encoding: 'utf8' })
+    assert.equal(linked.status, 1)
+    assert.match(linked.stderr, /BASELINE_DRIFT: managed path already exists:/)
+    assert.equal(existsSync(`${root}/var/lib/webminai/task-state/321-odoo-linux`), false)
+    rmSync(`${root}/var/lib/odoo`)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('openSUSE Jellyfin uses its nginx vhost directory and refuses either existing layout', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-jellyfin-suse-'))
+  try {
+    const built = buildJellyfinTask(322, { identity: { id: 'opensuse-leap', architecture: 'x86_64' }, management: { family: 'suse' } })
+    const current = '/etc/nginx/vhosts.d/webminai-jellyfin-18113.conf'
+    const legacy = '/etc/nginx/conf.d/webminai-jellyfin-18113.conf'
+    assert.ok(built.plan.modifiedFiles.includes(current))
+    assert.ok(built.plan.commands.find(c => c.id === 'configure-jellyfin').command.includes(current))
+    assert.ok(built.plan.revertCommands.find(c => c.id === 'stop-jellyfin').command.includes(current))
+    const baseline = built.plan.commands[0].command.replaceAll('/opt/', `${root}/opt/`).replaceAll('/var/', `${root}/var/`).replaceAll('/root/', `${root}/root/`).replaceAll('/etc/', `${root}/etc/`)
+    for (const file of [current, legacy]) {
+      mkdirSync(path.dirname(`${root}${file}`), { recursive: true })
+      writeFileSync(`${root}${file}`, 'preserve')
+      const result = spawnSync('/bin/sh', ['-c', baseline], { encoding: 'utf8' })
+      assert.equal(result.status, 1)
+      assert.match(result.stderr, /BASELINE_DRIFT/)
+      assert.equal(readFileSync(`${root}${file}`, 'utf8'), 'preserve')
+      assert.equal(existsSync(`${root}/var/lib/webminai/task-state/322-jellyfin-linux`), false)
+      rmSync(`${root}${file}`)
+    }
+    assert.ok(!built.plan.revertCommands.some(c => c.command.includes(legacy)))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('portable Jellyfin rollback preserves unrelated default data and service', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-jellyfin-owned-'))
+  try {
+    const defaults = ['/etc/jellyfin', '/var/lib/jellyfin', '/var/cache/jellyfin', '/var/log/jellyfin']
+    for (const [id, family] of [['arch', 'arch'], ['rocky', 'rhel'], ['opensuse-leap', 'suse']]) {
+      const built = buildJellyfinTask(319, { identity: { id, architecture: 'x86_64' }, management: { family } })
+      if (family === 'arch') assert.ok(built.plan.modifiedFiles.includes('/etc/nginx/nginx.conf'))
+      const remap = command => command.replaceAll('/opt/', `${root}/opt/`).replaceAll('/var/', `${root}/var/`).replaceAll('/root/', `${root}/root/`).replaceAll('/etc/', `${root}/etc/`)
+      for (const directory of defaults) {
+        mkdirSync(`${root}${directory}`, { recursive: true })
+        writeFileSync(`${root}${directory}/keep`, 'pre-existing')
+      }
+      const stop = built.plan.revertCommands.find(c => c.id === 'stop-jellyfin').command
+      const remove = built.plan.revertCommands.find(c => c.id === 'remove-jellyfin-files').command
+      const result = spawnSync('/bin/sh', ['-c', `systemctl () { printf '%s\\n' "$*" >> '${root}/calls'; }; nginx () { return 0; }; ` + remap(stop) + '; ' + remap(remove)], { encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+      assert.doesNotMatch(readFileSync(path.join(root, 'calls'), 'utf8'), /disable --now jellyfin(?:\n|$)/)
+      for (const directory of defaults) assert.equal(readFileSync(`${root}${directory}/keep`, 'utf8'), 'pre-existing')
+      rmSync(path.join(root, 'calls'))
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('package Jellyfin owns default data only after refusing pre-existing paths and units', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-jellyfin-defaults-'))
+  try {
+    const built = buildJellyfinTask(320, { identity: { id: 'debian', versionId: '13', architecture: 'x86_64' }, management: { family: 'debian' } })
+    const baseline = built.plan.commands[0].command
+    assert.match(baseline, /if systemctl cat jellyfin\.service/)
+    for (const file of ['/etc/jellyfin', '/var/lib/jellyfin', '/var/cache/jellyfin', '/var/log/jellyfin']) {
+      assert.ok(baseline.includes(`BASELINE_DRIFT: managed path already exists: ${file}`))
+      assert.ok(built.plan.revertCommands.find(c => c.id === 'remove-jellyfin-files').command.includes(`'${file}'`))
+    }
+    const command = baseline.replaceAll('/opt/', `${root}/opt/`).replaceAll('/var/', `${root}/var/`).replaceAll('/root/', `${root}/root/`).replaceAll('/etc/', `${root}/etc/`)
+    mkdirSync(`${root}/etc`, { recursive: true })
+    symlinkSync(path.join(root, 'missing-data'), `${root}/etc/jellyfin`)
+    const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /BASELINE_DRIFT/)
+    assert.equal(existsSync(`${root}/var/lib/webminai/task-state/320-jellyfin-linux`), false)
+    rmSync(`${root}/etc/jellyfin`)
+    const unit = spawnSync('/bin/sh', ['-c', `getent () { return 2; }; mock_jellyfin_probe () { return 1; }; systemctl () { printf checked > '${root}/unit-probed'; return 0; }; ` + command.replace('command -v jellyfin', 'mock_jellyfin_probe')], { encoding: 'utf8' })
+    assert.equal(unit.status, 1)
+    assert.equal(readFileSync(path.join(root, 'unit-probed'), 'utf8'), 'checked')
+    assert.equal(existsSync(`${root}/var/lib/webminai/task-state/320-jellyfin-linux`), false)
+    for (const guard of ['account', 'binary', 'port']) {
+      const mocks = `getent () { return ${guard === 'account' ? 0 : 2}; }; mock_jellyfin_probe () { return ${guard === 'binary' ? 0 : 1}; }; systemctl () { return 1; }; ss () { ${guard === 'port' ? "printf '%s\\n' 'LISTEN 0 128 0.0.0.0:8096 0.0.0.0:*';" : 'return 0;'} }; `
+      const blocked = spawnSync('/bin/sh', ['-c', mocks + command.replace('command -v jellyfin', 'mock_jellyfin_probe')], { encoding: 'utf8' })
+      assert.equal(blocked.status, 1, guard)
+      assert.match(blocked.stderr, /BASELINE_DRIFT/)
+      assert.equal(existsSync(`${root}/var/lib/webminai/task-state/320-jellyfin-linux`), false)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('n8n baseline explains an existing path or dangling symlink without changing it', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-n8n-baseline-'))
+  try {
+    const context = { identity: { id: 'arch', architecture: 'x86_64' }, management: { family: 'arch', serviceManager: 'systemd' } }
+    const command = buildN8nTask(318, context, { preferred: false }).plan.commands[0].command
+      .replaceAll('/var/lib/webminai/task-state/318-n8n-linux', path.join(root, 'state'))
+      .replaceAll('/opt/webminai-n8n-18109', path.join(root, 'app'))
+    for (const link of [false, true]) {
+      if (link) symlinkSync(path.join(root, 'missing'), path.join(root, 'app'))
+      else mkdirSync(path.join(root, 'app'))
+      const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+      assert.equal(result.status, 1)
+      assert.match(result.stderr, /BASELINE_DRIFT: managed path already exists:/)
+      assert.equal(existsSync(path.join(root, 'state')), false)
+      rmSync(path.join(root, 'app'), { recursive: !link })
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 test('Jellyfin rejects a mismatched server or web package even when its meta-package is pinned', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'intent-jellyfin-pins-'))
@@ -174,6 +292,7 @@ test('n8n acquisition never trusts an executable left by an interrupted npm inst
     const built = buildCommonTask('n8n-linux', 311, { platform: 'linux', linuxContext: context, docker: { preferred: false } })
     const command = built.plan.commands.find(c => c.id === 'install-n8n').command.replaceAll('/opt/webminai-n8n-18109', app).replaceAll('/var/lib/webminai/task-state/311-n8n-linux', path.join(root, 'state')).replaceAll('-o root -g root ', '')
     assert.match(command, /install --prefer-offline --maxsockets=4 --omit=dev/)
+    assert.match(command, /--fetch-retries=5 --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=30000 --fetch-timeout=120000/)
     const mocks = `node () { test -f '${root}/binding-ready'; }; npm () { case "$1" in install-scripts) if [ "$2" = --help ]; then return 0; fi; printf '%s' "$3" > '${root}/approved'; return 0;; rebuild) : > '${root}/binding-ready'; return 0;; esac; [ ! -e '${app}/package-lock.json' ] || return 8; printf called >> '${root}/calls'; mkdir -p '${app}/node_modules/.bin'; cp '${fixture}' '${app}/node_modules/.bin/n8n'; }; `
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = spawnSync('/bin/sh', ['-c', mocks + command], { encoding: 'utf8' })

@@ -6,6 +6,41 @@ import test from 'node:test'
 import { CodexPlanner } from '../src/codex-planner.js'
 import { listCommonTasks } from '../src/common-tasks.js'
 
+test('AI plans expose durable jobs while normal commands keep their timeout limit', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-ai-jobs-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  const schema = JSON.parse(await readFile(new URL('../schemas/command-plan.schema.json', import.meta.url), 'utf8'))
+  for (const graph of ['commands', 'revertCommands']) {
+    assert.ok(schema.properties[graph].items.required.includes('executionMode'))
+    assert.deepEqual(schema.properties[graph].items.properties.executionMode.enum, ['job', null])
+    assert.equal(schema.properties[graph].items.properties.timeoutMs.maximum, 3600000)
+  }
+  for (const [mode, timeout, accepted] of [['job', 1800000, true], [null, 300000, true], [null, 1800000, false], ['job', 3600001, false]]) {
+    const output = {
+      summary: 'Install htop',
+      changeOverview: 'Install a reviewed package',
+      modifiedFiles: ['/usr/bin/htop'],
+      assumptions: [],
+      warnings: [],
+      requiresConfirmation: true,
+      commands: [{ id: 'install', command: 'DEBIAN_FRONTEND=noninteractive apt-get install -y htop', purpose: 'Install htop', risk: 'change', timeoutMs: timeout, executionMode: mode, requiresSudo: true, phase: 'packages', diagnostic: null, dependsOn: [] }],
+      revertCommands: [{ id: 'remove', command: 'apt-get remove -y htop', purpose: 'Remove htop', risk: 'change', timeoutMs: 300000, executionMode: null, requiresSudo: true, phase: 'cleanup', diagnostic: null, dependsOn: [] }]
+    }
+    const planner = new CodexPlanner({
+      runner: async (_, __, options) => {
+        assert.match(options.input, /Intent AI Ops starts and observes signed durable jobs itself/)
+        return { code: 0, stdout: JSON.stringify(output), stderr: '' }
+      }
+    })
+    const pending = planner.plan({ serverDirectory, request: 'Install htop', inventory: { os: 'linux' }, policy: { executionIdentity: 'root' } })
+    if (accepted) {
+      const result = await pending
+      assert.equal(result.commands[0].executionMode, mode ?? undefined)
+      assert.equal(Object.hasOwn(result.revertCommands[0], 'executionMode'), false)
+    } else await assert.rejects(pending, /invalid timeout/)
+  }
+})
+
 test('Codex planner rejects unsupported model settings', () => {
   assert.throws(() => new CodexPlanner({ model: 'gpt-5.5' }), /unsupported Codex model/u)
   assert.throws(() => new CodexPlanner({ model: 'gpt-6-astra' }), /unsupported Codex model/u)
@@ -414,7 +449,7 @@ test('Codex planner supplies Linux WordPress checksum and external listener fact
   assert.match(prompt, /Alpine 3\.23 uses nginx, mariadb, mariadb-client/)
   assert.match(prompt, /--no-recommends is accepted by the install subcommand/)
   assert.match(prompt, /Commands execute independently and do not share shell variables/)
-  assert.match(prompt, /Give package installation commands timeoutMs 300000/)
+  assert.match(prompt, /Give synchronous package installation commands timeoutMs 300000/)
   assert.match(prompt, /Use a stable site identity webminai-wordpress-18101/)
   assert.match(prompt, /exact task-state directory for this plan is \/var\/lib\/webminai\/task-state\/42/)
   assert.doesNotMatch(prompt, /<taskId>/)
@@ -1555,7 +1590,11 @@ test('Codex consultation returns advice and only compact summaries flow into the
   const advice = await planner.consult({
     serverDirectory,
     question: 'How should nginx be installed?',
-    inventory: { os: 'freebsd' },
+    inventory: {
+      os: 'freebsd',
+      webminaiHealthEvidence: { stdout: 'FAILED_SERVICE_EVIDENCE', secret: 'hidden-health-value' },
+      webminaiSystemUpdateEvidence: { stdout: 'UPDATE_DELTA_EVIDENCE', password: 'hidden-update-value' }
+    },
     policy: { executionIdentity: 'root' },
     consultationContext: prior
   })
@@ -1564,6 +1603,11 @@ test('Codex consultation returns advice and only compact summaries flow into the
   assert.deepEqual(calls[0].context, [{ id: 4, summary: 'Keep the existing firewall policy.' }])
   assert.doesNotMatch(JSON.stringify(calls[0].context), /full answer/)
   assert.match(calls[0].prompt, /nothing in this response will be executed/)
+  assert.match(calls[0].prompt, /Read inventory\.json before declaring evidence unavailable/)
+  assert.match(calls[0].prompt, /webminaiHealthEvidence and webminaiSystemUpdateEvidence/)
+  assert.match(calls[0].prompt, /FAILED_SERVICE_EVIDENCE/)
+  assert.match(calls[0].prompt, /UPDATE_DELTA_EVIDENCE/)
+  assert.doesNotMatch(calls[0].prompt, /hidden-health-value|hidden-update-value/)
 
   await planner.plan({
     serverDirectory,
