@@ -1,3 +1,7 @@
+export function httpMarkerCheck (curlCommand, marker, grepFlags = '-F') {
+  return `(response=$(${curlCommand}) || exit $?; printf '%s' "$response" | grep ${quote(grepFlags)} ${quote(marker)} >/dev/null)`
+}
+
 /** @param {{taskId: number, linuxContext: any, docker?: any, application: any}} options */
 export function buildLinuxPhpApplicationFoundation ({ taskId, linuxContext, docker = {}, application }) {
   validateInputs(taskId, linuxContext, application)
@@ -35,7 +39,7 @@ function buildNativeFoundation ({ taskId, linuxContext, application }) {
       commands,
       revertCommands: nativeRevert({ state, family, profile, services, application })
     },
-    verifyApplied: `curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${application.port}/ | grep -Fq ${quote(application.marker)}`,
+    verifyApplied: httpMarkerCheck(`curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${application.port}/`, application.marker),
     verifyReverted: `test ! -e ${quote(application.webRoot)} && test ! -e ${quote(application.artifacts)} && test ! -e ${quote(application.credentials)}`,
     stateProbe: pathProbe(paths)
   }
@@ -85,14 +89,14 @@ function buildComposeFoundation ({ taskId, linuxContext, docker, application }) 
       ],
       revertCommands: composeRevert(state, application)
     },
-    verifyApplied: `cd ${quote(application.serviceRoot)} && docker compose -p ${quote(application.project)} ps --status running --services | grep -q . && curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${application.port}/ | grep -Fq ${quote(application.marker)}`,
+    verifyApplied: `cd ${quote(application.serviceRoot)} && docker compose -p ${quote(application.project)} ps --status running --services | grep -q . && ${httpMarkerCheck(`curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${application.port}/`, application.marker)}`,
     verifyReverted: `test ! -e ${quote(application.serviceRoot)} && test ! -e ${quote(application.credentials)} && test ! -e ${quote(state)} && { ! command -v docker >/dev/null 2>&1 || ! docker ps -aq --filter label=com.docker.compose.project=${quote(application.project)} | grep -q .; }`,
     stateProbe: pathProbe(paths)
   }
 }
 
 function nativeBaseline ({ state, family, profile, services, paths }) {
-  return ['set -eu', mariadbDataPreflight(), `state=${quote(state)}`, 'if [ ! -s "$state/packages.before" ]; then :', `for path in ${paths.filter(path => path !== state).map(quote).join(' ')}; do [ ! -e "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`, 'install -d -o root -g root -m 0700 "$state"', packageSnapshot(family, '"$state/packages.before"'), ...services.map((service, index) => `${serviceActive(service)} && : > "$state/service-${index}.active" || true`), '[ ! -d /var/lib/mysql/mysql ] || : > "$state/database-data.existed"', profile.nginxIncludeRequired ? `if [ -f ${quote(profile.nginxMainConfig)} ]; then cp -a ${quote(profile.nginxMainConfig)} "$state/nginx.conf.before"; fi` : ':', 'fi', "printf '%s\n' baseline-ready"].join('; ')
+  return ['set -eu', mariadbDataPreflight(), `state=${quote(state)}`, 'if [ ! -s "$state/packages.before" ]; then :', `for path in ${paths.filter(path => path !== state && path !== profile.nginxMainConfig).map(quote).join(' ')}; do [ ! -e "$path" ] && [ ! -L "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`, 'install -d -o root -g root -m 0700 "$state"', packageSnapshot(family, '"$state/packages.before"'), ...services.map((service, index) => `${serviceActive(service)} && : > "$state/service-${index}.active" || true`), '[ ! -d /var/lib/mysql/mysql ] || : > "$state/database-data.existed"', profile.nginxIncludeRequired ? `if [ -f ${quote(profile.nginxMainConfig)} ]; then cp -a ${quote(profile.nginxMainConfig)} "$state/nginx.conf.before"; fi` : ':', 'fi', "printf '%s\n' baseline-ready"].join('; ')
 }
 
 function installPackages ({ state, family, profile }) {
@@ -179,7 +183,7 @@ function composeRevert (state, application) {
 }
 
 function restoreCommand ({ state, family, services }) {
-  const restore = services.map((service, index) => `[ -e ${quote(`${state}/service-${index}.active`)} ] && ${serviceRestart(service, family)} || ${serviceStop(service, family)}`).join('; ')
+  const restore = services.map((service, index) => `if [ -e ${quote(`${state}/service-${index}.active`)} ]; then ${serviceRestart(service, family)}; else ${serviceStop(service, family)}; fi`).join('; ')
   return `set +e; [ -d ${quote(state)} ] || exit 0; ${restore}; ${removeAddedPackages(family, state)}; [ -e ${quote(`${state}/database-data.existed`)} ] || rm -rf -- /var/lib/mysql /run/mysqld /run/mariadb; rm -rf -- ${quote(state)}; exit 0`
 }
 

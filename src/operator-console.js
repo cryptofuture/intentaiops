@@ -1,7 +1,6 @@
 import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
-import { sanitizePlannerData } from './codex-planner.js'
 
 function equal (left, right) {
   return typeof left === 'string' && /^[a-f0-9]{64}$/u.test(left) && timingSafeEqual(Buffer.from(left), Buffer.from(right))
@@ -20,7 +19,7 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
     response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
     const json = (status, value) => {
       response.writeHead(status, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify(sanitizePlannerData(value)))
+      response.end(JSON.stringify(controller.sanitize(value)))
     }
     try {
       if (request.headers.host !== new URL(origin).host || (request.headers.origin && request.headers.origin !== origin) || request.headers['sec-fetch-site'] === 'cross-site') return json(403, { error: 'origin denied' })

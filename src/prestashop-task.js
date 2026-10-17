@@ -1,5 +1,5 @@
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
-import { buildLinuxPhpApplicationFoundation, linuxPhpApplicationProfile } from './linux-php-foundation.js'
+import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile } from './linux-php-foundation.js'
 
 const VERSION = '9.1.4'
 const DISTRIBUTION = '5.0'
@@ -86,7 +86,7 @@ function configureNativePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'verify-prestashop', nativeVerifyCommand(profile), 'Verify PrestaShop configuration, database state, installer removal, socket, and external marker')
   enhanceNativeModuleRestore(built.plan, state, linuxContext)
   built.plan.modifiedFiles.push(`${ARTIFACTS}/prestashop.zip`, `${state}/installer-argv.php`, `${WEB_ROOT}/app/config/parameters.php`, `${WEB_ROOT}/classes/Language.php`)
-  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/app/config/parameters.php`)} && test ! -d ${quote(`${WEB_ROOT}/install`)} && test -S ${quote(profile.phpFpmListener)} && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/app/config/parameters.php`)} && test ! -d ${quote(`${WEB_ROOT}/install`)} && test -S ${quote(profile.phpFpmListener)} && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(WEB_ROOT)} && test ! -e ${quote(ARTIFACTS)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)}`
 }
 
@@ -100,7 +100,7 @@ function configureComposePlan (built, taskId, linuxContext) {
   insertSequentialCommands(built.plan, 'initialize-prestashop', 'verify-compose', composeInstallSteps(linuxContext))
   replaceCommand(built.plan, 'verify-compose', composeVerifyCommand(linuxContext), 'Verify Compose health, Unix socket, protected configuration, and the PrestaShop marker')
   built.plan.modifiedFiles.push(`${SERVICE_ROOT}/compose.yaml`, `${SERVICE_ROOT}/php-fpm.conf`, `${SERVICE_ROOT}/nginx.conf`, `${SERVICE_ROOT}/installer-argv.php`, SWAP_FILE)
-  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq prestashop && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T prestashop test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/${ADMIN_DIRECTORY}/index.php && docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq prestashop && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T prestashop test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/${ADMIN_DIRECTORY}/index.php && docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(SERVICE_ROOT)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && test ! -e ${quote(SWAP_FILE)} && { ! command -v docker >/dev/null 2>&1 || ! docker ps -aq --filter label=com.docker.compose.project=${quote(PROJECT)} | grep -q .; }`
 }
 
@@ -278,7 +278,7 @@ function nativeVerifyCommand (profile) {
     `mariadb --protocol=socket -uroot -Nse ${quote(`SELECT COUNT(*) FROM ${DATABASE}.wmai_employee WHERE email='intentaiops@example.invalid';`)} | grep -Fxq 1 || { printf '%s\n' DATABASE_ADMIN_NOT_READY >&2; exit 1; }`,
     `address=$(${profile.primaryAddressCommand})`,
     '[ -n "$address" ] || { printf \'%s\\n\' HOST_ADDRESS_UNAVAILABLE >&2; exit 1; }',
-    `ready=; for attempt in $(seq 1 60); do if curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done`,
+    `ready=; for attempt in $(seq 1 60); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done`,
     '[ "$ready" = yes ] || { printf \'%s\\n\' APP_HTTP_MARKER_NOT_READY >&2; exit 1; }',
     "printf '%s\n' verification-passed"
   ].join('; ')
@@ -413,7 +413,7 @@ function composeInstallStepCommand (linuxContext, step, finish = false, modules 
   if (finish) {
     commands.push(
       `docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install`,
-      `ready=; for attempt in $(seq 1 60); do if curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done`,
+      `ready=; for attempt in $(seq 1 60); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done`,
       '[ "$ready" = yes ]'
     )
   }
@@ -451,7 +451,7 @@ function composeFinalizeCommand (linuxContext) {
     `docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/apiplatform`,
     `docker compose -p ${quote(PROJECT)} exec -T prestashop test -w /var/www/html/var/cache`,
     `docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install`,
-    `ready=; for attempt in $(seq 1 60); do if curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done`,
+    `ready=; for attempt in $(seq 1 60); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done`,
     '[ "$ready" = yes ]',
     "printf '%s\n' prestashop-finalize-ready"
   ].join('; ')
@@ -459,7 +459,7 @@ function composeFinalizeCommand (linuxContext) {
 
 function composeVerifyCommand (linuxContext) {
   const addressCommand = linuxContext?.applications?.wordpress?.primaryAddressCommand ?? "ip -4 -o route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i == \"src\") {print $(i+1); exit}}'"
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq prestashop; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx; docker compose -p ${quote(PROJECT)} exec -T prestashop test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/app/config/parameters.php; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/${ADMIN_DIRECTORY}/index.php; docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/fosjsrouting; docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/apiplatform; docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install; address=$(${addressCommand}); [ -n "$address" ]; curl --fail --location --silent --show-error --max-time 20 "http://$address:${PORT}/" | grep -Fq ${MARKER}; printf '%s\n' verification-passed`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq prestashop; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx; docker compose -p ${quote(PROJECT)} exec -T prestashop test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/app/config/parameters.php; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/${ADMIN_DIRECTORY}/index.php; docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/fosjsrouting; docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/apiplatform; docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install; address=$(${addressCommand}); [ -n "$address" ]; ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 20 "http://$address:${PORT}/"`, MARKER)}; printf '%s\n' verification-passed`
 }
 
 function fpmSocketConfig () {

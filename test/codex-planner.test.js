@@ -44,7 +44,57 @@ test('AI plans expose durable jobs while normal commands keep their timeout limi
 test('Codex planner rejects unsupported model settings', () => {
   assert.throws(() => new CodexPlanner({ model: 'gpt-5.5' }), /unsupported Codex model/u)
   assert.throws(() => new CodexPlanner({ model: 'gpt-6-astra' }), /unsupported Codex model/u)
-  assert.throws(() => new CodexPlanner({ reasoningEffort: 'high' }), /unsupported Codex reasoning effort/u)
+  assert.doesNotThrow(() => new CodexPlanner({ model: 'mimo-v2.6-pro', reasoningEffort: 'high' }))
+  assert.throws(() => new CodexPlanner({ reasoningEffort: 'ultra' }), /unsupported Codex reasoning effort/u)
+})
+
+test('Codex planner uses the MiMo profile without ignoring user config', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'webminai-mimo-profile-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  let call
+  const planner = new CodexPlanner({
+    model: 'mimo-v2.6-pro',
+    reasoningEffort: 'high',
+    runner: async (binary, args, options) => {
+      call = {
+        binary,
+        args,
+        options,
+        schema: JSON.parse(await readFile(path.join(options.cwd, 'schema.json'), 'utf8'))
+      }
+      return {
+        code: 0,
+        stdout: String.fromCharCode(96).repeat(3) + 'json\n' + JSON.stringify({
+          decision: 'verified_task',
+          catalogId: 'host-health-linux',
+          relevantCatalogIds: ['host-health-linux'],
+          confidence: 'high',
+          rationale: 'The request exactly asks for the reviewed read-only health report.'
+        }) + '\n' + String.fromCharCode(96).repeat(3),
+        stderr: ''
+      }
+    }
+  })
+
+  await planner.routeTask({
+    serverDirectory,
+    request: 'Give me a full health report.',
+    inventory: { os: 'linux' },
+    candidates: [{ id: 'host-health-linux', label: 'Host health', description: 'Read-only health report' }]
+  })
+
+  assert.equal(call.binary, 'codex')
+  assert.deepEqual(call.args.slice(0, 4), ['--no-daemon', '--profile', 'mimo', 'exec'])
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'mimo-v2.6-pro')
+  assert.equal(call.args[call.args.indexOf('--config') + 1], 'model_reasoning_effort="high"')
+  assert.ok(call.args.includes('approval_policy="never"'))
+  assert.ok(call.args.includes('--strict-config'))
+  assert.ok(call.args.includes('--sandbox') && call.args.includes('read-only'))
+  assert.equal(call.args.includes('--ignore-user-config'), false)
+  assert.equal(call.args.includes('--output-schema'), false)
+  assert.ok(call.args.includes('--ignore-rules'))
+  assert.match(call.options.input, /Return only JSON matching schema\.json/u)
+  assert.deepEqual(call.schema.required, ['decision', 'catalogId', 'relevantCatalogIds', 'foundationIds', 'foundationMode', 'confidence', 'rationale'])
 })
 
 test('Codex semantically routes requests against the verified Linux catalog', async t => {
@@ -336,6 +386,10 @@ test('Codex planner prefers Compose and keeps generated service credentials out 
   })
   assert.equal(plan.commands[1].command.startsWith('docker compose'), true)
   assert.match(prompt, /Prefer Docker Compose/)
+  assert.match(prompt, /including error handlers/u)
+  assert.match(prompt, /A read command must never stop services/u)
+  assert.match(prompt, /falls back to \/bin\/sh/u)
+  assert.match(prompt, /portable octal mode arithmetic uses a leading 0/u)
   assert.match(prompt, /Never place a generated or literal password/)
   assert.match(prompt, /\/root\/<service>_credentials/)
 })
@@ -1472,7 +1526,16 @@ test('Codex planner supplies sanitized retry history and correction instructions
       id: 8,
       request: 'inspect alerts',
       status: 'failed',
-      plan: { commands: [{ command: "curl 'http://127.0.0.1:19999/api/v3/alarms'" }] },
+      plan: {
+        commands: [{ id: 'baseline', command: 'printf completed-only-marker' }, { id: 'install', command: "curl 'http://127.0.0.1:19999/api/v3/alarms'" }],
+        revertCommands: [{ id: 'cleanup', command: 'printf rollback-evidence' }]
+      },
+      executionEvidence: {
+        commands: [{ commandId: 'baseline', status: 'completed' }, { commandId: 'install', status: 'failed', evidence: 'token=journal-secret' }],
+        rollbackCommands: [],
+        stateVersion: 'recorded-version',
+        revisions: [{ unnecessary: 'do-not-copy-revisions' }]
+      },
       results: [{ id: 'install', status: 'failed', result: { stderr: 'WinGet is not available to LocalSystem. token=visible-secret ssh://admin@example.test' } }],
       progress: [
         { type: 'reasoning', message: 'used obsolete endpoint' },
@@ -1490,6 +1553,14 @@ test('Codex planner supplies sanitized retry history and correction instructions
   assert.match(prompt, /WinGet is not available to LocalSystem/)
   assert.match(prompt, /Publisher was localized in the registry/)
   assert.match(prompt, /Use the current alerts endpoint/)
+  assert.equal(retryHistory[0].executionEvidence.commands[0].status, 'completed')
+  assert.equal(retryHistory[0].executionEvidence.stateVersion, 'recorded-version')
+  assert.equal(retryHistory[0].executionEvidence.revisions, undefined)
+  assert.match(prompt, /recorded-version/)
+  assert.match(prompt, /api\/v3\/alarms/)
+  assert.match(prompt, /rollback-evidence/)
+  assert.doesNotMatch(prompt, /completed-only-marker/)
+  assert.doesNotMatch(JSON.stringify(retryHistory) + prompt, /journal-secret|do-not-copy-revisions/)
 })
 
 test('Codex planner streams JSONL progress while reading the final schema response from file', async t => {
@@ -1534,6 +1605,23 @@ test('Codex planner streams JSONL progress while reading the final schema respon
   })
   assert.equal(result.summary, 'Read uptime')
   assert.deepEqual(events.map(event => event.type), ['thread.started', 'reasoning'])
+})
+
+test('Codex interruptions and missing final responses fail without accepting partial output or retrying', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-interruption-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  for (const progress of [false, true]) {
+    for (const [result, pattern] of [
+      [{ code: 0, timedOut: true, stdout: '{}', stderr: '' }, /timed out after 300 seconds/u],
+      [{ code: 0, signal: 'SIGTERM', stdout: '{}', stderr: '' }, /was interrupted \(SIGTERM\)/u],
+      [{ code: 0, stdout: '', stderr: '' }, progress ? /produced no final response/u : /empty final response/u]
+    ]) {
+      let calls = 0
+      const planner = new CodexPlanner({ runner: async () => { calls++; return result } })
+      await assert.rejects(planner.plan({ serverDirectory, request: 'Inspect uptime', inventory: {}, taskId: 7, ...(progress ? { onProgress: () => {} } : {}) }), pattern)
+      assert.equal(calls, 1)
+    }
+  }
 })
 
 test('Codex consultation returns advice and only compact summaries flow into the authoritative task', async t => {

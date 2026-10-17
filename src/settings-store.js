@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import { access, mkdir, open, readFile, rename } from 'node:fs/promises'
+import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { access, mkdir, readFile } from 'node:fs/promises'
+import Database from 'better-sqlite3'
 import path from 'node:path'
 import { parseSshConnection } from './connection.js'
 import {
@@ -28,6 +30,7 @@ export class SettingsStore {
     this.settingsPath = path.join(this.dataRoot, 'settings.json')
     this.temporaryServerIds = new Set()
     this.kdfFactory = kdfFactory
+    this.snapshots = new WeakMap()
   }
 
   async initialize () {
@@ -56,7 +59,8 @@ export class SettingsStore {
   }
 
   async load () {
-    const settings = JSON.parse(await readFile(this.settingsPath, 'utf8'))
+    const contents = await readFile(this.settingsPath, 'utf8')
+    const settings = JSON.parse(contents)
     if (settings.format !== SETTINGS_FORMAT || settings.version !== SETTINGS_VERSION) {
       throw new Error('unsupported settings file')
     }
@@ -73,6 +77,7 @@ export class SettingsStore {
     settings.controls = normalizeTerminalControls(settings.controls)
     settings.ssh = normalizeSshTransport(settings.ssh)
 
+    this.snapshots.set(settings, contents)
     return settings
   }
 
@@ -394,6 +399,7 @@ export class SettingsStore {
   }
 
   async reencryptVault ({ settings, passphrase, payloads }) {
+    const snapshot = this.snapshots.get(settings)
     const nextKdf = this.kdfFactory()
     const nextKey = await deriveVaultKey(passphrase, nextKdf)
     let nextSettings
@@ -426,7 +432,9 @@ export class SettingsStore {
       payloads.clusters.clear()
     }
 
+    this.snapshots.set(nextSettings, snapshot)
     await this.save(nextSettings)
+    this.snapshots.set(settings, this.snapshots.get(nextSettings))
     settings.kdf = nextSettings.kdf
     settings.vaultVerifier = nextSettings.vaultVerifier
     settings.servers = nextSettings.servers
@@ -488,19 +496,36 @@ export class SettingsStore {
 
   async save (settings) {
     await mkdir(this.dataRoot, { recursive: true, mode: 0o700 })
-    const temporaryPath = `${this.settingsPath}.${randomUUID()}.tmp`
-    const handle = await open(temporaryPath, 'wx', 0o600)
+    const expected = this.snapshots.get(settings) ?? null
+    const lockPath = path.join(this.dataRoot, 'settings-write-lock.sqlite3')
+    closeSync(openSync(lockPath, 'a', 0o600))
+    const database = new Database(lockPath)
     try {
-      const persisted = {
-        ...settings,
-        servers: Object.fromEntries(Object.entries(settings.servers).filter(([serverId, server]) => !server.temporary && !this.temporaryServerIds.has(serverId)))
-      }
-      await handle.writeFile(`${JSON.stringify(persisted, null, 2)}\n`, 'utf8')
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
-    await rename(temporaryPath, this.settingsPath)
+      chmodSync(lockPath, 0o600)
+      database.pragma('busy_timeout = 5000')
+      database.pragma('synchronous = FULL')
+      database.exec('CREATE TABLE IF NOT EXISTS settings_lock (id INTEGER PRIMARY KEY)')
+      database.transaction(() => {
+        let current = null
+        try { current = readFileSync(this.settingsPath, 'utf8') } catch (error) { if (error.code !== 'ENOENT') throw error }
+        if (current !== expected) throw new Error('Settings changed in another session. Restart Intent AI Ops before saving; no settings were overwritten.')
+        const persisted = {
+          ...settings,
+          servers: Object.fromEntries(Object.entries(settings.servers).filter(([serverId, server]) => !server.temporary && !this.temporaryServerIds.has(serverId)))
+        }
+        const contents = `${JSON.stringify(persisted, null, 2)}\n`
+        const temporaryPath = `${this.settingsPath}.${randomUUID()}.tmp`
+        const descriptor = openSync(temporaryPath, 'wx', 0o600)
+        try {
+          try {
+            writeFileSync(descriptor, contents, 'utf8')
+            fsyncSync(descriptor)
+          } finally { closeSync(descriptor) }
+          renameSync(temporaryPath, this.settingsPath)
+          this.snapshots.set(settings, contents)
+        } finally { rmSync(temporaryPath, { force: true }) }
+      }).immediate()
+    } finally { database.close() }
   }
 }
 

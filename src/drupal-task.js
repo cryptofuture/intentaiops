@@ -1,5 +1,5 @@
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
-import { buildLinuxPhpApplicationFoundation, linuxPhpApplicationProfile } from './linux-php-foundation.js'
+import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile } from './linux-php-foundation.js'
 
 const VERSION = '11.4.4'
 const ARCHIVE_URL = `https://ftp.drupal.org/files/projects/drupal-${VERSION}.tar.gz`
@@ -77,7 +77,7 @@ function configureNativePlan (built, taskId, linuxContext) {
   renameCommand(built.plan, 'verify-application', 'verify-drupal', nativeVerifyCommand(profile), 'Verify Drupal, clean URLs, database state, files permissions, cron, and the external marker')
   enhanceNativeModuleRestore(built.plan, state, linuxContext)
   built.plan.modifiedFiles.push(`${ARTIFACTS}/drupal.tar.gz`, `${state}/install-drupal.php`, `${state}/reconcile-drupal.php`)
-  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/sites/default/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/sites/default/settings.php`)} && test -f ${quote(`${WEB_ROOT}/sites/default/files/.webminai-cron-ok`)} && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/sites/default/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/sites/default/settings.php`)} && test -f ${quote(`${WEB_ROOT}/sites/default/files/.webminai-cron-ok`)} && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(WEB_ROOT)} && test ! -e ${quote(ARTIFACTS)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)}`
 }
 
@@ -89,7 +89,7 @@ function configureComposePlan (built, taskId, linuxContext) {
   renameCommand(built.plan, 'initialize-application', 'initialize-drupal', composeInitializeCommand(linuxContext), 'Install Drupal and reconcile marker content and cron inside the container')
   replaceCommand(built.plan, 'verify-compose', composeVerifyCommand(linuxContext), 'Verify Compose health, clean URLs, persistence, cron, and the Drupal marker')
   built.plan.modifiedFiles.push(`${SERVICE_ROOT}/compose.yaml`, `${SERVICE_ROOT}/php-fpm.conf`, `${SERVICE_ROOT}/nginx.conf`, `${SERVICE_ROOT}/install-drupal.php`, `${SERVICE_ROOT}/reconcile-drupal.php`)
-  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq drupal && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T drupal test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/files/.webminai-cron-ok && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq drupal && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T drupal test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/files/.webminai-cron-ok && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(SERVICE_ROOT)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && { ! command -v docker >/dev/null 2>&1 || ! docker ps -aq --filter label=com.docker.compose.project=${quote(PROJECT)} | grep -q .; }`
 }
 
@@ -201,8 +201,8 @@ function nativeVerifyCommand (profile) {
     `mariadb --protocol=socket -uroot -Nse ${quote(`SELECT COUNT(*) FROM ${DATABASE}.users_field_data WHERE name='webminai_admin';`)} | grep -Fxq 1`,
     `address=$(${profile.primaryAddressCommand})`,
     '[ -n "$address" ]',
-    `curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 "http://$address:${PORT}/" | grep -Fq ${MARKER}`,
-    `curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/user/login" | grep -Fq 'form_id'`,
+    `${httpMarkerCheck(`curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 "http://$address:${PORT}/"`, MARKER)}`,
+    `${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/user/login"`, 'form_id')}`,
     "printf '%s\\n' verification-passed"
   ].join('; ')
 }
@@ -308,7 +308,7 @@ function composeInitializeCommand (linuxContext) {
     `docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/files/.webminai-cron-ok`,
     `address=$(${addressCommand})`,
     '[ -n "$address" ]',
-    `ready=; for attempt in $(seq 1 30); do if curl --fail --location --silent --show-error --max-time 3 "http://$address:${PORT}/" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done`,
+    `ready=; for attempt in $(seq 1 30); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 3 "http://$address:${PORT}/" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done`,
     '[ "$ready" = yes ]',
     "printf '%s\\n' drupal-installed"
   ].join('; ')
@@ -316,7 +316,7 @@ function composeInitializeCommand (linuxContext) {
 
 function composeVerifyCommand (linuxContext) {
   const addressCommand = linuxContext?.applications?.wordpress?.primaryAddressCommand ?? "ip -4 -o route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i == \"src\") {print $(i+1); exit}}'"
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq drupal; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx; docker compose -p ${quote(PROJECT)} exec -T drupal test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/settings.php; docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/files/.webminai-cron-ok; address=$(${addressCommand}); [ -n "$address" ]; curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/" | grep -Fq ${MARKER}; curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/user/login" | grep -Fq form_id; printf '%s\\n' verification-passed`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq drupal; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx; docker compose -p ${quote(PROJECT)} exec -T drupal test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/settings.php; docker compose -p ${quote(PROJECT)} exec -T drupal test -f /var/www/html/sites/default/files/.webminai-cron-ok; address=$(${addressCommand}); [ -n "$address" ]; ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/"`, MARKER)}; ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/user/login"`, 'form_id')}; printf '%s\\n' verification-passed`
 }
 
 function fpmSocketConfig () {

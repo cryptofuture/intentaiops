@@ -128,6 +128,16 @@ test('Compose n8n task uses protected secrets and persistent SQLite data', () =>
   }
 })
 
+for (const preferred of [false, true]) {
+  test(`n8n ${preferred ? 'Compose' : 'native'} rollback removes recorded additions without global autoremove`, () => {
+    const { plan } = buildN8nTask(123, contexts.debian, { preferred, ready: true })
+    const rollback = plan.revertCommands.find(item => item.id === (preferred ? 'restore-docker' : 'restore-packages')).command
+    assert.match(rollback, /xargs -r apt-get purge -y/u)
+    assert.match(rollback, /packages\.added/u)
+    assert.doesNotMatch(rollback, /\bautoremove\b/u)
+  })
+}
+
 test('n8n release is pinned', () => {
   assert.deepEqual(n8nRelease(), {
     version: '2.33.7',

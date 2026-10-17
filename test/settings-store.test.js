@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -10,6 +12,110 @@ import { TaskStore } from '../src/task-store.js'
 
 const PASSPHRASE = 'correct horse battery staple'
 
+test('concurrent host refreshes sharing settings do not conflict or lose either history', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-settings-shared-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new SettingsStore(root)
+  const settings = await store.initialize()
+  const fingerprints = [`SHA256:${'a'.repeat(64)}`, `SHA256:${'b'.repeat(64)}`]
+  for (const [index, fingerprint] of fingerprints.entries()) {
+    await store.addServer({ settings, passphrase: PASSPHRASE, serverId: `lab${index}`, connectionUrl: `ssh://lab${index}.example.test`, hostFingerprint: fingerprint })
+  }
+  await Promise.all(fingerprints.map((fingerprint, index) => store.registerHostFingerprint({ settings, serverId: `lab${index}`, fingerprint })))
+  const fresh = await store.load()
+  for (const [index, fingerprint] of fingerprints.entries()) {
+    assert.equal(fresh.servers[`lab${index}`].hostFingerprint, fingerprint)
+    assert.equal(fresh.servers[`lab${index}`].historyId, settings.servers[`lab${index}`].historyId)
+  }
+})
+
+test('stale host refresh cannot overwrite settings changed by another session', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-settings-conflict-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const first = new SettingsStore(root)
+  const settings = await first.initialize()
+  const fingerprint = `SHA256:${'a'.repeat(64)}`
+  await first.addServer({ settings, passphrase: PASSPHRASE, serverId: 'lab', connectionUrl: 'ssh://lab.example.test', hostFingerprint: fingerprint })
+  const second = new SettingsStore(root)
+  const stale = await second.load()
+  await first.setCodexSettings({ settings, model: 'gpt-5.6-sol', reasoningEffort: 'low' })
+  const before = await readFile(first.settingsPath, 'utf8')
+  await assert.rejects(second.registerHostFingerprint({ settings: stale, serverId: 'lab', fingerprint }), /Settings changed in another session/)
+  assert.equal(await readFile(first.settingsPath, 'utf8'), before)
+  assert.equal((await second.load()).codex.model, 'gpt-5.6-sol')
+  assert.equal((await stat(path.join(root, 'settings-write-lock.sqlite3'))).mode & 0o777, 0o600)
+})
+
+test('concurrent processes cannot both save the same settings snapshot', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-settings-processes-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new SettingsStore(root)
+  await store.initialize()
+  const script = `
+    import { SettingsStore } from ${JSON.stringify(new URL('../src/settings-store.js', import.meta.url).href)}
+    const store = new SettingsStore(process.argv[1])
+    const settings = await store.load()
+    process.on('message', async () => {
+      try {
+        await store.setCodexSettings({ settings, model: process.argv[2], reasoningEffort: 'low' })
+        process.send('saved')
+      } catch (error) {
+        process.send(error.message.includes('Settings changed in another session') ? 'conflict' : 'unexpected error')
+      } finally { process.disconnect() }
+    })
+    process.send('ready')
+  `
+  const workers = ['gpt-5.6-terra', 'gpt-5.6-sol'].map(model => spawn(process.execPath, ['--input-type=module', '-e', script, root, model], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }))
+  t.after(() => { for (const worker of workers) if (worker.exitCode === null) worker.kill() })
+  const exits = workers.map(worker => once(worker, 'exit'))
+  await Promise.all(workers.map(worker => once(worker, 'message', { signal: AbortSignal.timeout(10000) })))
+  const outcomes = workers.map(worker => once(worker, 'message', { signal: AbortSignal.timeout(10000) }))
+  for (const worker of workers) worker.send('save')
+  assert.deepEqual((await Promise.all(outcomes)).map(([value]) => value).sort(), ['conflict', 'saved'])
+  assert.ok((await exits[0])[0] === 0 && (await exits[1])[0] === 0)
+  assert.equal((await store.load()).codex.reasoningEffort, 'low')
+})
+
+test('stale settings cannot restore old encryption after passphrase rotation', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-settings-rekey-conflict-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const first = new SettingsStore(root)
+  const settings = await first.initialize()
+  await first.initializeVault({ settings, passphrase: PASSPHRASE })
+  const second = new SettingsStore(root)
+  const stale = await second.load()
+  await first.changePassphrase({ settings, currentPassphrase: PASSPHRASE, newPassphrase: 'another sufficiently long test passphrase' })
+  await first.setTerminalControls({ settings, controls: { ...settings.controls, vimKeys: true } })
+  const before = await readFile(first.settingsPath, 'utf8')
+  await assert.rejects(second.setCodexSettings({ settings: stale, model: 'gpt-5.6-sol', reasoningEffort: 'low' }), /Settings changed in another session/)
+  assert.equal(await readFile(first.settingsPath, 'utf8'), before)
+  const fresh = await second.load()
+  await second.unlockVault({ settings: fresh, passphrase: 'another sufficiently long test passphrase' })
+  await assert.rejects(second.unlockVault({ settings: fresh, passphrase: PASSPHRASE }))
+})
+
+test('settings write ownership is released when its process crashes', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-settings-lock-crash-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new SettingsStore(root)
+  const settings = await store.initialize()
+  const script = `
+    import Database from 'better-sqlite3'
+    const database = new Database(process.argv[1])
+    database.exec('BEGIN IMMEDIATE')
+    process.send('locked')
+    setInterval(() => {}, 1000)
+  `
+  const worker = spawn(process.execPath, ['--input-type=module', '-e', script, path.join(root, 'settings-write-lock.sqlite3')], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+  t.after(() => { if (worker.exitCode === null) worker.kill() })
+  const exited = once(worker, 'exit')
+  await once(worker, 'message', { signal: AbortSignal.timeout(10000) })
+  worker.kill('SIGKILL')
+  await exited
+  await store.setCodexSettings({ settings, model: 'gpt-5.6-sol', reasoningEffort: 'low' })
+  assert.equal((await store.load()).codex.model, 'gpt-5.6-sol')
+})
+
 test('Codex model settings are validated and persisted', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'intentaiops-codex-settings-'))
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -19,6 +125,8 @@ test('Codex model settings are validated and persisted', async t => {
   assert.deepEqual(settings.codex, { model: 'gpt-5.6-luna', reasoningEffort: 'medium' })
   await store.setCodexSettings({ settings, model: 'gpt-5.6-terra', reasoningEffort: 'low' })
   assert.deepEqual((await store.load()).codex, { model: 'gpt-5.6-terra', reasoningEffort: 'low' })
+  await store.setCodexSettings({ settings, model: 'mimo-v2.6-pro', reasoningEffort: 'high' })
+  assert.deepEqual((await store.load()).codex, { model: 'mimo-v2.6-pro', reasoningEffort: 'high' })
   await assert.rejects(store.setCodexSettings({ settings, model: 'gpt-5.5', reasoningEffort: 'medium' }), /unsupported Codex model/u)
 })
 
@@ -275,8 +383,14 @@ test('settings store encrypts server secrets and preserves stage 2 state', async
     store.decryptServer({ settings: reloaded, passphrase: 'this passphrase is wrong', serverId: 'primary' })
   )
 
-  await store.setStage2State({
+  await assert.rejects(store.setStage2State({
     settings: reloaded,
+    serverId: 'primary',
+    desired: 'active',
+    ownership: 'managed'
+  }), /Settings changed in another session/)
+  await store.setStage2State({
+    settings: reloadedAfterChange,
     serverId: 'primary',
     desired: 'active',
     ownership: 'managed'
@@ -284,6 +398,7 @@ test('settings store encrypts server secrets and preserves stage 2 state', async
   const updated = await store.load()
   assert.equal(updated.servers.primary.desiredStage2, 'active')
   assert.equal(updated.servers.primary.netdataOwnership, 'managed')
+  assert.equal((await store.decryptServer({ settings: updated, passphrase: 'a different vault passphrase', serverId: 'primary' })).sshCredential, null)
 })
 
 test('temporary and re-added hosts retain fingerprint-associated task history without retaining the connection', async t => {

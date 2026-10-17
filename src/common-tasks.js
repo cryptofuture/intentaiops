@@ -766,6 +766,7 @@ function catalogFoundationIds (catalogId, options) {
   const planUsesDocker = options.docker?.preferred === true
   const phpApplications = new Set(['wordpress-linux', 'woocommerce-linux', 'joomla-linux', 'drupal-linux', 'prestashop-linux', 'moodle-linux', 'magento-linux'])
   if (planUsesDocker) return ['linux-baseline', 'linux-docker-readiness', 'linux-docker-compose', ...common]
+  if (catalogId === 'n8n-linux') return ['linux-baseline', ...common]
   const database = catalogId === 'mattermost-linux' || catalogId === 'odoo-linux' ? 'linux-postgresql' : 'linux-mariadb'
   return phpApplications.has(catalogId)
     ? ['linux-baseline', 'linux-nginx-site', 'linux-php-fpm-socket', database, ...common]
@@ -970,7 +971,7 @@ function buildCronJob (taskId, definition, options) {
   const file = alpine ? '/etc/crontabs/root' : '/etc/cron.d/webminai-test'
   const apply = alpine
     ? `${packageCapture(state, packageName)}; if [ -f ${quote(file)} ]; then cp -a ${quote(file)} ${quote(`${state}/root-crontab-before`)}; else : > ${quote(`${state}/root-crontab-absent`)}; fi; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall(packageName)}; fi; grep -v 'WEBMINAI_TEST_CRON' ${quote(file)} > ${quote(`${state}/root-crontab-new`)} || true; printf '%s\n' '17 3 * * * /usr/bin/touch /tmp/webminai-cron-ran # WEBMINAI_TEST_CRON' >> ${quote(`${state}/root-crontab-new`)}; install -o root -g root -m 0600 ${quote(`${state}/root-crontab-new`)} ${quote(file)}`
-    : `${packageCapture(state, packageName)}; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall(packageName)}; fi; install -d -o root -g root -m 0755 /etc/cron.d; printf '%s\n' '17 3 * * * root /usr/bin/touch /tmp/webminai-cron-ran' > ${quote(file)}; chmod 0644 ${quote(file)}`
+    : `test ! -e ${quote(file)}; test ! -L ${quote(file)}; ${packageCapture(state, packageName)}; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall(packageName)}; fi; install -d -o root -g root -m 0755 /etc/cron.d; printf '%s\n' '17 3 * * * root /usr/bin/touch /tmp/webminai-cron-ran' > ${quote(file)}; chmod 0644 ${quote(file)}`
   const restore = alpine
     ? `if [ -f ${quote(`${state}/root-crontab-before`)} ]; then cp -a ${quote(`${state}/root-crontab-before`)} ${quote(file)}; elif [ -e ${quote(`${state}/root-crontab-absent`)} ]; then rm -f -- ${quote(file)}; fi`
     : `rm -f -- ${quote(file)}`

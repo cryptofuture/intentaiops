@@ -109,6 +109,8 @@ Use at least 12 characters, preferably five or more random words or at least 20 
 
 After unlocking, choose `Change vault passphrase` at any time. Intent AI Ops decrypts all host entries with the current in-memory passphrase, generates fresh KDF parameters and a salt, atomically re-encrypts the complete vault with the new passphrase, and keeps the vault unlocked with the new value. The old passphrase no longer decrypts the file.
 
+Settings writes use a private SQLite coordination file and compare the loaded JSON snapshot before replacing it. A stale session cannot overwrite newer settings or restore older vault encryption. If another session saved changes, restart the stale CLI or console before saving again. Restart all running instances after upgrading to this protection; older binaries do not participate. The encrypted JSON format is unchanged, and the coordination file contains no credentials. SQLite releases ownership after a crash.
+
 ### 3. Add a host using an SSH key
 
 Choose `Add host` for a persistent connection or `Temporarily add host (removed on exit)` for a session-only connection:
@@ -410,7 +412,7 @@ INFO: Enter submits • Shift+Enter or Ctrl+J adds a line • ↑/↓ recalls ta
 [Codex turn.started] Codex is analyzing the task
 ```
 
-Codex defaults to `gpt-5.6-luna` with medium reasoning. The dashboard can persist a different supported pairing in `settings.json`: `gpt-5.6-luna`, `gpt-5.6-terra`, or `gpt-5.6-sol`, with low or medium reasoning. Its JSONL progress and reasoning summaries are shown as they arrive and saved with the task. Codex receives the sanitized Netdata inventory, including Agent information, contexts, functions, container visibility, and alerts, plus optional `context.md`, the policy extracted from `rules.json`, and your request. On Linux, this also includes Intent AI Ops's cached host profile: the exact `/etc/os-release` identity, architecture, kernel, init/service and package-manager conventions, detected stack commands and versions, distro-specific package-name candidates, and checked official documentation/package/release links. It does not receive the SSH URL, vault, password, or action key.
+Codex defaults to `gpt-5.6-luna` with medium reasoning. The dashboard can persist a different supported pairing in `settings.json`: `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, or `mimo-v2.6-pro`, with low, medium, or high reasoning. Selecting `mimo-v2.6-pro` runs Codex through the local `mimo` profile and validates schema-directed JSON because that provider does not support native JSON-schema responses. Its JSONL progress and reasoning summaries are shown as they arrive and saved with the task. Codex receives the sanitized Netdata inventory, including Agent information, contexts, functions, container visibility, and alerts, plus optional `context.md`, the policy extracted from `rules.json`, and your request. On Linux, this also includes Intent AI Ops's cached host profile: the exact `/etc/os-release` identity, architecture, kernel, init/service and package-manager conventions, detected stack commands and versions, distro-specific package-name candidates, and checked official documentation/package/release links. It does not receive the SSH URL, vault, password, or action key.
 
 The Linux profile refresh is part of an active Stage 2 health/status read. Intent AI Ops derives the host facts through the token-authenticated loopback plugin, checks only a curated official distro release URL from the controller, and never sends the host inventory or SSH details to that site. It stores no raw web page content. Only bounded reachability/version facts and official URLs are retained, with a 24-hour online cache. An unavailable site does not make the host unhealthy: the last profile is retained with a refresh warning, and local facts continue to work.
 
@@ -708,7 +710,7 @@ Host authentication is delegated to OpenSSH. The initial interactive connection 
 
 ## Codex planner
 
-The planner defaults to `gpt-5.6-luna` with `medium` reasoning. The dashboard stores one validated model/reasoning pair in `settings.json`; supported models are `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol`, and supported reasoning levels are `low` and `medium`. Codex runs in a newly created temporary directory containing only:
+The planner defaults to `gpt-5.6-luna` with `medium` reasoning. The dashboard stores one validated model/reasoning pair in `settings.json`; supported models are `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, and `mimo-v2.6-pro`, and supported reasoning levels are `low`, `medium`, and `high`. Selecting `mimo-v2.6-pro` loads the local `mimo` Codex profile. Codex runs in a newly created temporary directory containing only:
 
 - sanitized Netdata inventory;
 - non-secret server context;
@@ -888,6 +890,12 @@ sudo scripts/lxd-test-lab-remove-all.sh
 ```
 
 The setup is idempotent: running `up` again starts stopped lab instances, reapplies the SSH/user configuration, and verifies connectivity and passwordless sudo. Image downloads and package installation can take several minutes on the first run.
+
+### Review Linux system fixtures through the CLI
+
+Run `intentaiops --lab-tasks` (or `./bin/intentaiops.js --lab-tasks` from this checkout), unlock the existing vault, connect to a disposable Linux lab host, and choose **Run a verified common task**. This opt-in adds the existing package, user, nginx, service, timer, cron, logrotate and tmpfiles fixtures to that picker. The normal catalog stays unchanged without the flag. Host eligibility still excludes container swap and systemd fixtures on OpenRC hosts.
+
+Each fixture still uses the same displayed plan, explicit approval, validator, journal, signed Stage 2 execution and separately reviewed rollback. The flag neither runs a test automatically nor adds these fixtures to ordinary AI-routing candidates. Fixtures use fixed test names and paths; do not enable them for production testing. Keep results in [the Linux checkpoint](docs/linux-lab-validation-status.md) and reconcile uncertain jobs before continuing.
 
 ## Local FreeBSD VM test lab
 

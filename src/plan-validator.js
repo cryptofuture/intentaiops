@@ -181,7 +181,8 @@ export async function executeApprovedPlan ({
 
     const startedAt = Date.now()
     await onExecutionEvent?.({ type: 'plan_approved', commandId: item.id })
-    const execution = await runCommandWithRetry(item, netdata, onExecutionEvent, onProgress)
+    const execution = await runCommandWithRetry(item, netdata, onExecutionEvent, onProgress, beforeCommand)
+    if (execution.paused) break
     const { rawResult, executionError, attempts, recoveryRequired, diagnostics } = execution
     const result = redactSensitiveResult(item.command, rawResult)
     const status = rawResult.exitCode === 0 && !rawResult.timedOut && !['failed', 'timed_out', 'cancelled', 'unknown'].includes(rawResult.state) ? 'completed' : 'failed'
@@ -214,10 +215,11 @@ function validateRetry (item) {
   if (states !== undefined && (!Array.isArray(states) || states.length < 1 || states.length > 2 || states.some(state => !['failed', 'timed_out'].includes(state)) || new Set(states).size !== states.length)) throw new TypeError(`command ${item.id} has invalid retry states`)
 }
 
-async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress) {
+async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress, beforeCommand) {
   const retry = item.retry ?? { attempts: 1, intervalMs: 0, exitCodes: [] }
   let rawResult
   let executionError
+  let diagnostics
   let recoveryRequired = false
   let lastRecoveryState
   for (let attempt = 1; attempt <= retry.attempts; attempt++) {
@@ -243,6 +245,7 @@ async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress)
       await onProgress?.({ phase: 'execution-recovery', commandId: item.id, ...metadata })
     }
     const before = await captureExecutionEvidence(netdata, { item })
+    if (!await beforeCommand(item)) return attempt === 1 ? { paused: true } : { rawResult, executionError, attempts: attempt - 1, recoveryRequired, diagnostics }
     await event('command_prepared', before ? { evidenceBefore: before } : {})
     await event('command_dispatched')
     executionError = undefined
@@ -268,7 +271,7 @@ async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress)
     const after = executionError && !executionError.reconnected && !executionError.cause?.reconnected
       ? { version: 1, availability: 'unavailable', observedAt: new Date().toISOString() }
       : await captureExecutionEvidence(netdata, { item, before })
-    const diagnostics = executionDiagnostics({ item, result: rawResult, error: executionError, before, after })
+    diagnostics = executionDiagnostics({ item, result: rawResult, error: executionError, before, after })
     const completed = rawResult.exitCode === 0 && !rawResult.timedOut && !['failed', 'timed_out', 'cancelled', 'unknown'].includes(rawResult.state)
     await event(executionError || rawResult.exitCode === null || rawResult.state === 'unknown' ? 'command_outcome_unknown' : completed ? 'command_completed' : 'command_failed', { exitCode: rawResult.exitCode, ...(after ? { evidenceAfter: after } : {}), ...(diagnostics.length ? { diagnostics } : {}) })
     if (recoveryRequired) {

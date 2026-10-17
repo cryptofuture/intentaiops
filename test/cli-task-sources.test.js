@@ -48,3 +48,18 @@ test('interactive task menus expose verified platform applications and AI-assist
   assert.match(source, /revertedNginxVerifier/)
   assert.doesNotMatch(await readFile(new URL('../src/terminal-ui.js', import.meta.url), 'utf8'), /SettingsStore|SystemSsh|Stage2Service|AdminService/)
 })
+
+test('legacy Linux system fixtures require an explicit lab picker opt-in and retain eligibility checks', async () => {
+  const options = { platform: 'linux', inventory: { webminaiLinuxContext: { management: { serviceManager: 'systemd' } }, webminaiDocker: { hostIsContainer: true } } }
+  assert.ok(!eligibleInteractiveCommonTasks(options).some(task => task.category === 'system'))
+  const lab = eligibleInteractiveCommonTasks({ ...options, labTasks: true })
+  for (const id of ['install-htop', 'install-jq', 'system-user', 'systemd-service', 'systemd-timer', 'cron-job', 'logrotate-rule', 'tmpfiles-rule', 'nginx-static-site']) assert.ok(lab.some(task => task.id === id), id)
+  assert.ok(!lab.some(task => task.id === 'swap-file'))
+  const alpine = eligibleInteractiveCommonTasks({ platform: 'linux', labTasks: true, inventory: { webminaiLinuxContext: { management: { serviceManager: 'openrc' } }, webminaiDocker: { hostIsContainer: true } } })
+  assert.ok(!alpine.some(task => ['swap-file', 'systemd-service', 'systemd-timer', 'tmpfiles-rule'].includes(task.id)))
+  for (const platform of ['freebsd', 'windows', 'macos']) assert.deepEqual(eligibleInteractiveCommonTasks({ platform, labTasks: true }), eligibleInteractiveCommonTasks({ platform }))
+  const source = await readFile(new URL('../src/cli.js', import.meta.url), 'utf8')
+  assert.match(source, /labTasks: cliOptions\.labTasks === true/u)
+  assert.match(source, /status, labTasks: context\.labTasks/u)
+  assert.match(source, /argument === '--lab-tasks'/u)
+})

@@ -44,6 +44,13 @@ changes are required. Existing signed plugin versions remain usable.
 
 ## Platform coverage
 
+Explicit apt/dpkg lock-owner errors produce `PACKAGE_MANAGER_BUSY`, separate from
+permission denial and unknown causes. Wait for the existing package manager; do
+not remove lock files or kill its process. Native Debian/Ubuntu Jellyfin installs
+wait up to 120 seconds for the dpkg lock. This neither retries a dispatched task
+nor changes approval or uncertain-outcome recovery rules. Other package managers
+and translated lock messages are not covered by this classifier.
+
 | Target | Evidence collected or preserved |
 | --- | --- |
 | All hosts | Remote timeout/cancellation, exit status/signal, controller disappearance, explicit storage/quota/permission/allocation errors, existing application failure categories and bounded transport error-chain classification |

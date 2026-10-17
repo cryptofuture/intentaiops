@@ -187,7 +187,12 @@ export class OperatorController {
     return this.withAdmin(hostId, async admin => {
       this.checkVersion(hostId, taskId, expectedVersion)
       const results = await admin.revertTask({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, reviewedPlan: revision?.plan, approve: async () => true, onResult: result => this.tasks.appendRevertResult(hostId, taskId, result) })
-      this.tasks.saveRevertResults(hostId, taskId, results)
+      const saved = this.tasks.saveRevertResults(hostId, taskId, results)
+      if (task.groupRunId) {
+        this.runs.updateHost(task.groupRunId, hostId, { status: saved.status, error: saved.status === 'reverted' ? null : 'One or more rollback commands did not complete' })
+        const run = this.runs.get(task.groupRunId)
+        this.runs.updateRun(run.id, run.hosts.every(host => host.status === 'reverted') ? 'reverted' : run.hosts.some(host => host.status === 'revert_failed') ? 'revert_failed' : 'partial')
+      }
       this.record({ type: 'rollback_finished', hostId, taskId })
       return this.inspect(hostId, taskId)
     })
@@ -220,8 +225,8 @@ export class OperatorController {
   record (event, source = null) {
     const hostId = event.hostId ?? event.serverId
     const runId = event.runId ?? (hostId && event.taskId ? this.tasks.get(hostId, event.taskId).groupRunId : null)
-    const payload = JSON.stringify(this.sanitize({ version: 1, timestamp: new Date().toISOString(), ...event, hostId, runId })).slice(0, 128 * 1024)
-    if (payload.length >= 128 * 1024) throw new Error('event exceeds size limit')
+    const payload = JSON.stringify(this.sanitize({ version: 1, timestamp: new Date().toISOString(), ...event, hostId, runId }))
+    if (Buffer.byteLength(payload) >= 128 * 1024) throw new Error('event exceeds size limit')
     this.database(database => database.prepare('INSERT OR IGNORE INTO events (source, payload) VALUES (?, ?)').run(source, payload))
   }
 

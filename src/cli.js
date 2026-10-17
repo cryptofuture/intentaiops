@@ -125,6 +125,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
     hostRuntime,
     hostSessions,
     directoryAliases,
+    labTasks: cliOptions.labTasks === true,
     get applicationDefaults () { return applicationDefaults },
     set applicationDefaults (value) { applicationDefaults = value },
     get passphrase () { return passphrase }
@@ -1530,9 +1531,9 @@ async function runConnectedHostSession ({
         const taskPlatform = status.capabilities.platform?.os
         ui.info('Refreshing the host inventory before resolving eligible verified tasks...')
         const inventory = await admin.refreshInventory({ settings, passphrase, serverId })
-        const definitions = catalogChoiceRows(eligibleInteractiveCommonTasks({ platform: taskPlatform, inventory, status }))
+        const definitions = catalogChoiceRows(eligibleInteractiveCommonTasks({ platform: taskPlatform, inventory, status, labTasks: context.labTasks }))
         const definition = await ui.searchableDetailChoose({
-          title: `Verified ${taskPlatform} tasks eligible for this host`,
+          title: `Verified ${taskPlatform} tasks eligible for this host${context.labTasks && taskPlatform === 'linux' ? ' (includes disposable lab fixtures)' : ''}`,
           rows: definitions,
           rowSearchText: row => row.searchText,
           renderRow: (row, options) => ui.truncateText(`${row.label}  ${row.description}`, options.width),
@@ -2349,7 +2350,8 @@ export function eligibleInteractiveCommonTasks (options) {
   return [
     ...listEligibleCommonTasks({ ...context, category: 'maintenance' }),
     ...listEligibleCommonTasks({ ...context, category: 'diagnostic' }),
-    ...listEligibleCommonTasks({ ...context, category: 'application' })
+    ...listEligibleCommonTasks({ ...context, category: 'application' }),
+    ...(options.labTasks === true && context.platform === 'linux' ? listEligibleCommonTasks({ ...context, category: 'system' }) : [])
   ]
 }
 
@@ -2686,6 +2688,7 @@ function parseArguments (argv) {
     else if (argument === '--update') options.update = true
     else if (argument === '--debug') options.debug = true
     else if (argument === '--no-debug') options.debug = false
+    else if (argument === '--lab-tasks') options.labTasks = true
     else if (argument === '--data-root') {
       options.dataRoot = argv[++index]
       if (!options.dataRoot) throw new TypeError('--data-root requires a directory')
@@ -2697,11 +2700,12 @@ function parseArguments (argv) {
 function printHelp (ui) {
   ui.output.write(`Usage: ${CLI_NAME} --update\n`)
   ui.output.write(`       ${CLI_NAME} console [--console-actions] [--data-root DIRECTORY]\n`)
-  ui.output.write(`       ${CLI_NAME} [--debug|--no-debug] [--data-root DIRECTORY]\n\n`)
+  ui.output.write(`       ${CLI_NAME} [--debug|--no-debug] [--lab-tasks] [--data-root DIRECTORY]\n\n`)
   ui.output.write('Interactive AI-assisted administration over system OpenSSH and Netdata.\n')
   ui.output.write(`${PRODUCT_URL}\n`)
   ui.output.write(`\nUse --update to install the latest ${PRODUCT_NAME} package, then exit.\n`)
   ui.output.write('Debug tracing is enabled by default. Use --no-debug to suppress it.\n')
+  ui.output.write('Use --lab-tasks only on disposable Linux labs to include system fixtures in the verified task picker. Normal plan review is still required.\n')
 }
 
 function renderDebugEvent (ui, { phase, message }) {

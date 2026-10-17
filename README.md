@@ -161,9 +161,11 @@ The first run creates a vault and asks for a passphrase of at least 12 character
 
 The dashboard also lets you set one global administrator email. Verified application installers use it where software requires an initial administrator or contact address—for example, the WordPress administrator account, WooCommerce store contact, or another application's setup email. Relevant AI-planned tasks receive the same preference. The value is vault encrypted and is never used as an SSH username, host identifier, or Netdata identity. If no email is configured, Intent AI Ops uses the intentionally non-deliverable `intentaiops@example.invalid` fallback.
 
-Choose **Set Codex model** on the dashboard to use `gpt-5.6-luna`, `gpt-5.6-terra`, or `gpt-5.6-sol` with `low` or `medium` reasoning. The default is `gpt-5.6-luna` with `medium` reasoning, and the selection is saved in `settings.json` for subsequent tasks.
+Choose **Set Codex model** on the dashboard to use `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, or `mimo-v2.6-pro` with `low`, `medium`, or `high` reasoning. The default remains `gpt-5.6-luna` with `medium` reasoning. Selecting `mimo-v2.6-pro` runs Codex through the local `mimo` profile and validates schema-directed JSON because that provider does not support native JSON-schema responses. The selection is saved in `settings.json` for subsequent tasks.
 
 Choose **Controls** to configure wrapping menu navigation, optional `j`/`k` navigation, number shortcuts, shortcut hints, and automatic/color/monochrome output. These preferences are also saved in `settings.json`.
+
+If another CLI or console saves settings, a stale instance will ask you to restart instead of overwriting those changes. Restart all running instances after upgrading to this protection. Existing vaults and host configurations remain compatible.
 
 ## SSH and secret protection
 

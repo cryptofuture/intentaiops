@@ -19,6 +19,34 @@ test('terminal editor submits with Enter, inserts Shift+Enter, and recalls histo
   assert.equal(input.isPaused(), true)
 })
 
+test('terminal editor batches pasted characters and cancels pending redraws on submit', async () => {
+  const { input, output } = terminalPair()
+  const ui = new TerminalUi({ input, output })
+  const editing = ui.editor('Task')
+  const request = 'x'.repeat(1024)
+  for (const character of request) input.emit('keypress', character, { name: 'x' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.ok(output.text.length < request.length * 2 + 4096)
+  input.emit('keypress', 'y', { name: 'y' })
+  input.emit('keypress', '\r', { name: 'return' })
+  assert.equal(await editing, `${request}y`)
+  const submitted = output.text
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(output.text, submitted)
+  assert.equal(input.isRaw, false)
+})
+
+test('terminal editor restores input when a deferred redraw fails', async () => {
+  const { input, output } = terminalPair()
+  const ui = new TerminalUi({ input, output })
+  const editing = ui.editor('Task')
+  output.write = () => { throw new Error('output closed') }
+  input.emit('keypress', 'x', { name: 'x' })
+  await assert.rejects(editing, /output closed/u)
+  assert.equal(input.isRaw, false)
+  assert.equal(input.isPaused(), true)
+})
+
 test('terminal choices support left and right selection', async () => {
   const { input, output } = terminalPair()
   const ui = new TerminalUi({ input, output })

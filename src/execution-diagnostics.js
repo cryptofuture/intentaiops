@@ -35,7 +35,10 @@ export function executionDiagnostics ({ item = { id: 'execution' }, result = {},
   if (failed) {
     for (const [code, pattern, scope, explanation] of patterns) if (pattern.test(text)) add(code, 'confirmed', scope, explanation, {}, 'explicit-error')
     const failure = classifyFailure({ item, result, error })
-    if (!['COMMAND_FAILED', 'TIMEOUT', 'PERMISSION_DENIED', 'INSUFFICIENT_MEMORY'].includes(failure.code)) add(failure.code, 'confirmed', 'remote-command', `Recorded failure category: ${failure.code}.`, {}, 'failure-classifier')
+    const explanation = failure.code === 'PACKAGE_MANAGER_BUSY'
+      ? 'The package manager reported an installation lock held by another process. Wait for it to finish; do not remove its lock.'
+      : `Recorded failure category: ${failure.code}.`
+    if (!['COMMAND_FAILED', 'TIMEOUT', 'PERMISSION_DENIED', 'INSUFFICIENT_MEMORY'].includes(failure.code)) add(failure.code, 'confirmed', 'remote-command', explanation, {}, 'failure-classifier')
   }
   const elapsed = Date.parse(after?.observedAt) - Date.parse(before?.observedAt)
   const comparable = before?.availability === 'available' && after?.availability === 'available' && before.platform === after.platform && Number.isFinite(elapsed) && elapsed >= 0

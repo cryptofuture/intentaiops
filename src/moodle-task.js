@@ -1,5 +1,5 @@
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
-import { buildLinuxPhpApplicationFoundation, linuxPhpApplicationProfile } from './linux-php-foundation.js'
+import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile } from './linux-php-foundation.js'
 
 const VERSION = '5.2.1'
 const SOURCE_COMMIT = '63e16b757ca8fee05b672a27c23ee27cc8f9fabb'
@@ -94,7 +94,7 @@ function configureNativePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'verify-moodle', nativeVerifyCommand(profile), 'Verify Moodle, database state, writable data, cron, socket, login, and the external marker')
   extendNativeRevert(built.plan, profile, state, taskId)
   built.plan.modifiedFiles.push(`${ARTIFACTS}/moodle.tar.gz`, `${WEB_ROOT}/.webminai-installer-argv.php`, `${WEB_ROOT}/config.php`, cronPath(profile))
-  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/config.php`)} && test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)} && test -S ${quote(profile.phpFpmListener)} && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/config.php`)} && test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)} && test -S ${quote(profile.phpFpmListener)} && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(WEB_ROOT)} && test ! -e ${quote(DATA_ROOT)} && test ! -e ${quote(ARTIFACTS)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && test ! -e ${quote(cronPath(profile))}`
 }
 
@@ -117,7 +117,7 @@ function configureComposePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'verify-compose', composeVerifyCommand(linuxContext), 'Verify Compose health, data isolation, cron, socket, login, and the Moodle marker')
   built.plan.modifiedFiles.push(`${SERVICE_ROOT}/compose.yaml`, `${SERVICE_ROOT}/Dockerfile`, `${SERVICE_ROOT}/docker-entrypoint.sh`, `${SERVICE_ROOT}/php-fpm.conf`, `${SERVICE_ROOT}/php.ini`, `${SERVICE_ROOT}/nginx.conf`, `${SERVICE_ROOT}/installer-argv.php`, SWAP_FILE)
   built.plan.modifiedFiles.push('/var/www/html/public/webminai-health.txt')
-  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq moodle && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq cron && docker compose -p ${quote(PROJECT)} exec -T moodle test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/webminai-health.txt | grep -Fq ${MARKER}`
+  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq moodle && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq cron && docker compose -p ${quote(PROJECT)} exec -T moodle test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/webminai-health.txt`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(SERVICE_ROOT)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && test ! -e ${quote(SWAP_FILE)} && { ! command -v docker >/dev/null 2>&1 || { ! docker ps -aq --filter label=com.docker.compose.project=${quote(PROJECT)} | grep -q . && ! docker buildx inspect ${quote(builder)} >/dev/null 2>&1; }; }`
 }
 
@@ -443,8 +443,8 @@ function nativeVerifyCommand (profile) {
     `if command -v setpriv >/dev/null 2>&1 && setpriv --help 2>&1 | grep -q -- --reuid; then setpriv --reuid=${quote(profile.phpFpmUser)} --regid=${quote(profile.phpFpmGroup)} --init-groups /bin/sh -c ${quote(`test -w ${DATA_ROOT}`)}; else su -s /bin/sh -c ${quote(`test -w ${DATA_ROOT}`)} ${quote(profile.phpFpmUser)}; fi`,
     `address=$(${profile.primaryAddressCommand})`,
     '[ -n "$address" ] || { printf \'%s\\n\' HOST_ADDRESS_UNAVAILABLE >&2; exit 1; }',
-    `curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 "http://$address:${PORT}/" | grep -Fq ${MARKER} || { printf '%s\n' APP_HTTP_MARKER_NOT_READY >&2; exit 1; }`,
-    `curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/login/index.php" | grep -Fq login`,
+    `${httpMarkerCheck(`curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 "http://$address:${PORT}/"`, MARKER)} || { printf '%s\n' APP_HTTP_MARKER_NOT_READY >&2; exit 1; }`,
+    `${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/login/index.php"`, 'login')}`,
     "printf '%s\n' verification-passed"
   ].join('; ')
 }
@@ -648,7 +648,7 @@ function composeInitializeCommand (linuxContext) {
     `docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/config.php`,
     `docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok`,
     `docker compose -p ${quote(PROJECT)} exec -T moodle /bin/sh -c ${quote(`printf '%s\n' ${MARKER} > /var/www/html/public/webminai-health.txt && chown www-data:www-data /var/www/html/public/webminai-health.txt && chmod 0644 /var/www/html/public/webminai-health.txt`)}`,
-    `ready=; for attempt in $(seq 1 60); do if curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/webminai-health.txt" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done`,
+    `ready=; for attempt in $(seq 1 60); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/webminai-health.txt" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done`,
     '[ "$ready" = yes ]',
     "printf '%s\n' moodle-installed"
   ].join('; ')
@@ -656,7 +656,7 @@ function composeInitializeCommand (linuxContext) {
 
 function composeVerifyCommand (linuxContext) {
   const addressCommand = linuxContext?.applications?.wordpress?.primaryAddressCommand ?? "ip -4 -o route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i == \"src\") {print $(i+1); exit}}'"
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; for service in moodle nginx cron; do docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq "$service"; done; docker compose -p ${quote(PROJECT)} exec -T moodle test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/config.php; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok; docker compose -p ${quote(PROJECT)} exec -T --user www-data moodle test -w /var/moodledata; address=$(${addressCommand}); [ -n "$address" ]; curl --fail --location --silent --show-error --max-time 20 "http://$address:${PORT}/webminai-health.txt" | grep -Fq ${MARKER}; curl --fail --silent --show-error --max-time 20 "http://$address:${PORT}/login/index.php" | grep -Eiq '<!DOCTYPE html|<html'; printf '%s\n' verification-passed`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; for service in moodle nginx cron; do docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq "$service"; done; docker compose -p ${quote(PROJECT)} exec -T moodle test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/config.php; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok; docker compose -p ${quote(PROJECT)} exec -T --user www-data moodle test -w /var/moodledata; address=$(${addressCommand}); [ -n "$address" ]; ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 20 "http://$address:${PORT}/webminai-health.txt"`, MARKER)}; ${httpMarkerCheck(`curl --fail --silent --show-error --max-time 20 "http://$address:${PORT}/login/index.php"`, '<!DOCTYPE html|<html', '-Ei')}; printf '%s\n' verification-passed`
 }
 
 function fpmSocketConfig () {

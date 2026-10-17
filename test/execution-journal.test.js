@@ -55,6 +55,40 @@ test('journal is durable, redacted, lease protected, and blocks plan replacement
   assert.throws(() => write({ type: 'execution_resumed' }), /ownership/u)
 })
 
+test('a competing execution cannot slip between plan immutability validation and persistence', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-plan-race-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new TaskStore(root)
+  const other = new TaskStore(root)
+  const task = store.create('host', 'Inspect')
+  const original = plan()
+  const replacement = { ...original, summary: 'Replacement' }
+  store.savePlan('host', task.id, original)
+  const access = store.withDatabase.bind(store)
+  let armed = true
+  let executed = false
+  store.withDatabase = (host, callback) => {
+    const result = access(host, callback)
+    if (armed) {
+      armed = false
+      let lease
+      try {
+        lease = other.acquireExecution(host, task.id, original)
+        other.appendExecutionEvent(host, task.id, lease.owner, { type: 'command_prepared', commandId: 'first', attemptId: 'competing-attempt' })
+        executed = true
+      } catch (error) { assert.match(error.message, /execution plan differs/u) } finally {
+        if (lease) other.releaseExecution(host, task.id, lease.owner)
+      }
+    }
+    return result
+  }
+  let failure
+  try { store.update('host', task.id, 'planned', { plan: replacement }) } catch (error) { failure = error }
+  assert.deepEqual(store.get('host', task.id).plan, executed ? original : replacement)
+  if (executed) assert.match(failure?.message ?? '', /immutable/u)
+  else assert.equal(failure, undefined)
+})
+
 test('confirmed steps are skipped and dispatch intent precedes remote execution', async () => {
   const events = []
   const dispatched = []
@@ -77,6 +111,47 @@ test('confirmed steps are skipped and dispatch intent precedes remote execution'
   assert.equal(events.at(-1).type, 'execution_paused')
   assert.equal(results[0].recoveryRequired, true)
   assert.equal(results[0].status, 'failed')
+})
+
+for (const pauseAt of ['approval', 'evidence']) {
+  test(`pause during ${pauseAt} prevents dispatch at the final safe boundary`, async () => {
+    let allowed = true
+    const events = []
+    const calls = []
+    const results = await executeApprovedPlan({
+      plan: plan(),
+      policy: {},
+      approve: async () => { if (pauseAt === 'approval') allowed = false; return true },
+      beforeCommand: async () => allowed,
+      onExecutionEvent: event => events.push(event.type),
+      netdata: {
+        collectExecutionEvidence: async () => { if (pauseAt === 'evidence') allowed = false },
+        runCommand: async text => { calls.push(text); return { exitCode: 0, stdout: '', stderr: '' } }
+      }
+    })
+    assert.deepEqual(calls, [])
+    assert.deepEqual(results, [])
+    assert.ok(!events.includes('command_dispatched'))
+  })
+}
+
+test('pausing before a declared retry retains the confirmed failed attempt', async () => {
+  const candidate = plan()
+  candidate.commands[0].retry = { attempts: 2, intervalMs: 0, exitCodes: [75] }
+  let allowed = true
+  let calls = 0
+  const results = await executeApprovedPlan({
+    plan: candidate,
+    policy: {},
+    approve: async () => true,
+    beforeCommand: async () => allowed,
+    onProgress: async event => { if (event.phase === 'execution-retry') allowed = false },
+    netdata: { runCommand: async () => { calls++; return { exitCode: 75, stdout: '', stderr: 'temporary failure' } } }
+  })
+  assert.equal(calls, 1)
+  assert.equal(results.length, 1)
+  assert.equal(results[0].status, 'failed')
+  assert.equal(results[0].result.exitCode, 75)
 })
 
 test('journal write failure prevents remote dispatch', async () => {

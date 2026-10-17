@@ -30,6 +30,14 @@ async function fixture (t) {
   return { root, tasks, task, controller, calls, admin }
 }
 
+test('operator events enforce their UTF-8 byte limit without persisting oversized payloads', async t => {
+  const { controller } = await fixture(t)
+  assert.throws(() => controller.record({ type: 'inspection', evidence: '界'.repeat(50000) }), /size limit/u)
+  assert.deepEqual(controller.events(), [])
+  controller.record({ type: 'inspection', evidence: '界'.repeat(1000) })
+  assert.equal(controller.events().length, 1)
+})
+
 test('pause takes effect only at a command boundary and resume skips confirmed commands', async t => {
   const { tasks, task, controller, admin, calls } = await fixture(t)
   const results = await admin.execute({
@@ -153,6 +161,43 @@ test('approved rollback is journaled, never repeated, and prevents deployment co
   await assert.rejects(controller.resume('host', task.id, approved.stateVersion, approved.fingerprint), /rollback has started/u)
 })
 
+test('rollback checks uncertain outcomes after acquiring execution ownership', async t => {
+  const { tasks, task, admin, calls } = await fixture(t)
+  const saved = tasks.savePlan('host', task.id, { ...task.plan, revertCommands: [command('undo')] })
+  admin.serverSecrets = async () => {
+    const lease = tasks.acquireExecution('host', task.id, saved.plan)
+    try {
+      tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_dispatched', commandId: 'first', attemptId: 'other-operator' })
+    } finally { tasks.releaseExecution('host', task.id, lease.owner) }
+    return {}
+  }
+  await assert.rejects(admin.revertTask({ settings: {}, serverId: 'host', taskId: task.id, approve: async () => true }), /uncertain/u)
+  assert.deepEqual(calls, [])
+})
+
+test('operator rollback updates its linked host and aggregate run status', async t => {
+  for (const [otherHost, exitCode, expected] of [[false, 0, 'reverted'], [true, 0, 'partial'], [true, 1, 'revert_failed']]) {
+    await t.test(expected, async t => {
+      const { tasks, controller, admin } = await fixture(t)
+      const run = controller.runs.create({ request: 'Grouped operation', serverIds: otherHost ? ['host', 'other'] : ['host'] })
+      const created = tasks.create('host', 'Grouped operation', { groupRunId: run.id })
+      const task = tasks.savePlan('host', created.id, { ...plan(['first']), revertCommands: [command('undo')] })
+      controller.runs.updateHost(run.id, 'host', { taskId: task.id, status: 'completed' })
+      if (otherHost) controller.runs.updateHost(run.id, 'other', { status: 'completed' })
+      const lease = tasks.acquireExecution('host', task.id, task.plan)
+      tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_completed', commandId: 'first', attemptId: 'done' })
+      tasks.releaseExecution('host', task.id, lease.owner)
+      admin.netdata = () => ({ runCommand: async () => ({ exitCode, stdout: '', stderr: '' }) })
+      const view = controller.inspect('host', task.id)
+      await controller.rollback('host', task.id, view.stateVersion, view.rollbackFingerprint)
+      const saved = controller.runs.get(run.id)
+      assert.equal(saved.hosts.find(host => host.serverId === 'host').status, exitCode === 0 ? 'reverted' : 'revert_failed')
+      assert.equal(saved.status, expected)
+      if (otherHost) assert.equal(saved.hosts.find(host => host.serverId === 'other').status, 'completed')
+    })
+  }
+})
+
 test('public views exclude raw outputs, encoded database projections, and the vault passphrase', async t => {
   const { tasks, task, controller } = await fixture(t)
   controller.passphrase = 'known-vault-passphrase'
@@ -236,6 +281,27 @@ test('aborted work requires a newly approved revision and competing approvals ar
   const approved = controller.inspect('host', task.id)
   assert.equal(approved.control.action, 'pause')
   await controller.resume('host', task.id, approved.stateVersion, approved.fingerprint)
+})
+
+test('console error responses redact the vault passphrase even without a credential label', async t => {
+  const { controller, task, calls } = await fixture(t)
+  controller.passphrase = 'unlabelled-vault-fixture'
+  controller.analyze = async () => { throw new Error(`Inspection of ${controller.passphrase} was denied`) }
+  const consoleServer = await startOperatorConsole({ controller, actions: true })
+  t.after(() => consoleServer.close())
+  const headers = { 'Content-Type': 'application/json' }
+  const login = await fetch(`${consoleServer.origin}/session`, { method: 'POST', headers, body: JSON.stringify({ token: new URL(consoleServer.url).hash.slice(1) }) })
+  const session = await login.json()
+  const response = await fetch(`${consoleServer.origin}/action`, {
+    method: 'POST',
+    headers: { ...headers, Cookie: login.headers.get('set-cookie').split(';')[0], 'X-Intent-CSRF': session.csrf },
+    body: JSON.stringify({ action: 'analyze', hostId: 'host', taskId: task.id, question: 'Inspect recorded state' })
+  })
+  assert.equal(response.status, 409)
+  const body = await response.text()
+  assert.ok(!body.includes(controller.passphrase))
+  assert.match(body, /redacted/u)
+  assert.deepEqual(calls, [])
 })
 
 test('console enforces authentication, origin, CSRF, read-only mode, and stale approvals', async t => {

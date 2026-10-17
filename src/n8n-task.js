@@ -318,7 +318,7 @@ function removeCompose (state) {
 }
 
 function restoreDocker (state) {
-  return join(['set -eu', `[ -d ${quote(state)} ] || exit 0`, `if [ ! -e ${quote(`${state}/docker.existed`)} ]; then`, `if [ -s ${quote(`${state}/packages.added`)} ]; then xargs -r apt-get purge -y < ${quote(`${state}/packages.added`)}; fi`, 'rm -f /etc/apt/sources.list.d/docker.sources /etc/apt/keyrings/docker.asc', 'apt-get autoremove -y', 'rm -rf /var/lib/docker /var/lib/containerd /etc/docker', `elif [ -e ${quote(`${state}/docker.active`)} ]; then systemctl start docker; else systemctl stop docker 2>/dev/null || true; fi`, `rm -rf -- ${quote(state)}`])
+  return join(['set -eu', `[ -d ${quote(state)} ] || exit 0`, `if [ ! -e ${quote(`${state}/docker.existed`)} ]; then`, `if [ -s ${quote(`${state}/packages.added`)} ]; then xargs -r apt-get purge -y < ${quote(`${state}/packages.added`)}; fi`, 'rm -f /etc/apt/sources.list.d/docker.sources /etc/apt/keyrings/docker.asc', 'rm -rf /var/lib/docker /var/lib/containerd /etc/docker', `elif [ -e ${quote(`${state}/docker.active`)} ]; then systemctl start docker; else systemctl stop docker 2>/dev/null || true; fi`, `rm -rf -- ${quote(state)}`])
 }
 
 function waitHealth () {
@@ -337,7 +337,7 @@ function packageList (family) {
 }
 
 function removeAddedPackages (family, file) {
-  if (family === 'debian') return `if [ -s ${quote(file)} ]; then export DEBIAN_FRONTEND=noninteractive; xargs -r apt-get purge -y < ${quote(file)}; apt-get autoremove -y; fi`
+  if (family === 'debian') return `if [ -s ${quote(file)} ]; then export DEBIAN_FRONTEND=noninteractive; xargs -r apt-get purge -y < ${quote(file)}; fi`
   if (family === 'alpine') return `if [ -s ${quote(file)} ]; then xargs -r apk del < ${quote(file)}; fi`
   if (family === 'arch') return `if [ -s ${quote(file)} ]; then if grep -Fxq nginx ${quote(file)}; then systemctl stop nginx; fi; xargs -r pacman -Rns --noconfirm < ${quote(file)}; fi`
   if (family === 'suse') return `if [ -s ${quote(file)} ]; then xargs -r zypper --non-interactive remove -u -y < ${quote(file)}; fi`

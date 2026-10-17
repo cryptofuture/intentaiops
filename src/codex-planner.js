@@ -15,9 +15,10 @@ import {
   validateWindowsPlan
 } from './planner-platform-policy.js'
 
-export const CODEX_MODELS = Object.freeze(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'])
-export const CODEX_REASONING_EFFORTS = Object.freeze(['low', 'medium'])
+export const CODEX_MODELS = Object.freeze(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'mimo-v2.6-pro'])
+export const CODEX_REASONING_EFFORTS = Object.freeze(['low', 'medium', 'high'])
 export const DEFAULT_CODEX_SETTINGS = Object.freeze({ model: 'gpt-5.6-luna', reasoningEffort: 'medium' })
+const CODEX_MODEL_PROFILES = Object.freeze({ 'mimo-v2.6-pro': 'mimo' })
 
 export function normalizeCodexSettings (value = {}) {
   const model = value?.model ?? DEFAULT_CODEX_SETTINGS.model
@@ -31,8 +32,8 @@ export class CodexPlanner {
   constructor ({
     runner = runProcess,
     codexBinary = 'codex',
-    model = 'gpt-5.6-luna',
-    reasoningEffort = 'medium',
+    model = DEFAULT_CODEX_SETTINGS.model,
+    reasoningEffort = DEFAULT_CODEX_SETTINGS.reasoningEffort,
     schemaPath = fileURLToPath(new URL('../schemas/command-plan.schema.json', import.meta.url)),
     consultationSchemaPath = fileURLToPath(new URL('../schemas/consultation.schema.json', import.meta.url)),
     routingSchemaPath = fileURLToPath(new URL('../schemas/task-routing.schema.json', import.meta.url))
@@ -81,7 +82,7 @@ export class CodexPlanner {
         onProgress
       })
       try {
-        const proposed = JSON.parse(output)
+        const proposed = parseStructuredOutput(output)
         for (const command of [...(proposed.commands ?? []), ...(proposed.revertCommands ?? [])]) {
           command.command = disableShellTracing(command.command)
           if (command.executionMode === null) delete command.executionMode
@@ -131,7 +132,7 @@ export class CodexPlanner {
       failureLabel: 'consultation',
       onProgress
     })
-    return validateConsultation(JSON.parse(output))
+    return validateConsultation(parseStructuredOutput(output))
   }
 
   async routeTask ({ serverDirectory, request, inventory, candidates, onProgress }) {
@@ -149,7 +150,7 @@ export class CodexPlanner {
       failureLabel: 'task routing',
       onProgress
     })
-    return validateTaskRouting(JSON.parse(output), candidates)
+    return validateTaskRouting(parseStructuredOutput(output), candidates)
   }
 
   async runStructured ({
@@ -201,7 +202,12 @@ export class CodexPlanner {
       }
 
       const lastMessagePath = path.join(jobDirectory, outputName)
+      const profile = CODEX_MODEL_PROFILES[this.model]
+      const schema = await readFile(schemaPath, 'utf8')
+      if (profile) await writeFile(path.join(jobDirectory, 'schema.json'), schema, { mode: 0o600 })
+      const plannerPrompt = profile ? `${prompt}\n\nReturn only JSON matching schema.json:\n${schema}` : prompt
       const args = [
+        ...(profile ? ['--no-daemon', '--profile', profile] : []),
         'exec',
         '--cd', jobDirectory,
         '--model', this.model,
@@ -210,16 +216,16 @@ export class CodexPlanner {
         '--strict-config',
         '--sandbox', 'read-only',
         '--ephemeral',
-        '--ignore-user-config',
+        ...(profile ? [] : ['--ignore-user-config']),
         '--ignore-rules',
-        '--skip-git-repo-check',
-        '--output-schema', schemaPath
+        '--skip-git-repo-check'
       ]
+      if (!profile) args.push('--output-schema', schemaPath)
       const progress = onProgress ? createProgressParser(onProgress) : null
       if (progress) args.push('--json', '--output-last-message', lastMessagePath)
       args.push('-')
       const result = await this.runner(this.codexBinary, args, {
-        input: prompt,
+        input: plannerPrompt,
         timeoutMs: 5 * 60 * 1000,
         maxOutputBytes: 2 * 1024 * 1024,
         cwd: jobDirectory,
@@ -227,12 +233,35 @@ export class CodexPlanner {
         onStderr: chunk => progress?.stderr(chunk)
       })
       progress?.flush()
+      if (result.timedOut === true) throw new Error(`Codex ${failureLabel} timed out after 300 seconds; no final response was accepted`)
+      if (result.signal) throw new Error(`Codex ${failureLabel} was interrupted (${result.signal}); no final response was accepted`)
       if (result.code !== 0) throw new Error(`Codex ${failureLabel} failed: ${result.stderr.trim()}`)
 
-      return progress ? await readFile(lastMessagePath, 'utf8') : result.stdout
+      let output = result.stdout
+      if (progress) {
+        try {
+          output = await readFile(lastMessagePath, 'utf8')
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error
+          throw new Error(`Codex ${failureLabel} produced no final response; nothing is available for review`, { cause: error })
+        }
+      }
+      if (!output.trim()) throw new Error(`Codex ${failureLabel} returned an empty final response`)
+      return output
     } finally {
       await rm(jobDirectory, { recursive: true, force: true })
     }
+  }
+}
+
+function parseStructuredOutput (output) {
+  const value = String(output).trim()
+  try {
+    return JSON.parse(value)
+  } catch (error) {
+    const fenced = value.match(/^\x60{3}(?:json)?\s*([\s\S]*?)\s*\x60{3}$/iu)
+    if (!fenced) throw new Error('Codex returned invalid JSON', { cause: error })
+    return JSON.parse(fenced[1])
   }
 }
 
@@ -277,6 +306,7 @@ function buildPrompt (request, taskId, inventory, { previousAttempts, retryInstr
       ? 'Commands execute as LocalSystem. Never include sudo or elevation wrappers. Set requiresSudo true only as metadata when an operation requires administrator privileges.'
       : 'Commands execute as root. Never include sudo. Set requiresSudo true only as metadata when an operation requires root.',
     'Each command is executed separately by another process after explicit approval.',
+    'Classify risk across every execution path, including error handlers. A read command must never stop services, terminate processes, write files, or change policy on failure; put those actions in an explicitly changing command with reviewed rollback.',
     ...(defaults.adminEmail
       ? [`When the requested software needs an initial administrator or contact email, use the user preset ${defaults.adminEmail}. This email is not a password or secret; do not replace it with a generated or placeholder address.`]
       : []),
@@ -432,7 +462,7 @@ function platformPrompt (platform) {
     ]
   }
   if (platform === 'linux') {
-    return ['The target operating system is Linux and commands are executed by Bash.']
+    return ['The target operating system is Linux. The native executor prefers /bin/bash, then /opt/netdata/bin/bash, and falls back to /bin/sh. Prefer portable POSIX shell syntax unless Bash availability is established; portable octal mode arithmetic uses a leading 0, not Bash-only base# notation.']
   }
   if (platform === 'macos') {
     return [
@@ -568,6 +598,11 @@ function preparePreviousAttempt (task) {
     retryOfTaskId: task.retryOfTaskId,
     retryInstructions: task.retryInstructions,
     plan: task.plan,
+    executionEvidence: task.executionEvidence && {
+      commands: task.executionEvidence.commands,
+      rollbackCommands: task.executionEvidence.rollbackCommands,
+      stateVersion: task.executionEvidence.stateVersion
+    },
     results: task.results,
     progress: Array.isArray(task.progress) ? task.progress.slice(-100) : [],
     changeOverview: task.changeOverview,
@@ -696,10 +731,20 @@ function summarizeNetdataInventory (inventory) {
 
 function summarizeRetryEvidence (attempt) {
   const sanitized = sanitizePlannerData(attempt ?? {})
+  const completedIds = new Set((sanitized.executionEvidence?.commands ?? []).filter(command => command.status === 'completed').map(command => command.commandId))
   return boundPlannerData({
     id: sanitized.id,
     status: sanitized.status,
     error: sanitized.error,
+    executionEvidence: sanitized.executionEvidence && {
+      commands: sanitized.executionEvidence.commands,
+      rollbackCommands: sanitized.executionEvidence.rollbackCommands,
+      stateVersion: sanitized.executionEvidence.stateVersion
+    },
+    remainingPlan: sanitized.executionEvidence && sanitized.plan && {
+      commands: sanitized.plan.commands?.filter(command => !completedIds.has(command.id)),
+      revertCommands: sanitized.plan.revertCommands
+    },
     results: Array.isArray(sanitized.results)
       ? sanitized.results.map(result => ({
         id: result.id,

@@ -1,6 +1,22 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { classifyFailure, isFailureCode } from '../src/failure-signature.js'
+import { executionDiagnostics } from '../src/execution-diagnostics.js'
+
+test('a recorded apt lock owner explains package contention without changing execution outcome', () => {
+  const item = { id: 'install-jellyfin', phase: 'acquire' }
+  const result = { exitCode: 100, stderr: 'E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 18233 (unattended-upgr)' }
+  const failure = classifyFailure({ item, result })
+  assert.equal(failure.code, 'PACKAGE_MANAGER_BUSY')
+  assert.ok(isFailureCode(failure.code))
+  const observations = executionDiagnostics({ item, result })
+  assert.ok(observations.some(value => value.code === 'PACKAGE_MANAGER_BUSY' && value.confidence === 'confirmed'))
+  assert.match(observations.find(value => value.code === 'PACKAGE_MANAGER_BUSY').explanation, /Wait for it to finish; do not remove its lock/u)
+  assert.ok(!observations.some(value => value.code === 'CAUSE_UNKNOWN'))
+  assert.deepEqual(executionDiagnostics({ item, result: { ...result, exitCode: 0 } }), [])
+  assert.equal(classifyFailure({ item, result: { exitCode: 100, stderr: 'Could not open lock file /var/lib/dpkg/lock-frontend: Permission denied' } }).code, 'PERMISSION_DENIED')
+  assert.equal(classifyFailure({ item, result: { exitCode: 1, stderr: 'Could not get lock /tmp/application.lock. It is held by process 123' } }).code, 'COMMAND_FAILED')
+})
 
 test('authoritative job timeouts retain their cause even with empty or misleading output', () => {
   for (const result of [{ timedOut: true }, { state: 'timed_out' }]) {

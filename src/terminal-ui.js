@@ -824,6 +824,7 @@ export class TerminalUi {
     let value = Array.from(initialValue)
     let cursor = value.length
     let historyIndex = -1
+    let repaint
     const historyValues = history.map(item => typeof item === 'string' ? item : item.request)
     const insert = text => {
       const characters = Array.from(text)
@@ -871,8 +872,11 @@ export class TerminalUi {
       } else if (key.name === 'tab') insert('  ')
       else if (string && !key.ctrl && !key.meta && key.name !== 'return') insert(string)
       else return
-      render()
-    })
+      repaint ??= setImmediate(() => {
+        repaint = null
+        try { render() } catch (error) { finish(error) }
+      })
+    }).finally(() => clearImmediate(repaint))
     this.clear()
     return result
   }

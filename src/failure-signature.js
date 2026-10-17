@@ -2,6 +2,7 @@ const FAILURE_CODES = new Set([
   'PACKAGE_NOT_FOUND',
   'PACKAGE_VERSION_MISMATCH',
   'PACKAGE_MANAGER_FAILED',
+  'PACKAGE_MANAGER_BUSY',
   'ARTIFACT_DOWNLOAD_FAILED',
   'CHECKSUM_MISMATCH',
   'SERVICE_NOT_READY',
@@ -37,6 +38,7 @@ export function classifyFailure ({ item, result, error }) {
   else if (/docker_service_not_ready/u.test(lower)) code = 'DOCKER_SERVICE_NOT_READY'
   else if (/windows_interactive_user_required/u.test(lower)) code = 'WINDOWS_INTERACTIVE_USER_REQUIRED'
   else if (/\bpackage_version_mismatch\b/u.test(lower)) code = 'PACKAGE_VERSION_MISMATCH'
+  else if (/could not get lock \/var\/(?:lib\/(?:dpkg|apt)|cache\/apt)\/[^\n]*(?:held by process|resource temporarily unavailable)|unable to acquire the dpkg frontend lock[^\n]*another process using it/u.test(lower)) code = 'PACKAGE_MANAGER_BUSY'
   else if (/unable to locate package|no match for argument|target not found|no such package|nothing provides|package .* not found/u.test(lower)) code = 'PACKAGE_NOT_FOUND'
   else if (/apt(?:-get)?:|dnf:|yum:|apk:|pacman:|zypper:/u.test(lower) && item.phase === 'packages') code = 'PACKAGE_MANAGER_FAILED'
   else if (/checksum|sha(?:1|256|512).*(?:mismatch|failed)|digest.*(?:mismatch|failed)/u.test(lower)) code = 'CHECKSUM_MISMATCH'

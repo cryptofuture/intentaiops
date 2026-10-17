@@ -1,5 +1,5 @@
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
-import { buildLinuxPhpApplicationFoundation, linuxPhpApplicationProfile, wordpressArtifactCommand } from './linux-php-foundation.js'
+import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile, wordpressArtifactCommand } from './linux-php-foundation.js'
 
 const VERSION = '11.0.0'
 const PLUGIN_URL = `https://downloads.wordpress.org/plugin/woocommerce.${VERSION}.zip`
@@ -169,12 +169,12 @@ function initializeComposeWordpress (linuxContext) {
 
 function nativeVerification (profile) {
   const wp = `${quote(profile.phpBinary)} ${quote(`${ARTIFACTS}/wp-cli.phar`)} --allow-root --path=${quote(WEB_ROOT)}`
-  return `set -eu; ${wp} plugin is-active woocommerce >/dev/null; test "$(${wp} plugin get woocommerce --field=version)" = ${quote(VERSION)}; curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}; printf '%s\n' verification-passed`
+  return `set -eu; ${wp} plugin is-active woocommerce >/dev/null; test "$(${wp} plugin get woocommerce --field=version)" = ${quote(VERSION)}; ${httpMarkerCheck(`curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}; printf '%s\n' verification-passed`
 }
 
 function composeVerification () {
   const cli = `docker compose -p ${quote(PROJECT)} --profile tools run --rm --no-deps -T --entrypoint /usr/local/bin/wp cli`
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; ${cli} --allow-root plugin is-active woocommerce >/dev/null; test "$(${cli} --allow-root plugin get woocommerce --field=version)" = ${quote(VERSION)}; docker compose -p ${quote(PROJECT)} exec -T wordpress test -S /run/php-fpm/webminai.sock; curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}; printf '%s\n' verification-passed`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; ${cli} --allow-root plugin is-active woocommerce >/dev/null; test "$(${cli} --allow-root plugin get woocommerce --field=version)" = ${quote(VERSION)}; docker compose -p ${quote(PROJECT)} exec -T wordpress test -S /run/php-fpm/webminai.sock; ${httpMarkerCheck(`curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}; printf '%s\n' verification-passed`
 }
 
 function nativeDelta (linuxContext) {
@@ -231,7 +231,7 @@ function composeDelta (taskId, linuxContext) {
     `${cliShell} ${quote([productCommand('wp --allow-root'), 'wp --allow-root plugin is-active woocommerce >/dev/null', `test "$(wp --allow-root plugin get woocommerce --field=version)" = ${quote(VERSION)}`, 'test -n "$(wp --allow-root option get woocommerce_db_version 2>/dev/null)"'].join('; '))}`,
     `address=$(${addressCommand})`,
     '[ -n "$address" ]',
-    `curl --fail --silent --show-error --max-time 10 "http://$address:${PORT}/" | grep -Fq ${MARKER}`,
+    httpMarkerCheck(`curl --fail --silent --show-error --max-time 10 "http://$address:${PORT}/"`, MARKER),
     `test -d ${quote(state)}`,
     'printf \'%s\n\' woocommerce-installed'
   ].join('; '), 'Verify WooCommerce activation and reconcile one harmless marker product')
@@ -275,11 +275,11 @@ function productCommand (wp) {
 function verificationCommand (compose, linuxContext) {
   if (compose) {
     const cli = `docker compose -p ${quote('webminai-woocommerce-18102')} --profile tools run --rm --no-deps -T --entrypoint /usr/local/bin/wp cli`
-    return `cd ${quote('/opt/webminai/services/woocommerce')} && ${cli} --allow-root plugin is-active woocommerce >/dev/null && test "$(${cli} --allow-root plugin get woocommerce --field=version)" = ${quote(VERSION)} && curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+    return `cd ${quote('/opt/webminai/services/woocommerce')} && ${cli} --allow-root plugin is-active woocommerce >/dev/null && test "$(${cli} --allow-root plugin get woocommerce --field=version)" = ${quote(VERSION)} && ${httpMarkerCheck(`curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   }
   const profile = linuxContext.applications.wordpress
   const wp = `${quote(profile.phpBinary)} ${quote('/var/lib/webminai/webminai-woocommerce-18102/wp-cli.phar')} --allow-root --path=${quote('/srv/webminai-woocommerce-18102')}`
-  return `${wp} plugin is-active woocommerce >/dev/null && test "$(${wp} plugin get woocommerce --field=version)" = ${quote(VERSION)} && curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  return `${wp} plugin is-active woocommerce >/dev/null && test "$(${wp} plugin get woocommerce --field=version)" = ${quote(VERSION)} && ${httpMarkerCheck(`curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
 }
 
 function compatibilityManifest (linuxContext, compose) {

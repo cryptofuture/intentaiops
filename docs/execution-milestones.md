@@ -62,11 +62,15 @@ Enable explicitly with `intentaiops console --console-actions`. Exact Host/Origi
 
 Actions include run/host pause, abort, analysis, forward/rollback proposals, approval, remote reconciliation, outcome attestation, selected continuation, and reviewed rollback. Suggestions do not execute automatically. Rollback has separate display and execution-confirmation steps. SSH authentication remains in the terminal. Existing validation, signed execution, identity checks, and leases remain authoritative.
 
+An operator rollback also updates its linked multi-host outcome and aggregate run status, without changing other hosts or historical execution events.
+
 ## 7. Replay and diagnostics
 
 Replay reads chronological recorded command and operator/orchestration events only. It never contacts hosts or restores state. Exports are version 1 JSON with replayOnly:true and a 2 MiB limit. Oversized exports fail rather than silently truncate.
 
 Public views omit duplicate encoded database projections and withhold raw stdout/stderr, including diagnostic output. Credential-named fields, keys, authentication values, SSH URLs, and the vault passphrase are redacted. Vault contents are never serialized. Original results remain local task history. Do not put secrets into operator instructions or attestations.
+
+HTTP error responses use the same vault-aware controller sanitizer as task and event views, including errors without a credential label.
 
 ## Version 1 local HTTP interface
 

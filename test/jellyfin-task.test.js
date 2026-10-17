@@ -36,6 +36,11 @@ test('Ubuntu and Debian Jellyfin routes use the signed official pinned repositor
     assert.ok(commands.includes(`jellyfin-server=${version}`))
     assert.ok(commands.includes(`jellyfin-web=${version}`))
     assert.match(commands, /apt-get install -y --allow-downgrades/u)
+    for (const id of ['install-foundation', 'install-jellyfin']) {
+      const command = built.plan.commands.find(item => item.id === id).command
+      assert.match(command, /apt-get install[^;]*-o DPkg::Lock::Timeout=120/u)
+      assert.doesNotMatch(command, /kill|rm[^;]*\/var\/lib\/dpkg\/lock/u)
+    }
     assert.match(commands, /for package in jellyfin jellyfin-server jellyfin-web/u)
     assert.match(commands, /PACKAGE_VERSION_MISMATCH/u)
     assert.match(commands, /Startup\/User/u)

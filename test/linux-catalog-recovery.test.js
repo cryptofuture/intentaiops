@@ -7,12 +7,125 @@ import path from 'node:path'
 import test from 'node:test'
 import { buildCommonTask } from '../src/common-tasks.js'
 import { LinuxHostContextService } from '../src/linux-host-context.js'
-import { mariadbDataPreflight, wordpressArtifactCommand } from '../src/linux-php-foundation.js'
+import { httpMarkerCheck, mariadbDataPreflight, wordpressArtifactCommand } from '../src/linux-php-foundation.js'
 import { buildN8nTask, n8nRelease } from '../src/n8n-task.js'
 import { moodleRelease } from '../src/moodle-task.js'
 import { buildMattermostTask, mattermostRelease } from '../src/mattermost-task.js'
 import { buildJellyfinTask } from '../src/jellyfin-task.js'
 import { buildOdooTask } from '../src/odoo-task.js'
+
+test('cron fixture refuses existing entries and dangling links before creating task state', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-cron-baseline-'))
+  try {
+    const entry = `${root}/cron/webminai-test`
+    mkdirSync(path.dirname(entry))
+    const command = buildCommonTask('cron-job', 326).plan.commands[0].command
+      .replaceAll('/var/lib/webminai/task-state', `${root}/state`)
+      .replaceAll('/etc/cron.d', `${root}/cron`)
+      .replaceAll('/tmp/webminai-cron-ran', `${root}/ran`)
+    for (const dangling of [false, true]) {
+      if (dangling) symlinkSync(`${root}/absent`, entry)
+      else writeFileSync(entry, 'existing operator entry\n')
+      const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+      assert.equal(result.status, 1, result.stderr)
+      assert.equal(existsSync(`${root}/state`), false)
+      if (!dangling) assert.equal(readFileSync(entry, 'utf8'), 'existing operator entry\n')
+      rmSync(entry)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('HTTP marker checks drain large responses and reject failed transfers containing a marker', () => {
+  const check = httpMarkerCheck('curl --fail --max-time 10 http://127.0.0.1/', 'EXPECTED_MARKER')
+  const run = body => spawnSync('/bin/sh', ['-c', `set -eu; curl () { ${body}; }; ${check}; printf verified`], { encoding: 'utf8' })
+  const large = run("printf 'EXPECTED_MARKER\\n'; head -c 1048576 /dev/zero | tr '\\000' x")
+  assert.equal(large.status, 0, large.stderr)
+  assert.equal(large.stdout, 'verified')
+  assert.equal(large.stderr, '')
+  for (const status of [18, 22, 23, 28]) {
+    const failed = run(`printf 'EXPECTED_MARKER\\n'; return ${status}`)
+    assert.equal(failed.status, status)
+    assert.equal(failed.stdout, '')
+  }
+  const missing = run("printf 'unrelated response'")
+  assert.equal(missing.status, 1)
+  assert.equal(missing.stdout, '')
+  const html = spawnSync('/bin/sh', ['-c', `curl () { printf '<HTML>'; }; ${httpMarkerCheck('curl', '<!DOCTYPE html|<html', '-Ei')}`], { encoding: 'utf8' })
+  assert.equal(html.status, 0, html.stderr)
+})
+
+test('Linux PHP native and Compose verification checks preserve HTTP transfer outcomes', async () => {
+  const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+    inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+    execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'ubuntu', VERSION_ID: '24.04' }, commands: { apt: true } }
+  })
+  for (const preferred of [false, true]) {
+    for (const id of ['woocommerce-linux', 'joomla-linux', 'drupal-linux', 'prestashop-linux', 'moodle-linux']) {
+      const built = buildCommonTask(id, 324, { platform: 'linux', linuxContext: context, docker: { preferred, ready: true, installMethod: 'official-apt' } })
+      assert.match(built.verifyApplied, /response=\$\(curl/u, id)
+      for (const command of [...built.plan.commands.map(value => value.command), built.verifyApplied]) {
+        assert.doesNotMatch(command, /curl[^;\n]*\| grep -[FE]i?q\b/u, id)
+        const syntax = spawnSync('/bin/sh', ['-n', '-c', command], { encoding: 'utf8' })
+        assert.equal(syntax.status, 0, `${id}: ${syntax.stderr}`)
+      }
+    }
+  }
+})
+
+test('Arch PHP baseline preserves shared nginx configuration but refuses owned paths and dangling links', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-arch-php-baseline-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'arch' }, commands: { pacman: true } }
+    })
+    const built = buildCommonTask('woocommerce-linux', 325, { platform: 'linux', linuxContext: context })
+    const config = `${root}/etc/nginx/nginx.conf`
+    mkdirSync(path.dirname(config), { recursive: true })
+    writeFileSync(config, 'http {\n}\n')
+    const command = built.plan.commands[0].command.replaceAll('/var/', `${root}/var/`).replaceAll('/etc/', `${root}/etc/`).replaceAll('/root/', `${root}/root/`).replaceAll('/run/', `${root}/run/`)
+    const mocks = "pacman () { printf 'base-package\\n'; }; systemctl () { return 1; }; "
+    const state = `${root}/var/lib/webminai/task-state/325-woocommerce-linux`
+    const owned = `${root}/srv/webminai-woocommerce-18102`
+    const safeCommand = command.replaceAll('/srv/', `${root}/srv/`).replace('install -d -o root -g root -m 0700', 'mkdir -p')
+    mkdirSync(path.dirname(owned), { recursive: true })
+    symlinkSync(`${root}/missing`, owned)
+    const blocked = spawnSync('/bin/sh', ['-c', mocks + safeCommand], { encoding: 'utf8' })
+    assert.equal(blocked.status, 1)
+    assert.match(blocked.stderr, /task target already exists/u)
+    assert.equal(existsSync(state), false)
+    rmSync(owned)
+    const captured = spawnSync('/bin/sh', ['-c', mocks + safeCommand], { encoding: 'utf8' })
+    assert.equal(captured.status, 0, captured.stderr)
+    assert.equal(readFileSync(`${state}/nginx.conf.before`, 'utf8'), 'http {\n}\n')
+    assert.equal(readFileSync(config, 'utf8'), 'http {\n}\n')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Alpine PHP rollback never starts a previously inactive service', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-alpine-service-restore-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'openrc', osRelease: { ID: 'alpine', VERSION_ID: '3.23' }, commands: { apk: true } }
+    })
+    const built = buildCommonTask('woocommerce-linux', 326, { platform: 'linux', linuxContext: context })
+    const state = `${root}/state`
+    const command = built.plan.revertCommands.find(value => value.id === 'restore-packages-services').command
+      .replaceAll('/var/lib/webminai/task-state/326-woocommerce-linux', state)
+      .replaceAll('/var/lib/mysql', `${root}/mysql`).replaceAll('/run/mysqld', `${root}/mysqld`).replaceAll('/run/mariadb', `${root}/mariadb`)
+      .replaceAll('rc-service ', 'mock_rc_service ')
+    for (const active of [false, true]) {
+      mkdirSync(state)
+      writeFileSync(`${state}/packages.added`, '')
+      writeFileSync(`${root}/calls`, '')
+      if (active) writeFileSync(`${state}/service-0.active`, '')
+      const result = spawnSync('/bin/sh', ['-c', `mock_rc_service () { printf '%s %s\\n' "$1" "$2" >> '${root}/calls'; [ "$2" != restart ]; }; ${command}`], { encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(readFileSync(`${root}/calls`, 'utf8'), active ? 'mariadb restart\nmariadb start\nphp-fpm83 stop\nnginx stop\n' : 'mariadb stop\nphp-fpm83 stop\nnginx stop\n')
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 test('Odoo baseline actually stops for an existing executable and dangling data path', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'intent-odoo-baseline-'))

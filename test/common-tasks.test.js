@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
-import { buildCandidatePlanningContext, buildCommonTask, commonTaskEligibility, listCommonTasks, listEligibleCommonTasks } from '../src/common-tasks.js'
+import { buildCandidatePlanningContext, buildCommonTask, commonTaskEligibility, commonTaskFoundationIds, listCommonTasks, listEligibleCommonTasks } from '../src/common-tasks.js'
 import { rootExecutionPolicy } from '../src/execution-policy.js'
 import { LinuxHostContextService } from '../src/linux-host-context.js'
 import { validateCommandPlan } from '../src/plan-validator.js'
 import { hostHealthProfile, isHostHealthTask } from '../src/host-health-task.js'
 import { isSystemUpdateTask, systemUpdateProfile } from '../src/system-update-task.js'
+
+test('native n8n declares its SQLite workflow without a database server foundation', () => {
+  assert.deepEqual(commonTaskFoundationIds('n8n-linux', { platform: 'linux', docker: { preferred: false } }), ['linux-baseline', 'host-generated-credentials', 'service-verification', 'safe-baseline-rollback'])
+  assert.ok(commonTaskFoundationIds('n8n-linux', { platform: 'linux', docker: { preferred: true } }).includes('linux-docker-compose'))
+})
 
 test('common task catalog contains ten syntactically valid reversible plans', () => {
   const available = listCommonTasks({ category: 'system' })

@@ -441,8 +441,8 @@ export class TaskStore {
     revertedAt
   } = {}) {
     if (!STATUSES.has(status)) throw new TypeError('invalid task status')
-    if (plan !== undefined && this.executionEvents(serverId, taskId).length > 0) throw new Error('executed task plans are immutable')
-    return this.withDatabase(serverId, database => {
+    return this.withDatabase(serverId, database => database.transaction(() => {
+      if (plan !== undefined && database.prepare('SELECT 1 FROM execution_events WHERE task_id = ? LIMIT 1').get(taskId)) throw new Error('executed task plans are immutable')
       const existing = this.getFromDatabase(database, taskId)
       database.prepare(`
         UPDATE tasks
@@ -466,7 +466,7 @@ export class TaskStore {
         taskId
       )
       return this.getFromDatabase(database, taskId)
-    })
+    }).immediate())
   }
 
   getFromDatabase (database, taskId) {

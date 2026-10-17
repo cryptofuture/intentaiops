@@ -382,9 +382,6 @@ export class AdminService {
     if (!reviewedPlan && (!task.plan || !Array.isArray(task.plan.revertCommands) || task.plan.revertCommands.length === 0)) {
       throw new Error(`task ${taskId} has no revert plan`)
     }
-    if (this.tasks.executionState(serverId, taskId).some(command => command.status === 'uncertain')) throw new Error('rollback requires operator reconciliation of uncertain commands')
-    if (this.tasks.rollbackState(serverId, taskId).some(command => command.status === 'uncertain')) throw new Error('rollback outcome requires reconciliation before further changes')
-    if (!reviewedPlan && this.tasks.executionEvents(serverId, taskId).length && this.tasks.executionState(serverId, taskId).some(command => command.status !== 'completed')) throw new Error('partial execution requires a separately reviewed rollback plan; saved rollback commands do not identify their forward changes')
     const server = await this.serverSecrets({ settings, passphrase, serverId })
     const rules = await this.workspace.loadRules(serverId)
     const revertPlan = reviewedPlan ?? {
@@ -400,6 +397,9 @@ export class AdminService {
     }, 10000)
     heartbeat.unref()
     try {
+      if (this.tasks.executionState(serverId, taskId).some(command => command.status === 'uncertain')) throw new Error('rollback requires operator reconciliation of uncertain commands')
+      if (this.tasks.rollbackState(serverId, taskId).some(command => command.status === 'uncertain')) throw new Error('rollback outcome requires reconciliation before further changes')
+      if (!reviewedPlan && this.tasks.executionEvents(serverId, taskId).length && this.tasks.executionState(serverId, taskId).some(command => command.status !== 'completed')) throw new Error('partial execution requires a separately reviewed rollback plan; saved rollback commands do not identify their forward changes')
       this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'rollback_started' })
       const rollbackRevision = planFingerprint(revertPlan)
       const history = this.tasks.allExecutionEvents(serverId, taskId).filter(event => event.metadata.rollbackRevision === rollbackRevision && event.commandId && !['plan_approved', 'execution_recovery'].includes(event.type))
