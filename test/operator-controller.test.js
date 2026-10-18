@@ -90,6 +90,69 @@ test('replay and exports have no remote effects and stable event cursors', async
   assert.deepEqual(calls, [])
 })
 
+test('event catch-up reads and commits each host page without per-event database opens', async t => {
+  const { controller, tasks, task } = await fixture(t)
+  const lease = tasks.acquireExecution('host', task.id, task.plan)
+  for (let index = 0; index < 32; index++) tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_prepared', commandId: 'first', attemptId: `attempt-${index}` })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  let taskAccess = 0
+  let controllerAccess = 0
+  const taskDatabase = tasks.withDatabase.bind(tasks)
+  const eventDatabase = controller.database.bind(controller)
+  tasks.withDatabase = (...args) => { taskAccess++; return taskDatabase(...args) }
+  controller.database = (...args) => { controllerAccess++; return eventDatabase(...args) }
+  const events = controller.events()
+  assert.equal(events.length, 32)
+  assert.ok(taskAccess <= 2, `host database opened ${taskAccess} times`)
+  assert.ok(controllerAccess <= 4, `event database opened ${controllerAccess} times`)
+  assert.deepEqual(controller.events(events.at(-1).id), [])
+  assert.equal(controller.events().length, 32)
+})
+
+test('event page and cursor roll back together when mirroring fails', async t => {
+  const { controller, tasks, task } = await fixture(t)
+  const lease = tasks.acquireExecution('host', task.id, task.plan)
+  for (const attemptId of ['first', 'second']) tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_prepared', commandId: 'first', attemptId })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  const record = controller.record.bind(controller)
+  let calls = 0
+  controller.record = (...args) => { if (++calls === 2) throw new Error('fixture mirror failure'); return record(...args) }
+  assert.throws(() => controller.events(), /mirror failure/u)
+  assert.equal(controller.database(database => database.prepare('SELECT COUNT(*) count FROM events').get().count), 0)
+  assert.equal(controller.database(database => database.prepare('SELECT COUNT(*) count FROM cursors').get().count), 0)
+  controller.record = record
+  assert.equal(controller.events().length, 2)
+  assert.equal(controller.events().length, 2)
+})
+
+test('a stale catch-up page cannot rewind another console session cursor', async t => {
+  const { controller, tasks, task, root } = await fixture(t)
+  const append = attemptId => {
+    const lease = tasks.acquireExecution('host', task.id, task.plan)
+    tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_prepared', commandId: 'first', attemptId })
+    tasks.releaseExecution('host', task.id, lease.owner)
+  }
+  append('one')
+  append('two')
+  const other = new OperatorController({ dataRoot: root, settings: controller.settings })
+  const read = tasks.hostExecutionEvents.bind(tasks)
+  let interleaved = false
+  tasks.hostExecutionEvents = (...args) => {
+    const rows = read(...args)
+    if (!interleaved) {
+      interleaved = true
+      append('three')
+      assert.equal(other.events().length, 3)
+    }
+    return rows
+  }
+  assert.equal(controller.events().length, 3)
+  const cursor = controller.database(database => database.prepare('SELECT event_id FROM cursors WHERE host_id = ?').get('host').event_id)
+  assert.equal(cursor, tasks.executionEvents('host', task.id).at(-1).id)
+  assert.equal(controller.events().length, 3)
+  for (const options of [{ after: -1 }, { after: Number.MAX_SAFE_INTEGER + 1 }, { limit: 0 }, { limit: 1001 }]) assert.throws(() => read('host', options), /range/u)
+})
+
 test('attempt-bound memory evidence survives reconciliation, streaming and sanitized replay without authorizing work', async t => {
   const { controller, tasks, task, calls, admin } = await fixture(t)
   const baseline = { availability: 'available', platform: 'linux', bootId: 'boot-a', scopeId: 'scope-a', oomKills: 0, observedAt: '2026-10-16T01:00:00Z' }
@@ -111,6 +174,22 @@ test('attempt-bound memory evidence survives reconciliation, streaming and sanit
   const bundle = controller.exportRun(run.id)
   assert.match(JSON.stringify(bundle), /OOM_KILL/u)
   assert.deepEqual(calls, [])
+})
+
+test('rollback attestation uses the original revision identifier without disclosing evidence', async t => {
+  const { tasks, task, controller, calls } = await fixture(t)
+  const rollbackRevision = planFingerprint([command('cleanup')])
+  const lease = tasks.acquireExecution('host', task.id, task.plan)
+  tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_outcome_unknown', commandId: 'cleanup', attemptId: 'rollback-attempt', metadata: { operation: 'rollback', rollbackRevision } })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  const view = controller.inspect('host', task.id)
+  const pending = view.rollbackCommands[0]
+  assert.equal(pending.rollbackRevision, rollbackRevision)
+  const resolved = controller.resolve('host', task.id, view.stateVersion, pending.commandId, 'failed', 'Independent evidence: password=private-value; partial cleanup remains', pending.rollbackRevision)
+  assert.equal(resolved.rollbackCommands[0].status, 'failed')
+  assert.deepEqual(calls, [])
+  assert.doesNotMatch(JSON.stringify(resolved), /private-value/u)
+  assert.throws(() => controller.resolve('host', task.id, view.stateVersion, pending.commandId, 'completed', 'Independent evidence', pending.rollbackRevision), /stale/u)
 })
 
 test('unknown dispatch requires remote evidence or explicit attestation, never an automatic rerun', async t => {

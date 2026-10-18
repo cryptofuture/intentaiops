@@ -245,7 +245,7 @@ async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress,
       await onProgress?.({ phase: 'execution-recovery', commandId: item.id, ...metadata })
     }
     const before = await captureExecutionEvidence(netdata, { item })
-    if (!await beforeCommand(item)) return attempt === 1 ? { paused: true } : { rawResult, executionError, attempts: attempt - 1, recoveryRequired, diagnostics }
+    if (!await beforeCommand(item, { recheck: attempt === 1 })) return attempt === 1 ? { paused: true } : { rawResult, executionError, attempts: attempt - 1, recoveryRequired, diagnostics }
     await event('command_prepared', before ? { evidenceBefore: before } : {})
     await event('command_dispatched')
     executionError = undefined

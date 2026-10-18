@@ -34,6 +34,11 @@ through existing `execution_recovery` events without changing unknown outcomes.
 Missing acknowledgments can still be inspected, but cannot be resolved by a
 host snapshot. Original observations remain immutable.
 
+Structured Netdata HTTP failures carry `NETDATA_API_ERROR` and the HTTP status,
+not a presumed remote process result. Only a bounded JSON status from a completed
+curl HTTP failure is accepted. A request URL's `timeout` parameter is not evidence
+that execution timed out. Transport errors never authorize command replay.
+
 Host collectors run fixed, signed, read-only commands with five-second remote
 limits and an 8 KiB accepted snapshot limit. Platform discovery uses the existing
 health endpoint without its normal retry loop. After an unrecovered transport

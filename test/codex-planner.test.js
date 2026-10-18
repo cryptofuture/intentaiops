@@ -1,10 +1,124 @@
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { CodexPlanner } from '../src/codex-planner.js'
+import { CodexPlanner as ProductionCodexPlanner } from '../src/codex-planner.js'
 import { listCommonTasks } from '../src/common-tasks.js'
+import { runProcess } from '../src/process-runner.js'
+
+class CodexPlanner extends ProductionCodexPlanner {
+  constructor (options = {}) {
+    super({ configurationRunner: async () => ({ code: 0, stdout: '[]' }), ...options })
+  }
+}
+
+test('shared planner boundary isolates credentials and embeds references without execution tools', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-boundary-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  for (const [name, value] of Object.entries({ VAULT_TEST: 'synthetic-vault-only-value', SSH_AUTH_SOCK: '/synthetic/private-agent', OPENAI_API_KEY: 'synthetic-provider-auth' })) {
+    const previous = process.env[name]
+    t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous })
+    process.env[name] = value
+  }
+  await writeFile(path.join(serverDirectory, 'context.md'), 'Role: boundary fixture\npassword=fixture-context-password\n')
+  for (const model of ['gpt-5.6-luna', 'mimo-v2.6-pro']) {
+    const planner = new CodexPlanner({
+      model,
+      runner: async (_, args, options) => {
+        const environment = options.env ?? process.env
+        assert.equal(environment.VAULT_TEST, undefined)
+        assert.equal(environment.SSH_AUTH_SOCK, undefined)
+        assert.equal(options.env?.OPENAI_API_KEY, 'synthetic-provider-auth')
+        assert.equal(options.env?.PATH, process.env.PATH)
+        assert.ok(options.env)
+        for (const feature of ['shell_tool', 'unified_exec', 'apps', 'plugins', 'multi_agent', 'browser_use', 'computer_use', 'view_image', 'image_generation', 'hooks', 'workspace_dependencies', 'code_mode']) {
+          assert.ok(args.includes(`features.${feature}=false`), feature)
+        }
+        assert.ok(args.includes('mcp_servers={}'))
+        assert.ok(args.includes('web_search="disabled"'))
+        assert.ok(args.includes('shell_environment_policy.inherit="none"'))
+        assert.match(options.input, /Role: boundary fixture/)
+        assert.match(options.input, /inventory-marker/)
+        assert.match(options.input, /policy-marker/)
+        assert.match(options.input, /No execution or connector tools are available/)
+        assert.doesNotMatch(options.input, /fixture-context-password/)
+        assert.doesNotMatch(await readFile(path.join(options.cwd, 'context.md'), 'utf8'), /fixture-context-password/)
+        return { code: 0, stdout: '{}', stderr: '' }
+      }
+    })
+    await planner.runStructured({ serverDirectory, inventory: { note: 'inventory-marker' }, policy: { note: 'policy-marker' }, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' })
+  }
+  assert.equal(process.env.VAULT_TEST, 'synthetic-vault-only-value')
+  assert.equal(process.env.SSH_AUTH_SOCK, '/synthetic/private-agent')
+})
+
+test('installed Codex exposes no execution or connector tools to a local fixture provider', { skip: process.env.INTENT_CODEX_BOUNDARY_TEST !== '1' }, async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'intent-codex-tools-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  let observed
+  const server = createServer(async (request, response) => {
+    const chunks = []
+    for await (const chunk of request) chunks.push(chunk)
+    if (request.url.endsWith('/responses')) observed = JSON.parse(Buffer.concat(chunks).toString())
+    response.writeHead(400, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ error: { message: 'Fixture stops after inspecting the request', type: 'invalid_request_error' } }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  const base = `http://127.0.0.1:${server.address().port}`
+  await writeFile(path.join(directory, 'mimo.config.toml'), `[features]\nshell_tool=true\nunified_exec=true\ngoals=true\n[mcp_servers.intent_fixture]\ncommand="false"\n[mcp_servers.intent_http]\nurl="${base}/mcp"\n`)
+  for (const model of ['gpt-5.6-luna', 'mimo-v2.6-pro']) {
+    observed = null
+    const progress = []
+    const planner = new CodexPlanner({
+      model,
+      configurationRunner: (binary, args, options) => runProcess(binary, args, { ...options, env: { ...options.env, CODEX_HOME: directory } }),
+      runner: (binary, args, options) => runProcess(binary, [
+        ...args.slice(0, -1), '--config', 'model_provider="intent_fixture"',
+        '--config', `model_providers.intent_fixture={name="Intent fixture",base_url="${base}",wire_api="responses",env_key="OPENAI_API_KEY",request_max_retries=0,stream_max_retries=0}`,
+        '-'
+      ], { ...options, timeoutMs: 15000, env: { ...options.env, CODEX_HOME: directory, OPENAI_API_KEY: 'synthetic-fixture-auth', OPENAI_BASE_URL: base } })
+    })
+    let failure
+    await assert.rejects(planner.runStructured({ serverDirectory: directory, inventory: {}, policy: {}, prompt: 'Return an empty JSON object.', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture', onProgress: event => progress.push(event) }), error => { failure = error.message; return true })
+    assert.ok(observed, `the installed CLI did not reach the local provider: ${failure}`)
+    assert.deepEqual((observed.tools ?? []).map(tool => tool.name ?? tool.type).filter(name => name !== 'request_user_input'), [], model)
+    assert.doesNotMatch(JSON.stringify(progress), /Code Mode is unavailable because code-mode host is disabled/u)
+  }
+})
+
+test('planner rejects oversized embedded references before invoking Codex', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-limit-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  const planner = new CodexPlanner({ runner: async () => assert.fail('oversized references reached Codex') })
+  await assert.rejects(planner.runStructured({ serverDirectory, inventory: { note: 'x'.repeat(2 * 1024 * 1024) }, policy: {}, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' }), /2 MiB planning limit/u)
+})
+
+test('planner disables discovered MCP transports without forwarding their credentials', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-mcp-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  const servers = [{ name: 'stdio.fixture', transport: { type: 'stdio', command: 'fixture-secret-command' } }, { name: 'http.fixture', transport: { type: 'streamable_http', url: 'http://fixture-secret-url', http_headers: { Authorization: 'fixture-secret-header' } } }]
+  const planner = new CodexPlanner({
+    configurationRunner: async () => ({ code: 0, stdout: JSON.stringify(servers) }),
+    runner: async (_, args) => {
+      assert.ok(args.includes('mcp_servers={"stdio.fixture"={command="false",enabled=false},"http.fixture"={url="http://127.0.0.1:9/disabled",enabled=false}}'))
+      assert.doesNotMatch(args.join(' '), /fixture-secret/u)
+      return { code: 0, stdout: '{}', stderr: '' }
+    }
+  })
+  await planner.runStructured({ serverDirectory, inventory: {}, policy: {}, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' })
+})
+
+test('planner fails closed when MCP configuration cannot be verified', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-config-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  for (const configuration of [{ code: 1 }, { code: 0, timedOut: true }, { code: 0, signal: 'SIGTERM' }, { code: 0, stdout: 'not JSON' }, { code: 0, stdout: '{}' }, { code: 0, stdout: '[null]' }, { code: 0, stdout: '[{"name":"fixture","transport":{"type":"unknown"}}]' }]) {
+    const planner = new CodexPlanner({ configurationRunner: async () => configuration, runner: async () => assert.fail('unverified configuration reached Codex') })
+    await assert.rejects(planner.runStructured({ serverDirectory, inventory: {}, policy: {}, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' }), /planning is blocked/u)
+  }
+})
 
 test('AI plans expose durable jobs while normal commands keep their timeout limit', async t => {
   const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-ai-jobs-'))
@@ -289,7 +403,7 @@ test('Codex planner uses luna medium in an isolated sanitized job directory', as
   })
   assert.equal(result.commands[0].command, 'uptime')
   assert.equal(call.binary, 'codex')
-  assert.deepEqual(call.args.slice(0, 2), ['exec', '--cd'])
+  assert.deepEqual(call.args.slice(0, 3), ['--no-daemon', 'exec', '--cd'])
   assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-5.6-luna')
   assert.equal(call.args[call.args.indexOf('--config') + 1], 'model_reasoning_effort="medium"')
   assert.ok(call.args.includes('approval_policy="never"'))

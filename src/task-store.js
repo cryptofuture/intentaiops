@@ -205,8 +205,14 @@ export class TaskStore {
     return this.withDatabase(serverId, database => {
       this.getFromDatabase(database, taskId)
       return database.prepare('SELECT * FROM execution_events WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?')
-        .all(taskId, after, limit).map(row => ({ version: 1, id: row.id, hostId: serverId, runId: row.run_id, taskId: row.task_id, revision: row.revision, commandId: row.command_id, attemptId: row.attempt_id, timestamp: row.timestamp, type: row.type, metadata: JSON.parse(row.metadata_json) }))
+        .all(taskId, after, limit).map(row => executionEvent(serverId, row))
     })
+  }
+
+  hostExecutionEvents (serverId, { after = 0, limit = 1000 } = {}) {
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError('invalid execution event range')
+    return this.withDatabase(serverId, database => database.prepare('SELECT * FROM execution_events WHERE id > ? ORDER BY id LIMIT ?')
+      .all(after, limit).map(row => executionEvent(serverId, row)))
   }
 
   allExecutionEvents (serverId, taskId) {
@@ -599,6 +605,10 @@ function ensureColumn (database, name, definition) {
   if (!columns.some(column => column.name === name)) {
     database.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`)
   }
+}
+
+function executionEvent (serverId, row) {
+  return { version: 1, id: row.id, hostId: serverId, runId: row.run_id, taskId: row.task_id, revision: row.revision, commandId: row.command_id, attemptId: row.attempt_id, timestamp: row.timestamp, type: row.type, metadata: JSON.parse(row.metadata_json) }
 }
 
 function compactRow (row) {

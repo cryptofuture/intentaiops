@@ -346,13 +346,13 @@ export class AdminService {
           this.tasks.appendProgress(serverId, taskId, event)
           return onProgress?.(event)
         },
-        beforeCommand: async item => {
+        beforeCommand: async (item, { recheck = false } = {}) => {
           const control = this.tasks.control(serverId, taskId)
           if (control.action !== 'run') {
             this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_paused', metadata: { aborted: control.action === 'abort' } })
             return false
           }
-          if (beforeCommand && await beforeCommand(item) === false) {
+          if (!recheck && beforeCommand && await beforeCommand(item) === false) {
             this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_paused' })
             return false
           }

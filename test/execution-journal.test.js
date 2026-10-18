@@ -241,3 +241,33 @@ test('recovered jobs pause remaining work until renewed operator approval', asyn
   await execute()
   assert.deepEqual(calls, ['uptime', 'date'])
 })
+
+for (const mode of ['normal', 'retry', 'approval', 'evidence']) {
+  test(`final dispatch control check does not repeat interactive prompts: ${mode}`, async t => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'intent-boundary-ui-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const tasks = new TaskStore(root)
+    const approved = { ...plan(), commands: [plan().commands[0]] }
+    if (mode === 'retry') approved.commands[0].retry = { attempts: 2, intervalMs: 0, exitCodes: [75] }
+    const task = tasks.savePlan('host', tasks.create('host', 'Inspect').id, approved)
+    const admin = new AdminService({ dataRoot: root, tasks, workspace: { loadRules: async () => ({ policy: {} }) } })
+    admin.serverSecrets = async () => ({})
+    let prompts = 0
+    let dispatches = 0
+    const pause = () => tasks.setControl('host', task.id, 'pause', tasks.control('host', task.id).version)
+    admin.netdata = () => ({
+      collectExecutionEvidence: async () => { if (mode === 'evidence') pause() },
+      runCommand: async () => ({ exitCode: ++dispatches === 1 && mode === 'retry' ? 75 : 0 })
+    })
+    await admin.execute({
+      settings: {},
+      serverId: 'host',
+      taskId: task.id,
+      plan: approved,
+      beforeCommand: async () => { prompts++; return true },
+      approve: async () => { if (mode === 'approval') pause(); return true }
+    })
+    assert.equal(prompts, mode === 'retry' ? 2 : 1)
+    assert.equal(dispatches, ['approval', 'evidence'].includes(mode) ? 0 : mode === 'retry' ? 2 : 1)
+  })
+}

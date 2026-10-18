@@ -1,4 +1,5 @@
 import { mariadbDataPreflight, wordpressArtifactCommand } from './linux-php-foundation.js'
+import { applicationDatabaseCommand } from './linux-application-database.js'
 
 const SITE = 'webminai-wordpress-18101'
 const WEB_ROOT = `/srv/${SITE}`
@@ -31,7 +32,7 @@ export function buildWordpressLinuxTask (taskId, linuxContext) {
     command('install-packages', installPackagesCommand({ state, family, profile }), 'Install the reviewed distro-specific native WordPress stack', ['capture-baseline']),
     command('verify-artifacts', wordpressArtifactCommand(ARTIFACTS), 'Download and verify official WordPress and WP-CLI artifacts', ['install-packages']),
     command('generate-credentials', credentialsCommand(), 'Generate protected task-owned database and administrator credentials on the host', ['capture-baseline']),
-    command('prepare-database', databaseCommand({ family, profile }), 'Initialize MariaDB, wait for readiness, and create only the task-owned database identity', ['install-packages', 'generate-credentials']),
+    command('prepare-database', databaseCommand({ state, family, profile }), 'Initialize MariaDB, wait for readiness, and create only the task-owned database identity', ['install-packages', 'generate-credentials']),
     command('extract-wordpress', extractCommand(profile), 'Extract verified WordPress core with explicit application ownership and permissions', ['verify-artifacts']),
     command('configure-php-fpm', phpFpmCommand(profile), 'Create the reviewed PHP-FPM pool and start its task-owned Unix socket', ['install-packages', 'extract-wordpress']),
     command('configure-nginx', nginxCommand({ state, profile }), 'Create and load the reviewed nginx virtual host on port 18101', ['configure-php-fpm']),
@@ -43,7 +44,7 @@ export function buildWordpressLinuxTask (taskId, linuxContext) {
     step.timeoutMs = 1800000
   }
   const revertCommands = [
-    command('remove-wordpress-database', removeDatabaseCommand(state), 'Drop only the task-owned WordPress database and local users'),
+    command('remove-wordpress-database', applicationDatabaseCommand({ state, database: DATABASE, host: profile.databaseHost, rollback: true }), 'Drop only the task-owned WordPress database and local user after verifying ownership'),
     command('remove-wordpress-files', removeFilesCommand({ state, profile }), 'Remove task-owned site, credentials, artifacts, and configuration, restoring nginx main configuration', ['remove-wordpress-database']),
     command('restore-packages-services', restoreCommand({ state, family, profile, services }), 'Restore service activity, package state, and database data-directory baseline', ['remove-wordpress-files'])
   ]
@@ -100,7 +101,7 @@ function credentialsCommand () {
   return `set -eu; umask 077; install -d -o root -g root -m 0700 ${quote(CREDENTIALS)}; [ -s ${quote(`${CREDENTIALS}/db_password`)} ] || openssl rand -hex 32 > ${quote(`${CREDENTIALS}/db_password`)}; [ -s ${quote(`${CREDENTIALS}/admin_password`)} ] || openssl rand -hex 32 > ${quote(`${CREDENTIALS}/admin_password`)}; chmod 0600 ${quote(`${CREDENTIALS}/db_password`)} ${quote(`${CREDENTIALS}/admin_password`)}; printf '%s\n' credentials-ready`
 }
 
-function databaseCommand ({ family, profile }) {
+function databaseCommand ({ state, family, profile }) {
   const databaseHost = profile.databaseHost
   return [
     'set -eu',
@@ -108,9 +109,7 @@ function databaseCommand ({ family, profile }) {
     'install -d -o mysql -g mysql -m 0755 /run/mariadb /run/mysqld',
     `if [ -n "$initialized" ] || ! ${serviceActive(profile.mariadbService)}; then ${serviceRestart(profile.mariadbService, family)}; fi`,
     "ready=; for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if mariadb --protocol=socket -uroot -e 'SELECT 1' >/dev/null 2>&1; then ready=yes; break; fi; sleep 1; done; [ \"$ready\" = yes ]",
-    `dbpass=$(sed -n 1p ${quote(`${CREDENTIALS}/db_password`)})`,
-    `printf "CREATE DATABASE IF NOT EXISTS ${DATABASE} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS '${DATABASE}'@'${databaseHost}' IDENTIFIED BY '%s'; ALTER USER '${DATABASE}'@'${databaseHost}' IDENTIFIED BY '%s'; GRANT ALL PRIVILEGES ON ${DATABASE}.* TO '${DATABASE}'@'${databaseHost}'; FLUSH PRIVILEGES;\n" "$dbpass" "$dbpass" | mariadb --protocol=socket -uroot >/dev/null 2>&1`,
-    'printf \'%s\n\' database-ready'
+    applicationDatabaseCommand({ state, database: DATABASE, host: databaseHost, credentials: CREDENTIALS })
   ].join('; ')
 }
 
@@ -212,10 +211,6 @@ function publishCommand (profile) {
   ].join('; ')
 }
 
-function removeDatabaseCommand (state) {
-  return `set +e; [ -d ${quote(state)} ] || exit 0; if command -v mariadb >/dev/null 2>&1; then printf "DROP DATABASE IF EXISTS ${DATABASE}; DROP USER IF EXISTS '${DATABASE}'@'localhost'; DROP USER IF EXISTS '${DATABASE}'@'127.0.0.1'; FLUSH PRIVILEGES;\n" | mariadb --protocol=socket -uroot >/dev/null 2>&1 || true; fi; exit 0`
-}
-
 function removeFilesCommand ({ state, profile }) {
   return [
     'set -eu',
@@ -231,7 +226,7 @@ function removeFilesCommand ({ state, profile }) {
 function restoreCommand ({ state, family, profile, services }) {
   const restoreServices = services.map((service, index) => `if [ -e ${quote(`${state}/service-${index}.active`)} ]; then ${serviceRestart(service, family)}; else ${serviceStop(service, family)}; fi`).join('; ')
   return [
-    'set +e',
+    'set -eu',
     `[ -d ${quote(state)} ] || exit 0`,
     restoreServices,
     removeAddedPackages(family, state),

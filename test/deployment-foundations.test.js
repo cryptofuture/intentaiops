@@ -152,7 +152,7 @@ test('semantic router distinguishes exact, foundation-assisted, context-only, an
     }
   ]
   for (const entry of cases) {
-    const planner = new CodexPlanner({ runner: async () => ({ code: 0, stdout: JSON.stringify(entry.response), stderr: '' }) })
+    const planner = new CodexPlanner({ configurationRunner: async () => ({ code: 0, stdout: '[]' }), runner: async () => ({ code: 0, stdout: JSON.stringify(entry.response), stderr: '' }) })
     const result = await planner.routeTask({ serverDirectory, request: entry.request, inventory: { os: 'linux' }, candidates })
     assert.deepEqual([result.decision, result.foundationMode], entry.expected)
     if (result.foundationMode === 'executable') {
@@ -160,7 +160,7 @@ test('semantic router distinguishes exact, foundation-assisted, context-only, an
       assert.equal(result.foundationIds.includes('safe-baseline-rollback'), true)
     }
   }
-  const planner = new CodexPlanner({ runner: async () => ({ code: 0, stdout: JSON.stringify(route('informed_planning', 'none', ['wordpress-linux'], ['made-up-foundation'], 'context-only')), stderr: '' }) })
+  const planner = new CodexPlanner({ configurationRunner: async () => ({ code: 0, stdout: '[]' }), runner: async () => ({ code: 0, stdout: JSON.stringify(route('informed_planning', 'none', ['wordpress-linux'], ['made-up-foundation'], 'context-only')), stderr: '' }) })
   await assert.rejects(planner.routeTask({ serverDirectory, request: 'A related task', inventory: { os: 'linux' }, candidates }), /unknown foundation id/u)
 })
 

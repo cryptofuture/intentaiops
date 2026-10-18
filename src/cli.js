@@ -2203,6 +2203,7 @@ async function manageExecution ({ ui, controller, serverId, taskId }) {
     const view = controller.inspect(serverId, taskId)
     ui.clear()
     ui.banner(`Operator / ${serverId} / task #${taskId}`)
+    ui.line('Task status', view.task.status)
     ui.renderTable([{ key: 'commandId', label: 'COMMAND' }, { key: 'status', label: 'STATE' }], view.commands)
     const action = await ui.choose('Execution controls', [
       { label: 'Inspect recorded commands and results', value: 'inspect' },

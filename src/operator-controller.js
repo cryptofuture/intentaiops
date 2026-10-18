@@ -57,7 +57,8 @@ export class OperatorController {
     const revisions = this.tasks.revisions(hostId, taskId)
     task.executionDiagnostics = this.tasks.allExecutionEvents(hostId, taskId).filter(event => event.metadata.diagnostics?.length).map(event => ({ commandId: event.commandId, attemptId: event.attemptId, revision: event.revision, timestamp: event.timestamp, diagnostics: event.metadata.diagnostics }))
     const rollback = [...revisions].reverse().find(item => item.approved && item.plan.operatorRollback)
-    return { ...this.sanitize({ version: 1, hostId, task, control: this.tasks.control(hostId, taskId), commands: this.tasks.executionState(hostId, taskId), rollbackCommands: this.tasks.rollbackState(hostId, taskId), revisions, rollbackAvailable: Boolean(task.plan?.revertCommands?.length || rollback) }), stateVersion: this.tasks.stateVersion(hostId, taskId), fingerprint: planFingerprint(task.plan), rollbackFingerprint: planFingerprint(task.plan?.revertCommands), reviewedRollbackFingerprint: rollback ? planFingerprint(rollback.plan) : null }
+    const rollbackCommands = this.tasks.rollbackState(hostId, taskId).map(command => ({ ...this.sanitize(command), rollbackRevision: command.rollbackRevision }))
+    return { ...this.sanitize({ version: 1, hostId, task, control: this.tasks.control(hostId, taskId), commands: this.tasks.executionState(hostId, taskId), revisions, rollbackAvailable: Boolean(task.plan?.revertCommands?.length || rollback) }), rollbackCommands, stateVersion: this.tasks.stateVersion(hostId, taskId), fingerprint: planFingerprint(task.plan), rollbackFingerprint: planFingerprint(task.plan?.revertCommands), reviewedRollbackFingerprint: rollback ? planFingerprint(rollback.plan) : null }
   }
 
   assertHost (hostId) {
@@ -222,23 +223,26 @@ export class OperatorController {
     return this.inspect(hostId, taskId)
   }
 
-  record (event, source = null) {
+  record (event, source = null, database = null) {
     const hostId = event.hostId ?? event.serverId
-    const runId = event.runId ?? (hostId && event.taskId ? this.tasks.get(hostId, event.taskId).groupRunId : null)
+    const runId = event.runId !== undefined ? event.runId : (hostId && event.taskId ? this.tasks.get(hostId, event.taskId).groupRunId : null)
     const payload = JSON.stringify(this.sanitize({ version: 1, timestamp: new Date().toISOString(), ...event, hostId, runId }))
     if (Buffer.byteLength(payload) >= 128 * 1024) throw new Error('event exceeds size limit')
-    this.database(database => database.prepare('INSERT OR IGNORE INTO events (source, payload) VALUES (?, ?)').run(source, payload))
+    const write = database => database.prepare('INSERT OR IGNORE INTO events (source, payload) VALUES (?, ?)').run(source, payload)
+    if (database) write(database)
+    else this.database(write)
   }
 
   events (after = 0, limit = 500) {
     if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError('invalid event range')
     for (const hostId of Object.keys(this.settings.servers ?? {})) {
       const cursor = this.database(database => database.prepare('SELECT event_id FROM cursors WHERE host_id = ?').get(hostId)?.event_id ?? 0)
-      const rows = this.tasks.withDatabase(hostId, database => database.prepare('SELECT id, task_id AS taskId FROM execution_events WHERE id > ? ORDER BY id LIMIT 1000').all(cursor))
-      for (const row of rows) {
-        const event = this.tasks.executionEvents(hostId, row.taskId, { after: row.id - 1, limit: 1 })[0]
-        this.record(event, `${hostId}:${row.id}`)
-        this.database(database => database.prepare('INSERT INTO cursors VALUES (?, ?) ON CONFLICT(host_id) DO UPDATE SET event_id = excluded.event_id').run(hostId, row.id))
+      const rows = this.tasks.hostExecutionEvents(hostId, { after: cursor })
+      if (rows.length) {
+        this.database(database => database.transaction(() => {
+          for (const event of rows) this.record(event, `${hostId}:${event.id}`, database)
+          database.prepare('INSERT INTO cursors VALUES (?, ?) ON CONFLICT(host_id) DO UPDATE SET event_id = max(cursors.event_id, excluded.event_id)').run(hostId, rows.at(-1).id)
+        }).immediate())
       }
     }
     return this.database(database => database.prepare('SELECT id, payload FROM events WHERE id > ? ORDER BY id LIMIT ?').all(after, limit).map(row => ({ ...JSON.parse(row.payload), id: row.id })))

@@ -14,6 +14,42 @@ import { buildMattermostTask, mattermostRelease } from '../src/mattermost-task.j
 import { buildJellyfinTask } from '../src/jellyfin-task.js'
 import { buildOdooTask } from '../src/odoo-task.js'
 
+test('system-user rollback without its baseline preserves an existing account', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-user-rollback-'))
+  try {
+    const command = buildCommonTask('system-user', 327).plan.revertCommands[0].command
+      .replaceAll('/var/lib/webminai/task-state', `${root}/state`)
+    const result = spawnSync('/bin/sh', ['-c', `id () { return 0; }; userdel () { printf removed; }; deluser () { printf removed; }; ${command}`], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, '')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('native PHP restoration reports failure and retains recovery state', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-php-restore-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'ubuntu', VERSION_ID: '24.04' }, commands: { apt: true } }
+    })
+    for (const id of ['wordpress-linux', 'woocommerce-linux', 'joomla-linux', 'drupal-linux', 'prestashop-linux', 'moodle-linux']) {
+      const built = buildCommonTask(id, 328, { platform: 'linux', linuxContext: context, docker: { preferred: false } })
+      const original = built.plan.modifiedFiles.find(file => file.startsWith('/var/lib/webminai/task-state/'))
+      for (const restartFails of [false, true]) {
+        const state = path.join(root, `${id}-${restartFails}`)
+        mkdirSync(state)
+        writeFileSync(path.join(state, 'packages.added'), 'fixture-package\n')
+        writeFileSync(path.join(state, 'database-data.existed'), '')
+        if (restartFails) writeFileSync(path.join(state, 'service-0.active'), '')
+        const command = built.plan.revertCommands.find(item => item.id === 'restore-packages-services').command.replaceAll(original, state)
+        const result = spawnSync('/bin/sh', ['-c', `systemctl () { return ${restartFails ? 24 : 0}; }; env () { return 23; }; ${command}`], { encoding: 'utf8' })
+        assert.notEqual(result.status, 0, `${id}: failed restoration was reported successful`)
+        assert.ok(existsSync(path.join(state, 'packages.added')), `${id}: recovery baseline was deleted`)
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('cron fixture refuses existing entries and dangling links before creating task state', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'intent-cron-baseline-'))
   try {
@@ -455,6 +491,44 @@ test('shared WordPress acquisition reuses only hash-verified artifacts and rejec
     assert.match(cached.stdout, /artifacts-already-verified/)
     writeFileSync(path.join(root, 'wp-cli.phar'), 'corrupt')
     assert.equal(spawnSync('/bin/sh', ['-c', command]).status, 9)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('nginx rollback without task state preserves an existing website', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-nginx-unowned-'))
+  try {
+    const site = path.join(root, 'site')
+    mkdirSync(site)
+    writeFileSync(path.join(site, 'index.html'), 'existing site')
+    const command = buildCommonTask('nginx-static-site', 329).plan.revertCommands[0].command
+      .replaceAll('/var/www/webminai-test-site', site)
+      .replaceAll('/etc/nginx', `${root}/nginx`)
+      .replaceAll('/var/lib/webminai/task-state', `${root}/state`)
+    const result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.ok(existsSync(path.join(site, 'index.html')), 'rollback deleted an unowned website')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('nginx preparation explains existing paths and rejects dangling links before capturing state', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-nginx-guard-'))
+  try {
+    const command = buildCommonTask('nginx-static-site', 330).plan.commands[0].command
+      .replaceAll('/var/www/webminai-test-site', `${root}/site`)
+      .replaceAll('/etc/nginx', `${root}/nginx`)
+      .replaceAll('/var/lib/webminai/task-state', `${root}/state`)
+    mkdirSync(path.join(root, 'site'))
+    let result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /task target already exists/u)
+    rmSync(path.join(root, 'site'), { recursive: true })
+    mkdirSync(path.join(root, 'nginx/conf.d'), { recursive: true })
+    symlinkSync(`${root}/absent`, `${root}/nginx/conf.d/webminai-test-site.conf`)
+    result = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /task target already exists/u)
+    assert.equal(existsSync(path.join(root, 'state')), false)
+    assert.equal(existsSync(path.join(root, 'absent')), false)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

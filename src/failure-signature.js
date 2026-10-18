@@ -29,6 +29,7 @@ export function classifyFailure ({ item, result, error }) {
   const lower = text.toLowerCase()
   let code = 'COMMAND_FAILED'
   if (result?.timedOut === true || result?.state === 'timed_out') code = 'TIMEOUT'
+  else if (error?.netdataHttpStatus) code = 'COMMAND_FAILED'
   else if (/firmware_virtualization_disabled/u.test(lower)) code = 'FIRMWARE_VIRTUALIZATION_DISABLED'
   else if (/unsupported_windows_version/u.test(lower)) code = 'UNSUPPORTED_WINDOWS_VERSION'
   else if (/insufficient_memory/u.test(lower)) code = 'INSUFFICIENT_MEMORY'
@@ -49,7 +50,7 @@ export function classifyFailure ({ item, result, error }) {
   else if (item.phase === 'services' || /service.*(?:failed|not running)|unit .* failed/u.test(lower)) code = 'SERVICE_NOT_READY'
   else if (/permission denied|operation not permitted|access is denied/u.test(lower)) code = 'PERMISSION_DENIED'
   else if (/address already in use|port .* already allocated|bind.*failed/u.test(lower)) code = 'PORT_CONFLICT'
-  else if (/timed out|timeout|deadline exceeded/u.test(lower)) code = 'TIMEOUT'
+  else if (/timed out|\b(?:execution|operation|connection|request) timeout\b|\btimeout (?:expired|exceeded|occurred)\b|deadline exceeded|(?:^|\n)(?:error:\s*)?timeout(?:$|[.!:])/u.test(lower)) code = 'TIMEOUT'
   else if (item.phase === 'baseline' && /drift|baseline.*(?:different|mismatch|failed)/u.test(lower)) code = 'BASELINE_DRIFT'
   return {
     code,

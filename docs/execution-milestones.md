@@ -28,13 +28,21 @@ Per-host databases also gain `task_controls` and `plan_revisions`. Controls use 
 
 Optional CLI boundary controls offer continue/pause/abort. Task history offers inspection, read-only questions, remote reconciliation, outcome attestation, remaining-step revision, differences, reviewed continuation, and rollback. A pause never kills an in-flight command.
 
+The final pre-dispatch control recheck is silent. Interactive users see one prompt per command attempt, while pauses recorded during approval or evidence collection still prevent dispatch.
+
 AI plans can select the existing signed durable job transport with `executionMode: "job"`. Normal commands use null in AI output, normalized to the existing omitted field before validation and approval. Normal deadlines remain at most five minutes; explicit jobs use the configured job limit (one hour by default). Approval views label durable jobs. Long acquisition must not be detached through an untracked launcher.
 
 Health and update reports reload completed results after operator intervention, rather than using the paused caller's partial results. Empty, failed or uncertain execution cannot produce a completion report. The planner receives bounded, redacted diagnostic supplements alongside its capability index. Secret prompts disable terminal echo before displaying the prompt, including hidden kubeconfig input.
 
+Planner routing, consultation and revisions share an environment allowlist and embedded sanitized references (2 MiB combined limit). Codex runs without its daemon; shell, browser, connectors, hooks, plugins and delegation are disabled. A bounded configuration read identifies inherited MCP servers and disables each with a transport-compatible placeholder. Unverifiable configuration blocks planning. A local mock-provider test checks the installed CLI's actual tools with both default and MiMo profiles, including inherited stdio/HTTP servers; it uses only synthetic authentication and no real host. Provider authentication remains local, with environment API keys limited to names ending in `_API_KEY`. Trusted operator-owned Codex configuration must remain stable during a request. Some profiles retain a non-executing interactive-question tool; no execution or connector tools were advertised in the checked configuration.
+
 Multi-host routing reuses the same eligible common tasks as single-host routing, including health and supported update tasks. Completed health/update tasks retain sanitized assessments per host; report failures do not rewrite execution outcomes. One-way updates use the existing explicitly reviewed exception to rollback requirements. Rollout progress identifies the run, stage and pending count. Linux health withholds unfiltered traditional logs when journal access is unavailable and uses a command-name-only BusyBox process fallback; missing evidence remains unavailable rather than triggering repairs.
 
 Linux catalog baselines reject existing or dangling owned paths before changes. Jellyfin guards existing accounts, executables and ports explicitly; portable rollback preserves unrelated default-package data and services. openSUSE uses the existing profile's `vhosts.d` layout and refuses leftover `conf.d` fixtures rather than overwriting them. Shell fixtures cover these guards; the lab checkpoint distinguishes live command completion from clean lifecycle coverage.
+
+New native WordPress and shared PHP plans refuse existing database/user namespaces instead of adopting them or resetting passwords. Successful exclusive creation records a task-local ownership marker. Rollback requires that marker and drops only the configured local user, not both host variants. Partial SQL failure or a lost acknowledgment before marker persistence requires operator review; it does not authorize automatic cleanup. Existing saved plans remain unchanged and need separate review. Ownership markers do not identify an externally replaced database with the same name.
+
+Native WordPress/shared PHP restoration now stops on failed package removal or a failed restart of a previously active service, retaining task recovery state instead of returning false success and deleting the baseline. Shell regressions cover all six application callers. Existing saved plans retain their original behavior; optional service stops and separate Compose cleanup paths remain outside this fix.
 
 Replanning collects fresh inventory through the existing planner and supplies sanitized request/execution/revision evidence. Completed definitions remain unchanged; replacement work receives new IDs. Existing plan and platform policies validate the replacement. Operators see original/proposed plans and added/removed/changed IDs. Approval binds to the proposed fingerprint and source state. Approved replacements start paused and require separately reviewed resume, not inherited approval.
 
@@ -55,6 +63,8 @@ Launch `intentaiops console`, unlock locally, and open the printed URL. Binding 
 The dependency-free browser shows hosts, configured Kubernetes cluster identifiers, task queues/results, runs, pending counts, stages, planning activity, failures, revisions, rollback availability, and an event timeline. Read-only mode does not probe hosts. The existing separate Kubernetes gateway remains unchanged, not a new Kubernetes rollout path.
 
 The additive operator-events.sqlite3 database uses WAL, synchronous FULL, and mode 0600. Orchestration/intervention events are persisted; task journals are mirrored incrementally with durable cursors. Authenticated SSE supports monotonic reconnectable IDs, bounded subscriptions, and backpressure handling without repeatedly fetching complete history.
+
+Catch-up reads one bounded page per host, then commits mirrored events and its cursor in one transaction. Concurrent console sessions cannot rewind the cursor. Failed imports roll back the page without losing the original journal evidence.
 
 ## 6. Reviewed operator actions
 

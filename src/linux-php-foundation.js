@@ -1,3 +1,5 @@
+import { applicationDatabaseCommand } from './linux-application-database.js'
+
 export function httpMarkerCheck (curlCommand, marker, grepFlags = '-F') {
   return `(response=$(${curlCommand}) || exit $?; printf '%s' "$response" | grep ${quote(grepFlags)} ${quote(marker)} >/dev/null)`
 }
@@ -21,7 +23,7 @@ function buildNativeFoundation ({ taskId, linuxContext, application }) {
     item('install-packages', 'packages', installPackages({ state, family, profile }), 'Install the reviewed distro-specific nginx, PHP-FPM, and MariaDB stack', ['capture-baseline'], 1800000, 'job'),
     item('verify-artifacts', 'acquire', "printf '%s\n' application-artifact-hook", 'Acquire and verify the application release', ['install-packages'], 1800000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(application.credentials), 'Generate protected application credentials on the host', ['capture-baseline']),
-    item('prepare-database', 'database', databaseCommand({ family, profile, application }), 'Initialize MariaDB and create only the task-owned database identity', ['install-packages', 'generate-credentials']),
+    item('prepare-database', 'database', databaseCommand({ state, family, profile, application }), 'Initialize MariaDB and create only the task-owned database identity', ['install-packages', 'generate-credentials']),
     item('extract-application', 'configure', "printf '%s\n' application-extract-hook", 'Extract the verified application release', ['verify-artifacts']),
     item('configure-php-fpm', 'configure', phpFpmCommand(profile, application), 'Create the reviewed PHP-FPM pool and task-owned Unix socket', ['install-packages', 'extract-application']),
     item('configure-nginx', 'configure', nginxCommand({ state, profile, application }), 'Create and load the reviewed nginx virtual host', ['configure-php-fpm']),
@@ -134,8 +136,8 @@ function credentialsCommand (root, names = ['db_password', 'admin_password']) {
   return `set -eu; umask 077; install -d -o root -g root -m 0700 ${quote(root)}; ${names.map(name => `[ -s ${quote(`${root}/${name}`)} ] || openssl rand -hex 32 > ${quote(`${root}/${name}`)}`).join('; ')}; chmod 0600 ${names.map(name => quote(`${root}/${name}`)).join(' ')}; printf '%s\n' credentials-ready`
 }
 
-function databaseCommand ({ family, profile, application }) {
-  return `set -eu; initialized=; if [ ! -d /var/lib/mysql/mysql ]; then mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null; initialized=yes; fi; install -d -o mysql -g mysql -m 0755 /run/mariadb /run/mysqld; if [ -n "$initialized" ] || ! ${serviceActive(profile.mariadbService)}; then ${serviceRestart(profile.mariadbService, family)}; fi; ready=; for attempt in $(seq 1 30); do mariadb --protocol=socket -uroot -e 'SELECT 1' >/dev/null 2>&1 && { ready=yes; break; }; sleep 1; done; [ "$ready" = yes ]; dbpass=$(sed -n 1p ${quote(`${application.credentials}/db_password`)}); printf "CREATE DATABASE IF NOT EXISTS ${application.database} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS '${application.database}'@'${profile.databaseHost}' IDENTIFIED BY '%s'; ALTER USER '${application.database}'@'${profile.databaseHost}' IDENTIFIED BY '%s'; GRANT ALL PRIVILEGES ON ${application.database}.* TO '${application.database}'@'${profile.databaseHost}'; FLUSH PRIVILEGES;\n" "$dbpass" "$dbpass" | mariadb --protocol=socket -uroot >/dev/null 2>&1; printf '%s\n' database-ready`
+function databaseCommand ({ state, family, profile, application }) {
+  return `set -eu; initialized=; if [ ! -d /var/lib/mysql/mysql ]; then mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null; initialized=yes; fi; install -d -o mysql -g mysql -m 0755 /run/mariadb /run/mysqld; if [ -n "$initialized" ] || ! ${serviceActive(profile.mariadbService)}; then ${serviceRestart(profile.mariadbService, family)}; fi; ready=; for attempt in $(seq 1 30); do mariadb --protocol=socket -uroot -e 'SELECT 1' >/dev/null 2>&1 && { ready=yes; break; }; sleep 1; done; [ "$ready" = yes ]; ${applicationDatabaseCommand({ state, database: application.database, host: profile.databaseHost, credentials: application.credentials })}`
 }
 
 function phpFpmCommand (profile, application) {
@@ -155,7 +157,7 @@ function nginxCommand ({ state, profile, application }) {
 
 function nativeRevert ({ state, family, profile, services, application }) {
   return [
-    item('remove-application-database', 'cleanup', `set +e; [ -d ${quote(state)} ] || exit 0; printf "DROP DATABASE IF EXISTS ${application.database}; DROP USER IF EXISTS '${application.database}'@'localhost'; DROP USER IF EXISTS '${application.database}'@'127.0.0.1'; FLUSH PRIVILEGES;\n" | mariadb --protocol=socket -uroot >/dev/null 2>&1 || true; exit 0`, 'Drop only the task-owned database and local users', []),
+    item('remove-application-database', 'cleanup', applicationDatabaseCommand({ state, database: application.database, host: profile.databaseHost, rollback: true }), 'Drop only the task-owned database and local user after verifying ownership', []),
     item('remove-application-files', 'cleanup', `set -eu; rm -rf -- ${quote(application.webRoot)} ${quote(application.artifacts)} ${quote(application.credentials)} ${quote(profile.phpFpmRuntimeDirectory)}; rm -f -- ${quote(profile.phpFpmPool)} ${quote(profile.nginxVhost)} ${profile.phpExtensionConfig ? quote(profile.phpExtensionConfig) : ''} ${profile.nginxEnableLink ? quote(profile.nginxEnableLink) : ''}; ${profile.nginxIncludeRequired ? `if [ -f ${quote(`${state}/nginx.conf.before`)} ]; then cp -a ${quote(`${state}/nginx.conf.before`)} ${quote(profile.nginxMainConfig)}; fi` : ':'}; printf '%s\n' files-removed`, 'Remove only task-owned application and service configuration', ['remove-application-database']),
     item('restore-packages-services', 'cleanup', restoreCommand({ state, family, services }), 'Restore service activity and remove only task-added packages', ['remove-application-files'])
   ]
@@ -184,7 +186,7 @@ function composeRevert (state, application) {
 
 function restoreCommand ({ state, family, services }) {
   const restore = services.map((service, index) => `if [ -e ${quote(`${state}/service-${index}.active`)} ]; then ${serviceRestart(service, family)}; else ${serviceStop(service, family)}; fi`).join('; ')
-  return `set +e; [ -d ${quote(state)} ] || exit 0; ${restore}; ${removeAddedPackages(family, state)}; [ -e ${quote(`${state}/database-data.existed`)} ] || rm -rf -- /var/lib/mysql /run/mysqld /run/mariadb; rm -rf -- ${quote(state)}; exit 0`
+  return `set -eu; [ -d ${quote(state)} ] || exit 0; ${restore}; ${removeAddedPackages(family, state)}; [ -e ${quote(`${state}/database-data.existed`)} ] || rm -rf -- /var/lib/mysql /run/mysqld /run/mariadb; rm -rf -- ${quote(state)}; exit 0`
 }
 
 function packageSnapshot (family, destination) {

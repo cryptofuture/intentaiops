@@ -604,7 +604,16 @@ function validateJobId (jobId) {
 }
 
 function netdataRequestError (method, path, cause) {
-  return new Error(`Netdata ${method} ${path} failed: ${cause.message}`, { cause })
+  let status
+  if (cause?.result?.code === 22 && !cause.result.timedOut && !cause.result.signal && typeof cause.result.stdout === 'string' && Buffer.byteLength(cause.result.stdout) <= 16384) {
+    try {
+      const value = JSON.parse(cause.result.stdout)?.status
+      if (Number.isInteger(value) && value >= 400 && value <= 599) status = value
+    } catch {}
+  }
+  const error = new Error(`Netdata ${method} ${path} failed${status ? ` (HTTP ${status})` : ''}: ${cause.message}`, { cause })
+  if (status) error.netdataHttpStatus = status
+  return error
 }
 
 function isTransientNetdataError (error) {

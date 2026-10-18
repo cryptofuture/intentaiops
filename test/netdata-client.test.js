@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import test from 'node:test'
 import { createKubernetesApiCommand, createSignedCommand, NetdataClient } from '../src/netdata-client.js'
+import { executionDiagnostics } from '../src/execution-diagnostics.js'
+import { classifyFailure } from '../src/failure-signature.js'
 
 const ACTION_KEY = '11'.repeat(32)
 
@@ -477,6 +479,52 @@ test('Windows execution inventory records package tools visible to LocalSystem',
   assert.match(signedCommand, /slatReportedByProcessor/u)
   assert.match(signedCommand, /consoleUser/u)
   assert.match(signedCommand, /Microsoft-Windows-Subsystem-Linux/u)
+})
+
+test('Netdata HTTP failures preserve only status metadata and never replay commands', async () => {
+  for (const status of [403, 500, 503]) {
+    let attempts = 0
+    const remote = Object.assign(new Error('SSH command failed with exit code 22'), { result: { code: 22, stdout: JSON.stringify({ status, error: 'password=fixture-only-secret' }), stderr: '' } })
+    const client = new NetdataClient({ ssh: { async execute () { attempts++; throw remote } }, connectionUrl: 'ssh://server.example', actionKey: ACTION_KEY })
+    await assert.rejects(client.runCommand('true'), error => {
+      assert.equal(error.netdataHttpStatus, status)
+      assert.match(error.message, new RegExp(`HTTP ${status}`, 'u'))
+      assert.doesNotMatch(error.message, /fixture-only-secret/u)
+      assert.equal(error.cause, remote)
+      for (const phase of ['cleanup', 'services', 'acquire']) {
+        const item = { id: 'operation', phase }
+        assert.equal(classifyFailure({ item, error }).code, 'COMMAND_FAILED')
+        const diagnostics = executionDiagnostics({ item, error, result: { exitCode: null } })
+        assert.ok(diagnostics.some(value => value.code === 'NETDATA_API_ERROR' && value.scope === 'transport' && value.evidence.httpStatus === status))
+        assert.ok(!diagnostics.some(value => ['EXECUTION_TIMEOUT', 'APP_HTTP_500', 'SERVICE_NOT_READY'].includes(value.code)))
+      }
+      return true
+    })
+    assert.equal(attempts, 1)
+  }
+})
+
+test('Netdata HTTP metadata requires bounded valid evidence from a completed curl HTTP failure', async () => {
+  for (const result of [
+    { code: 255, stdout: '{"status":503}' },
+    { code: 22, stdout: '{"status":503}', timedOut: true },
+    { code: 22, stdout: '{"status":503}', signal: 'SIGTERM' },
+    { code: 22, stdout: '{"status":"503"}' },
+    { code: 22, stdout: '{"status":200}' },
+    { code: 22, stdout: '{"status":600}' },
+    { code: 22, stdout: '{"status":503' },
+    { code: 22, stdout: JSON.stringify({ status: 503, padding: 'x'.repeat(16384) }) }
+  ]) {
+    let attempts = 0
+    const remote = Object.assign(new Error('transport failure'), { result })
+    const client = new NetdataClient({ ssh: { async execute () { attempts++; throw remote } }, connectionUrl: 'ssh://server.example', actionKey: ACTION_KEY })
+    await assert.rejects(client.runCommand('true'), error => {
+      assert.equal(error.netdataHttpStatus, undefined)
+      assert.equal(error.cause, remote)
+      return true
+    })
+    assert.equal(attempts, 1)
+  }
 })
 
 test('Netdata request errors identify the failing endpoint and preserve SSH evidence', async () => {

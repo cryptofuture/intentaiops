@@ -35,6 +35,15 @@ test('explicit cancellation is not inferred to be a timeout from SIGTERM alone',
   assert.equal(failure.code, 'COMMAND_FAILED')
 })
 
+test('request timeout parameters are not timeout evidence', () => {
+  const item = { id: 'cleanup', phase: 'cleanup' }
+  const error = new Error('Netdata POST /api/v3/function?function=webminai%3Acommand&timeout=300 failed: SSH command failed with exit code 22')
+  assert.equal(classifyFailure({ item, error }).code, 'COMMAND_FAILED')
+  for (const stderr of ['request timed out', 'execution timeout exceeded', 'deadline exceeded', 'timeout']) {
+    assert.equal(classifyFailure({ item, result: { exitCode: 1, stderr } }).code, 'TIMEOUT', stderr)
+  }
+})
+
 test('an explicit package version assertion retains a stable failure category', () => {
   const failure = classifyFailure({ item: { id: 'install-jellyfin', phase: 'acquire' }, result: { exitCode: 1, stderr: 'PACKAGE_VERSION_MISMATCH: jellyfin-server expected 10.11.11, observed 12.2' } })
   assert.equal(failure.code, 'PACKAGE_VERSION_MISMATCH')
