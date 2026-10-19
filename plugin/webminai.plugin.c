@@ -138,6 +138,17 @@ struct kubernetes_request {
 
 static char replay_nonces[MAX_REPLAY_NONCES][65];
 static size_t replay_index;
+static sigset_t response_previous_signals;
+
+static void emit_heartbeat(int signal_number) {
+    (void)signal_number;
+    int previous_errno = errno;
+    static const char sample[] = "BEGIN webminai.status\nSET active = 1\nEND\n";
+    ssize_t written = write(STDOUT_FILENO, sample, sizeof(sample) - 1);
+    (void)written;
+    alarm(15);
+    errno = previous_errno;
+}
 
 static void respond_error(const char *transaction, int status, const char *message);
 static void respond_health(const char *transaction);
@@ -239,6 +250,14 @@ static int plugin_loop(void) {
 #endif
     fflush(stdout);
 
+    struct sigaction heartbeat = {0};
+    struct sigaction previous_heartbeat;
+    heartbeat.sa_handler = emit_heartbeat;
+    heartbeat.sa_flags = SA_RESTART;
+    sigemptyset(&heartbeat.sa_mask);
+    if (sigaction(SIGALRM, &heartbeat, &previous_heartbeat) != 0) return 1;
+    alarm(15);
+
     while (read_protocol_line(&line, &line_capacity) >= 0) {
         while (waitpid(-1, NULL, WNOHANG) > 0) {}
         if (strcmp(line, "QUIT\n") == 0 || strcmp(line, "QUIT\r\n") == 0) break;
@@ -258,6 +277,8 @@ static int plugin_loop(void) {
             }
         }
     }
+    alarm(0);
+    sigaction(SIGALRM, &previous_heartbeat, NULL);
     free(line);
     return 0;
 }
@@ -1727,12 +1748,17 @@ static void json_base64(const char *value, size_t length) {
 }
 
 static void respond_begin(const char *transaction, int status) {
+    sigset_t heartbeat;
+    sigemptyset(&heartbeat);
+    sigaddset(&heartbeat, SIGALRM);
+    if (sigprocmask(SIG_BLOCK, &heartbeat, &response_previous_signals) != 0) _exit(1);
     printf("FUNCTION_RESULT_BEGIN %s %d application/json 0\n", transaction, status);
 }
 
 static void respond_end(void) {
     printf("\nFUNCTION_RESULT_END\n");
     fflush(stdout);
+    if (sigprocmask(SIG_SETMASK, &response_previous_signals, NULL) != 0) _exit(1);
 }
 
 static void respond_error(const char *transaction, int status, const char *message) {

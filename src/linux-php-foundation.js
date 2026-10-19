@@ -4,6 +4,10 @@ export function httpMarkerCheck (curlCommand, marker, grepFlags = '-F') {
   return `(response=$(${curlCommand}) || exit $?; printf '%s' "$response" | grep ${quote(grepFlags)} ${quote(marker)} >/dev/null)`
 }
 
+export function applicationFileOwnershipGuard (state, paths) {
+  return `if [ ! -d ${quote(state)} ]; then for path in ${paths.map(quote).join(' ')}; do [ ! -e "$path" ] && [ ! -L "$path" ] || { printf '%s\n' 'APPLICATION_OWNERSHIP_UNCONFIRMED: preserve files and request operator review' >&2; exit 1; }; done; exit 0; fi; test ! -L ${quote(state)}`
+}
+
 /** @param {{taskId: number, linuxContext: any, docker?: any, application: any}} options */
 export function buildLinuxPhpApplicationFoundation ({ taskId, linuxContext, docker = {}, application }) {
   validateInputs(taskId, linuxContext, application)
@@ -152,13 +156,15 @@ function nginxCommand ({ state, profile, application }) {
   const lines = ['server {', `    listen 0.0.0.0:${application.port};`, '    server_name _;', `    root ${application.webRoot};`, '    index index.php index.html;', '    location / { try_files $uri $uri/ /index.php?$args; }', `    location ~ \\.php$ { include fastcgi_params; fastcgi_pass ${profile.nginxFastcgiPass}; fastcgi_param HTTP_HOST $http_host; fastcgi_param SERVER_PORT $server_port; fastcgi_param REQUEST_SCHEME $scheme; fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; }`, '}']
   const include = profile.nginxIncludeRequired ? `if [ ! -f ${quote(`${state}/nginx.conf.before`)} ]; then cp -a ${quote(profile.nginxMainConfig)} ${quote(`${state}/nginx.conf.before`)}; fi; grep -Fqx ${quote(`    ${profile.nginxIncludeDirective}`)} ${quote(profile.nginxMainConfig)} || sed -i '$i\\    ${escapeSed(profile.nginxIncludeDirective)}' ${quote(profile.nginxMainConfig)};` : ''
   const link = profile.nginxEnableLink ? `ln -sfn ${quote(profile.nginxVhost)} ${quote(profile.nginxEnableLink)};` : ''
-  return `set -eu; ${include} install -d -o root -g root -m 0755 ${quote(profile.nginxVhost.slice(0, profile.nginxVhost.lastIndexOf('/')))}; printf '%s\n' ${lines.map(quote).join(' ')} > ${quote(profile.nginxVhost)}; ${link} nginx -t; ${serviceRestart(profile.nginxService, profileFamily(profile))}; printf '%s\n' nginx-ready`
+  const check = profileFamily(profile) === 'alpine' ? `rc-service ${quote(profile.nginxService)} checkconfig` : 'nginx -t'
+  return `set -eu; ${include} install -d -o root -g root -m 0755 ${quote(profile.nginxVhost.slice(0, profile.nginxVhost.lastIndexOf('/')))}; printf '%s\n' ${lines.map(quote).join(' ')} > ${quote(profile.nginxVhost)}; ${link} ${check}; ${serviceRestart(profile.nginxService, profileFamily(profile))}; printf '%s\n' nginx-ready`
 }
 
 function nativeRevert ({ state, family, profile, services, application }) {
+  const ownership = applicationFileOwnershipGuard(state, nativePaths(application, profile, state).filter(path => path !== state && path !== profile.nginxMainConfig))
   return [
     item('remove-application-database', 'cleanup', applicationDatabaseCommand({ state, database: application.database, host: profile.databaseHost, rollback: true }), 'Drop only the task-owned database and local user after verifying ownership', []),
-    item('remove-application-files', 'cleanup', `set -eu; rm -rf -- ${quote(application.webRoot)} ${quote(application.artifacts)} ${quote(application.credentials)} ${quote(profile.phpFpmRuntimeDirectory)}; rm -f -- ${quote(profile.phpFpmPool)} ${quote(profile.nginxVhost)} ${profile.phpExtensionConfig ? quote(profile.phpExtensionConfig) : ''} ${profile.nginxEnableLink ? quote(profile.nginxEnableLink) : ''}; ${profile.nginxIncludeRequired ? `if [ -f ${quote(`${state}/nginx.conf.before`)} ]; then cp -a ${quote(`${state}/nginx.conf.before`)} ${quote(profile.nginxMainConfig)}; fi` : ':'}; printf '%s\n' files-removed`, 'Remove only task-owned application and service configuration', ['remove-application-database']),
+    item('remove-application-files', 'cleanup', `set -eu; ${ownership}; rm -rf -- ${quote(application.webRoot)} ${quote(application.artifacts)} ${quote(application.credentials)} ${quote(profile.phpFpmRuntimeDirectory)}; rm -f -- ${quote(profile.phpFpmPool)} ${quote(profile.nginxVhost)} ${profile.phpExtensionConfig ? quote(profile.phpExtensionConfig) : ''} ${profile.nginxEnableLink ? quote(profile.nginxEnableLink) : ''}; ${profile.nginxIncludeRequired ? `if [ -f ${quote(`${state}/nginx.conf.before`)} ]; then cp -a ${quote(`${state}/nginx.conf.before`)} ${quote(profile.nginxMainConfig)}; fi` : ':'}; printf '%s\n' files-removed`, 'Remove only task-owned application and service configuration', ['remove-application-database']),
     item('restore-packages-services', 'cleanup', restoreCommand({ state, family, services }), 'Restore service activity and remove only task-added packages', ['remove-application-files'])
   ]
 }

@@ -2216,6 +2216,7 @@ async function manageExecution ({ ui, controller, serverId, taskId }) {
       { label: 'Review and resume', value: 'resume' },
       { label: 'Abort remaining work', value: 'abort' },
       { label: 'Review rollback', value: 'rollback' },
+      ...(view.revisions.some(revision => !revision.approved) ? [{ label: 'Review a pending plan revision', value: 'review-revision' }] : []),
       { label: 'Back', value: null }
     ])
     if (!action) return
@@ -2244,6 +2245,12 @@ async function manageExecution ({ ui, controller, serverId, taskId }) {
         ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
         renderPlan(ui, proposal.proposed)
         if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+      } else if (action === 'review-revision') {
+        const revision = await ui.choose('Pending plan revision', view.revisions.filter(revision => !revision.approved).map(revision => ({ label: `#${revision.id} / ${revision.plan.operatorRollback ? 'rollback' : 'remaining work'} / parent #${revision.parentId}`, value: revision })))
+        if (!revision) continue
+        ui.output.write(`${JSON.stringify(revision.differences, null, 2)}\n`)
+        renderPlan(ui, revision.plan)
+        if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, revision.id, view.stateVersion, revision.fingerprint)
       } else if (action === 'resume') {
         renderPlan(ui, view.task.plan)
         if (await ui.confirm('Execute remaining steps of this reviewed plan?', false)) await controller.resume(serverId, taskId, view.stateVersion, view.fingerprint, event => renderTaskProgress(ui, event))
@@ -2626,7 +2633,7 @@ export function renderTaskRecord (ui, task) {
         writeWrapped(ui, event.message)
         if (event.contextSummary) renderWrappedField(ui, 'Reusable update context', event.contextSummary)
       } else {
-        writeWrapped(ui, `[${event.type}] ${event.message}`)
+        writeWrapped(ui, `[${event.type ?? event.phase ?? 'progress'}] ${event.message}`)
       }
     }
   }

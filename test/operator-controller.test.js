@@ -11,6 +11,7 @@ import { planFingerprint } from '../src/execution-journal.js'
 import { executeApprovedPlan } from '../src/plan-validator.js'
 import { MultiHostService } from '../src/multi-host-service.js'
 import { buildCommonTask } from '../src/common-tasks.js'
+import { CodexPlanner } from '../src/codex-planner.js'
 
 const command = id => ({ id, command: `echo ${id}`, purpose: 'Inspect', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [] })
 const plan = ids => ({ summary: 'Inspect', changeOverview: 'Inspect state', modifiedFiles: [], commands: ids.map(command), revertCommands: [] })
@@ -29,6 +30,21 @@ async function fixture (t) {
   const controller = new OperatorController({ dataRoot: root, tasks, settings: { servers: { host: {} }, clusters: { cluster: { desiredStage2: 'active' } } }, adminFor: async () => admin })
   return { root, tasks, task, controller, calls, admin }
 }
+
+test('pending revisions expose canonical review fingerprints without granting execution', async t => {
+  const { controller, task, calls } = await fixture(t)
+  const before = controller.inspect('host', task.id)
+  const proposal = await controller.propose('host', task.id, 'Replace remaining inspection', before.stateVersion)
+  const view = controller.inspect('host', task.id)
+  const pending = view.revisions.find(revision => revision.id === proposal.revisionId)
+  assert.equal(pending.approved, 0)
+  assert.equal(pending.fingerprint, proposal.fingerprint)
+  assert.deepEqual(pending.differences, proposal.differences)
+  assert.throws(() => controller.approve('host', task.id, pending.id, view.stateVersion, 'invalid'), /approval does not match/u)
+  controller.approve('host', task.id, pending.id, view.stateVersion, pending.fingerprint)
+  assert.deepEqual(calls, [])
+  assert.equal(controller.inspect('host', task.id).control.action, 'pause')
+})
 
 test('operator events enforce their UTF-8 byte limit without persisting oversized payloads', async t => {
   const { controller } = await fixture(t)
@@ -254,6 +270,19 @@ test('rollback checks uncertain outcomes after acquiring execution ownership', a
   assert.deepEqual(calls, [])
 })
 
+test('reviewed rollback rechecks newly completed commands after opening the host', async t => {
+  const { tasks, task, admin, calls } = await fixture(t)
+  admin.serverSecrets = async () => {
+    const lease = tasks.acquireExecution('host', task.id, task.plan)
+    try {
+      tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_completed', commandId: 'first', attemptId: 'other-operator' })
+    } finally { tasks.releaseExecution('host', task.id, lease.owner) }
+    return {}
+  }
+  await assert.rejects(admin.revertTask({ settings: {}, serverId: 'host', taskId: task.id, reviewedPlan: { ...plan(['first']), operatorRollback: true }, approve: async () => true }), /executed deployment command/u)
+  assert.deepEqual(calls, [])
+})
+
 test('operator rollback updates its linked host and aggregate run status', async t => {
   for (const [otherHost, exitCode, expected] of [[false, 0, 'reverted'], [true, 0, 'partial'], [true, 1, 'revert_failed']]) {
     await t.test(expected, async t => {
@@ -305,12 +334,49 @@ test('read-only analysis of a common-task plan redacts the vault secret and neve
   assert.deepEqual(tasks.get('host', task.id).plan, approved)
 })
 
-test('a reviewed changing rollback does not require a rollback of its own', async t => {
+test('an AI-supplied rollback flag cannot turn an ordinary revision into cleanup', async t => {
   const { tasks, task, controller, admin, calls } = await fixture(t)
   const lease = tasks.acquireExecution('host', task.id, task.plan)
   tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_completed', commandId: 'first', attemptId: 'confirmed' })
   tasks.releaseExecution('host', task.id, lease.owner)
-  admin.plan = async () => ({ ...plan(['cleanup']), commands: [{ ...command('cleanup'), command: 'rm -f /tmp/intent-fixture', risk: 'change' }] })
+  admin.plan = async () => ({ ...plan(['revised']), operatorRollback: true })
+  const before = controller.inspect('host', task.id)
+  const proposal = await controller.propose('host', task.id, 'Inspect remaining state', before.stateVersion)
+  assert.equal(proposal.proposed.operatorRollback, false)
+  controller.approve('host', task.id, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+  const saved = controller.inspect('host', task.id)
+  assert.deepEqual(saved.task.plan.commands.map(item => item.id), ['first', 'revised'])
+  assert.equal(saved.reviewedRollbackFingerprint, null)
+  assert.deepEqual(calls, [])
+})
+
+test('legacy reviewed rollback revisions cannot repeat completed deployment commands', async t => {
+  const { tasks, task, controller, calls } = await fixture(t)
+  const lease = tasks.acquireExecution('host', task.id, task.plan)
+  tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_completed', commandId: 'first', attemptId: 'confirmed' })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  const revision = { ...plan(['first', 'cleanup']), operatorRollback: true }
+  const version = tasks.stateVersion('host', task.id)
+  const revisionId = tasks.proposeRevision('host', task.id, revision, version)
+  controller.approve('host', task.id, revisionId, version, planFingerprint(revision))
+  const approved = controller.inspect('host', task.id)
+  await assert.rejects(controller.rollback('host', task.id, approved.stateVersion, approved.reviewedRollbackFingerprint, revisionId), /executed deployment command/u)
+  assert.deepEqual(calls, [])
+})
+
+test('a reviewed changing rollback does not require a rollback of its own', async t => {
+  const { root, tasks, task, controller, admin, calls } = await fixture(t)
+  const lease = tasks.acquireExecution('host', task.id, task.plan)
+  tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_completed', commandId: 'first', attemptId: 'confirmed' })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  const cleanup = { ...plan(['cleanup']), commands: [{ ...command('cleanup'), command: 'rm -f /tmp/intent-fixture', risk: 'change' }] }
+  admin.planner = new CodexPlanner()
+  admin.planner.runStructured = async () => JSON.stringify(cleanup)
+  admin.plan = AdminService.prototype.plan.bind(admin)
+  admin.refreshInventory = async () => ({ os: 'linux' })
+  admin.workspace.loadRules = async () => ({ policy: {}, preferences: { docker: 'auto' } })
+  admin.workspace.directory = () => root
+  await assert.rejects(admin.plan({ settings: {}, serverId: 'host', request: 'Change a fixture' }), /requires revert commands/u)
   const before = controller.inspect('host', task.id)
   const proposed = await controller.propose('host', task.id, 'Revert the confirmed fixture change', before.stateVersion, true)
   assert.equal(proposed.proposed.operatorRollback, true)
@@ -381,6 +447,38 @@ test('console error responses redact the vault passphrase even without a credent
   assert.ok(!body.includes(controller.passphrase))
   assert.match(body, /redacted/u)
   assert.deepEqual(calls, [])
+})
+
+test('console proposals require separate approval and resume with canonical decision tokens', async t => {
+  const { controller, task, calls } = await fixture(t)
+  const server = await startOperatorConsole({ controller, actions: true })
+  t.after(() => server.close())
+  const login = await fetch(`${server.origin}/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: new URL(server.url).hash.slice(1) }) })
+  const session = await login.json()
+  const headers = { 'Content-Type': 'application/json', Cookie: login.headers.get('set-cookie').split(';')[0], 'X-Intent-CSRF': session.csrf }
+  const post = body => fetch(`${server.origin}/action`, { method: 'POST', headers, body: JSON.stringify(body) })
+  const inspect = async () => (await fetch(`${server.origin}/task?host=host&task=${task.id}`, { headers })).json()
+  const initial = await inspect()
+  const proposed = await post({ action: 'propose', hostId: 'host', taskId: task.id, instructions: 'Replace pending inspection', expectedVersion: initial.stateVersion })
+  assert.equal(proposed.status, 200)
+  const proposal = await proposed.json()
+  assert.match(proposal.fingerprint, /^[a-f0-9]{64}$/u)
+  assert.equal(proposal.expectedVersion, initial.stateVersion)
+  assert.equal((await inspect()).revisions.find(revision => revision.id === proposal.revisionId).fingerprint, proposal.fingerprint)
+  const approval = { action: 'approve', hostId: 'host', taskId: task.id, expectedVersion: proposal.expectedVersion, fingerprint: proposal.fingerprint, revisionId: proposal.revisionId }
+  assert.equal((await post(approval)).status, 409)
+  assert.deepEqual(calls, [])
+  assert.equal((await post({ ...approval, approved: true })).status, 200)
+  const reviewed = await inspect()
+  assert.equal(reviewed.control.action, 'pause')
+  assert.deepEqual(calls, [])
+  const resume = { action: 'resume', hostId: 'host', taskId: task.id, expectedVersion: reviewed.stateVersion, fingerprint: reviewed.fingerprint, approved: true }
+  assert.equal((await post(resume)).status, 200)
+  for (let attempt = 0; attempt < 100 && controller.inspect('host', task.id).task.status !== 'completed'; attempt++) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(controller.inspect('host', task.id).task.status, 'completed')
+  assert.deepEqual(calls, ['echo revised'])
+  assert.equal((await post(resume)).status, 409)
+  assert.deepEqual(calls, ['echo revised'])
 })
 
 test('console enforces authentication, origin, CSRF, read-only mode, and stale approvals', async t => {

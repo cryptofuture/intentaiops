@@ -25,6 +25,109 @@ test('system-user rollback without its baseline preserves an existing account', 
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('system fixture rollback without task state preserves existing files and services', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-system-rollback-'))
+  try {
+    for (const id of ['system-user', 'swap-file', 'systemd-service', 'systemd-timer', 'cron-job', 'logrotate-rule', 'tmpfiles-rule']) {
+      const built = buildCommonTask(id, 337)
+      const directory = `${root}/${id}`
+      const files = built.plan.modifiedFiles.filter(file => !file.startsWith('/var/lib/webminai/task-state/')).map(file => directory + file)
+      for (const file of files) {
+        mkdirSync(path.dirname(file), { recursive: true })
+        writeFileSync(file, 'existing operator data\n')
+      }
+      const command = built.plan.revertCommands[0].command.replace(/\/(?:var\/|etc\/|run\/|tmp\/|swapfile-webminai-test)/gu, prefix => directory + prefix)
+      const result = spawnSync('/bin/sh', ['-c', `systemctl () { printf unexpected; }; swapoff () { printf unexpected; }; id () { return 0; }; userdel () { printf unexpected; }; deluser () { printf unexpected; }; ${command}`], { encoding: 'utf8' })
+      assert.equal(result.status, 0, `${id}: ${result.stderr}`)
+      assert.equal(result.stdout, '', id)
+      for (const file of files) assert.equal(readFileSync(file, 'utf8'), 'existing operator data\n', id)
+      const state = directory + built.plan.modifiedFiles.find(file => file.startsWith('/var/lib/webminai/task-state/'))
+      mkdirSync(path.dirname(state), { recursive: true })
+      symlinkSync(directory, state)
+      const linked = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+      assert.notEqual(linked.status, 0, id)
+      for (const file of files) assert.equal(readFileSync(file, 'utf8'), 'existing operator data\n', id)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('system fixtures reject dangling target links before capturing a baseline', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-system-links-'))
+  try {
+    for (const id of ['systemd-service', 'systemd-timer', 'logrotate-rule', 'tmpfiles-rule']) {
+      const built = buildCommonTask(id, 338)
+      const directory = `${root}/${id}`
+      const target = directory + built.plan.modifiedFiles[0]
+      mkdirSync(path.dirname(target), { recursive: true })
+      const outside = `${directory}/operator-file`
+      symlinkSync(outside, target)
+      const command = built.plan.commands[0].command.replace(/\/(?:var\/|etc\/|run\/)/gu, prefix => directory + prefix)
+      const result = spawnSync('/bin/sh', ['-c', `systemctl () { return 0; }; ${command}`], { encoding: 'utf8' })
+      assert.notEqual(result.status, 0, id)
+      assert.equal(existsSync(outside), false, id)
+      assert.equal(existsSync(directory + built.plan.modifiedFiles.at(-1)), false, id)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('systemd fixtures preserve existing runtime markers before capturing state', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-system-runtime-'))
+  try {
+    for (const id of ['systemd-service', 'systemd-timer']) {
+      const built = buildCommonTask(id, 339)
+      const directory = `${root}/${id}`
+      const marker = directory + built.plan.modifiedFiles.find(file => file.startsWith('/run/'))
+      mkdirSync(path.dirname(marker), { recursive: true })
+      mkdirSync(`${directory}/etc/systemd/system`, { recursive: true })
+      writeFileSync(marker, 'existing operator marker\n')
+      const command = built.plan.commands[0].command.replace(/\/(?:var\/|etc\/|run\/)/gu, prefix => directory + prefix)
+      const result = spawnSync('/bin/sh', ['-c', `systemctl () { return 0; }; ${command}`], { encoding: 'utf8' })
+      assert.notEqual(result.status, 0, id)
+      assert.equal(readFileSync(marker, 'utf8'), 'existing operator marker\n')
+      assert.equal(existsSync(directory + built.plan.modifiedFiles.at(-1)), false, id)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('native PHP file rollback preserves later unowned files once task state is gone', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-php-files-revert-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'debian', VERSION_ID: '13' }, commands: { apt: true } }
+    })
+    for (const id of ['wordpress-linux', 'woocommerce-linux', 'joomla-linux', 'drupal-linux', 'prestashop-linux', 'moodle-linux']) {
+      const built = buildCommonTask(id, 336, { platform: 'linux', linuxContext: context, docker: { preferred: false } })
+      const site = root + built.plan.modifiedFiles.find(value => value.startsWith('/srv/') && !value.includes('moodledata'))
+      const state = root + built.plan.modifiedFiles.find(value => value.startsWith('/var/lib/webminai/task-state/'))
+      assert.ok(!site.endsWith('undefined') && !state.endsWith('undefined'), id)
+      mkdirSync(site, { recursive: true })
+      writeFileSync(`${site}/original`, 'later operator data\n')
+      let command = built.plan.revertCommands.find(item => /remove-(?:application|wordpress)-files/u.test(item.id)).command
+      for (const directory of ['/var/', '/etc/', '/root/', '/run/', '/srv/']) command = command.replaceAll(directory, `${root}${directory}`)
+      const missing = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+      assert.notEqual(missing.status, 0, id)
+      assert.match(missing.stderr, /APPLICATION_OWNERSHIP_UNCONFIRMED/u)
+      assert.equal(readFileSync(`${site}/original`, 'utf8'), 'later operator data\n')
+      mkdirSync(state, { recursive: true })
+      const owned = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+      assert.equal(owned.status, 0, `${id}: ${owned.stderr}`)
+      assert.equal(existsSync(site), false)
+      rmSync(state, { recursive: true })
+      const repeated = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+      assert.equal(repeated.status, 0, `${id}: ${repeated.stderr}`)
+      if (id === 'moodle-linux') {
+        const data = `${root}/srv/webminai-moodledata-18106`
+        mkdirSync(data, { recursive: true })
+        writeFileSync(`${data}/original`, 'later Moodle data\n')
+        const unowned = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+        assert.notEqual(unowned.status, 0)
+        assert.equal(readFileSync(`${data}/original`, 'utf8'), 'later Moodle data\n')
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('native PHP restoration reports failure and retains recovery state', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'intent-php-restore-'))
   try {
@@ -108,6 +211,174 @@ test('Linux PHP native and Compose verification checks preserve HTTP transfer ou
   }
 })
 
+test('WordPress baseline rejects dangling owned paths before recording ownership', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-wordpress-baseline-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'debian', VERSION_ID: '13' }, commands: { apt: true } }
+    })
+    const built = buildCommonTask('wordpress-linux', 331, { platform: 'linux', linuxContext: context })
+    let command = built.plan.commands[0].command
+    for (const directory of ['/var/', '/etc/', '/root/', '/run/', '/srv/']) command = command.replaceAll(directory, `${root}${directory}`)
+    command = command.replace('install -d -o root -g root -m 0700', 'mkdir -p')
+    mkdirSync(`${root}/srv`)
+    symlinkSync(`${root}/missing`, `${root}/srv/webminai-wordpress-18101`)
+    const result = spawnSync('/bin/bash', ['-c', "dpkg-query () { printf 'base-package\\n'; }; systemctl () { return 1; }; " + command], { encoding: 'utf8' })
+    assert.equal(result.status, 1, result.stderr)
+    assert.match(result.stderr, /task target already exists/u)
+    assert.equal(existsSync(`${root}/var/lib/webminai/task-state/331-wordpress-linux`), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Moodle baseline refuses existing data and cron paths before capturing state', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-moodle-baseline-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'debian', VERSION_ID: '13' }, commands: { apt: true } }
+    })
+    const built = buildCommonTask('moodle-linux', 332, { platform: 'linux', linuxContext: context })
+    let command = built.plan.commands[0].command
+    for (const directory of ['/var/', '/etc/', '/root/', '/run/', '/srv/']) command = command.replaceAll(directory, `${root}${directory}`)
+    command = command.replace('install -d -o root -g root -m 0700', 'mkdir -p')
+    const data = `${root}/srv/webminai-moodledata-18106`
+    mkdirSync(data, { recursive: true })
+    writeFileSync(`${data}/original`, 'operator-owned data\n')
+    for (const link of [false, true]) {
+      if (link) { rmSync(data, { recursive: true }); symlinkSync(`${root}/missing`, data) }
+      const result = spawnSync('/bin/bash', ['-c', "dpkg-query () { printf 'base-package\\n'; }; systemctl () { return 1; }; " + command], { encoding: 'utf8' })
+      assert.equal(result.status, 1, result.stderr)
+      assert.match(result.stderr, /task target already exists/u)
+      assert.equal(existsSync(`${root}/var/lib/webminai/task-state/332-moodle-linux`), false)
+      if (!link) assert.equal(readFileSync(`${data}/original`, 'utf8'), 'operator-owned data\n')
+    }
+    rmSync(data)
+    for (const name of ['service', 'timer']) {
+      const entry = `${root}/etc/systemd/system/webminai-moodle-18106-cron.${name}`
+      mkdirSync(path.dirname(entry), { recursive: true })
+      assert.ok(built.plan.modifiedFiles.includes(`/etc/systemd/system/webminai-moodle-18106-cron.${name}`))
+      for (const link of [false, true]) {
+        if (link) symlinkSync(`${root}/missing`, entry)
+        else writeFileSync(entry, 'operator-owned cron\n')
+        const result = spawnSync('/bin/bash', ['-c', "dpkg-query () { printf 'base-package\\n'; }; systemctl () { return 1; }; " + command], { encoding: 'utf8' })
+        assert.equal(result.status, 1, result.stderr)
+        assert.match(result.stderr, /task target already exists/u)
+        assert.equal(existsSync(`${root}/var/lib/webminai/task-state/332-moodle-linux`), false)
+        if (!link) assert.equal(readFileSync(entry, 'utf8'), 'operator-owned cron\n')
+        rmSync(entry)
+      }
+      symlinkSync(`${root}/missing`, entry)
+      mkdirSync(`${root}/var/lib/webminai/task-state/332-moodle-linux`, { recursive: true })
+      let cron = built.plan.commands.find(item => item.id === 'configure-moodle-cron').command
+      for (const directory of ['/var/', '/etc/', '/root/', '/run/', '/srv/']) cron = cron.replaceAll(directory, `${root}${directory}`)
+      const late = spawnSync('/bin/bash', ['-c', 'systemctl () { return 0; }; ' + cron], { encoding: 'utf8' })
+      assert.equal(late.status, 1, late.stderr)
+      assert.equal(existsSync(`${root}/var/lib/webminai/task-state/332-moodle-linux/cron-owned`), false)
+      rmSync(entry)
+      rmSync(`${root}/var/lib/webminai/task-state/332-moodle-linux`, { recursive: true })
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Moodle cron rollback preserves unowned units and reports removal errors', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-moodle-cron-revert-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'debian', VERSION_ID: '13' }, commands: { apt: true } }
+    })
+    const built = buildCommonTask('moodle-linux', 333, { platform: 'linux', linuxContext: context })
+    let command = built.plan.revertCommands.find(item => item.id === 'remove-moodle-cron').command
+    for (const directory of ['/var/', '/etc/']) command = command.replaceAll(directory, `${root}${directory}`)
+    const unit = `${root}/etc/systemd/system/webminai-moodle-18106-cron.service`
+    const state = `${root}/var/lib/webminai/task-state/333-moodle-linux`
+    mkdirSync(path.dirname(unit), { recursive: true })
+    writeFileSync(unit, 'operator unit\n')
+    const unowned = spawnSync('/bin/sh', ['-c', 'systemctl () { printf unexpected; }; ' + command], { encoding: 'utf8' })
+    assert.notEqual(unowned.status, 0)
+    assert.equal(unowned.stdout, '')
+    assert.equal(readFileSync(unit, 'utf8'), 'operator unit\n')
+    mkdirSync(state, { recursive: true })
+    writeFileSync(`${state}/cron-owned`, '')
+    const failure = spawnSync('/bin/sh', ['-c', 'systemctl () { return 0; }; rm () { return 1; }; ' + command], { encoding: 'utf8' })
+    assert.notEqual(failure.status, 0)
+    assert.equal(existsSync(`${state}/cron-owned`), true)
+    assert.equal(readFileSync(unit, 'utf8'), 'operator unit\n')
+    const serviceFailure = spawnSync('/bin/sh', ['-c', 'systemctl () { return 1; }; ' + command], { encoding: 'utf8' })
+    assert.notEqual(serviceFailure.status, 0)
+    assert.equal(readFileSync(unit, 'utf8'), 'operator unit\n')
+    const success = spawnSync('/bin/sh', ['-c', 'systemctl () { return 0; }; ' + command], { encoding: 'utf8' })
+    assert.equal(success.status, 0, success.stderr)
+    assert.equal(existsSync(unit), false)
+    rmSync(state, { recursive: true })
+    const repeated = spawnSync('/bin/sh', ['-c', 'systemctl () { printf unexpected; return 1; }; ' + command], { encoding: 'utf8' })
+    assert.equal(repeated.status, 0, repeated.stderr)
+    assert.equal(repeated.stdout, '')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Alpine PHP nginx validation uses OpenRC preparation before testing configuration', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-alpine-nginx-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'openrc', osRelease: { ID: 'alpine', VERSION_ID: '3.23' }, commands: { apk: true } }
+    })
+    for (const id of ['joomla-linux', 'drupal-linux', 'prestashop-linux', 'moodle-linux']) {
+      const built = buildCommonTask(id, 335, { platform: 'linux', linuxContext: context, docker: { preferred: false } })
+      let command = built.plan.commands.find(item => item.id === 'configure-nginx').command
+      for (const directory of ['/var/', '/etc/', '/run/', '/srv/']) command = command.replaceAll(directory, `${root}${directory}`)
+      command = command.replaceAll('-o root -g root ', '')
+      const script = `nginx () { test -d '${root}/runtime'; }; rc-service () { case "$2" in checkconfig) mkdir -p '${root}/runtime'; nginx -t;; restart|start) test -d '${root}/runtime'; printf restarted > '${root}/restarted';; *) return 1;; esac; }; `
+      const result = spawnSync('/bin/bash', ['-c', script + command], { encoding: 'utf8' })
+      assert.equal(result.status, 0, `${id}: ${result.stderr}`)
+      assert.equal(readFileSync(`${root}/restarted`, 'utf8'), 'restarted')
+      rmSync(`${root}/runtime`, { recursive: true })
+      rmSync(`${root}/restarted`)
+      const rejected = spawnSync('/bin/bash', ['-c', `rc-service () { case "$2" in checkconfig) return 1;; *) printf restarted > '${root}/restarted';; esac; }; ` + command], { encoding: 'utf8' })
+      assert.notEqual(rejected.status, 0, id)
+      assert.equal(existsSync(`${root}/restarted`), false)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Alpine Moodle rollback never signals an uncorrelated live installer PID', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-moodle-pid-'))
+  try {
+    const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('official release') }).build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: 'openrc', osRelease: { ID: 'alpine', VERSION_ID: '3.23' }, commands: { apk: true } }
+    })
+    const built = buildCommonTask('moodle-linux', 334, { platform: 'linux', linuxContext: context })
+    let command = built.plan.revertCommands.find(item => item.id === 'remove-moodle-cron').command
+    for (const directory of ['/var/', '/etc/']) command = command.replaceAll(directory, `${root}${directory}`)
+    const periodic = `${root}/etc/periodic/15min/webminai-moodle-18106`
+    const state = `${root}/var/lib/webminai/task-state/334-moodle-linux`
+    mkdirSync(path.dirname(periodic), { recursive: true })
+    writeFileSync(periodic, 'original cron\n')
+    const unowned = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' })
+    assert.notEqual(unowned.status, 0)
+    assert.equal(readFileSync(periodic, 'utf8'), 'original cron\n')
+    mkdirSync(state, { recursive: true })
+    writeFileSync(`${state}/cron-owned`, '')
+    writeFileSync(`${state}/install-moodle-database.pid`, '12345\n')
+    const live = spawnSync('/bin/bash', ['-c', 'kill () { if [ "$1" = -0 ]; then return 0; fi; printf unsafe-signal; }; rc-service () { return 0; }; rc-update () { return 0; }; ' + command], { encoding: 'utf8' })
+    assert.notEqual(live.status, 0)
+    assert.equal(live.stdout, '')
+    assert.match(live.stderr, /PID_UNCONFIRMED/u)
+    assert.equal(readFileSync(periodic, 'utf8'), 'original cron\n')
+    mkdirSync(`${root}/proc/12345`, { recursive: true })
+    const denied = spawnSync('/bin/bash', ['-c', 'kill () { return 1; }; rc-service () { return 0; }; rc-update () { return 0; }; ' + command.replaceAll('/proc/', `${root}/proc/`)], { encoding: 'utf8' })
+    assert.notEqual(denied.status, 0)
+    assert.match(denied.stderr, /PID_UNCONFIRMED/u)
+    assert.equal(readFileSync(periodic, 'utf8'), 'original cron\n')
+    const done = spawnSync('/bin/bash', ['-c', 'kill () { return 1; }; rc-service () { return 0; }; rc-update () { return 0; }; ' + command], { encoding: 'utf8' })
+    assert.equal(done.status, 0, done.stderr)
+    assert.equal(existsSync(periodic), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('Arch PHP baseline preserves shared nginx configuration but refuses owned paths and dangling links', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'intent-arch-php-baseline-'))
   try {
@@ -131,6 +402,11 @@ test('Arch PHP baseline preserves shared nginx configuration but refuses owned p
     assert.match(blocked.stderr, /task target already exists/u)
     assert.equal(existsSync(state), false)
     rmSync(owned)
+    let cleanup = built.plan.revertCommands.find(item => /remove-(?:application|wordpress)-files/u.test(item.id)).command
+    for (const directory of ['/var/', '/etc/', '/root/', '/run/', '/srv/']) cleanup = cleanup.replaceAll(directory, `${root}${directory}`)
+    const absent = spawnSync('/bin/sh', ['-c', cleanup], { encoding: 'utf8' })
+    assert.equal(absent.status, 0, absent.stderr)
+    assert.equal(readFileSync(config, 'utf8'), 'http {\n}\n')
     const captured = spawnSync('/bin/sh', ['-c', mocks + safeCommand], { encoding: 'utf8' })
     assert.equal(captured.status, 0, captured.stderr)
     assert.equal(readFileSync(`${state}/nginx.conf.before`, 'utf8'), 'http {\n}\n')
@@ -421,6 +697,11 @@ test('Moodle retries truncated acquisition within a bound and never publishes a 
     const expired = spawnSync('/bin/sh', ['-c', `clock=0; date () { clock=$((clock+1)); if [ -f '${root}/clock' ]; then printf 4301; else touch '${root}/clock'; printf 1000; fi; }; curl () { touch '${root}/unexpected-download'; }; ` + command], { encoding: 'utf8' })
     assert.equal(expired.status, 1)
     assert.equal(existsSync(path.join(root, 'unexpected-download')), false)
+    rmSync(path.join(root, 'moodle.tar.gz'), { force: true })
+    const http2Reset = `calls=0; curl () { calls=$((calls+1)); printf partial > '${root}/moodle.tar.gz.tmp'; if [ "$calls" -gt 1 ]; then case " $* " in *' --http1.1 '*) printf 'verified fixture' > '${root}/moodle.tar.gz.tmp'; return 0;; esac; fi; return 92; }; `
+    const recovered = spawnSync('/bin/sh', ['-c', http2Reset + command], { encoding: 'utf8' })
+    assert.equal(recovered.status, 0, recovered.stderr)
+    assert.equal(readFileSync(path.join(root, 'moodle.tar.gz'), 'utf8'), 'verified fixture')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

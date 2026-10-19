@@ -73,8 +73,12 @@ export function moodleComposeAssets () {
 function configureNativePlan (built, taskId, linuxContext) {
   const profile = taskProfile(linuxPhpApplicationProfile(linuxContext, applicationContract()))
   const state = `/var/lib/webminai/task-state/${taskId}-moodle-linux`
+  const cronPaths = profile.phpFpmService.endsWith('.service')
+    ? [`/etc/systemd/system/${SITE}-cron.service`, cronPath(profile)]
+    : [cronPath(profile)]
+  const baseline = built.plan.commands.find(item => item.id === 'capture-baseline')
+  baseline.command = baseline.command.replace('for path in ', `for path in ${[DATA_ROOT, ...cronPaths].map(quote).join(' ')} `)
   if (linuxContext.management.family === 'rhel') {
-    const baseline = built.plan.commands.find(item => item.id === 'capture-baseline')
     if (requiresEl9Streams(linuxContext)) baseline.command = rhelDatabaseBaselineCommand(baseline.command, state)
     const packages = built.plan.commands.find(item => item.id === 'install-packages')
     packages.command = rhelSclRepositoryCommand(packages.command, linuxContext, state)
@@ -93,9 +97,9 @@ function configureNativePlan (built, taskId, linuxContext) {
   insertNativeCron(built.plan, profile, state, taskId)
   replaceCommand(built.plan, 'verify-moodle', nativeVerifyCommand(profile), 'Verify Moodle, database state, writable data, cron, socket, login, and the external marker')
   extendNativeRevert(built.plan, profile, state, taskId)
-  built.plan.modifiedFiles.push(`${ARTIFACTS}/moodle.tar.gz`, `${WEB_ROOT}/.webminai-installer-argv.php`, `${WEB_ROOT}/config.php`, cronPath(profile))
+  built.plan.modifiedFiles.push(`${ARTIFACTS}/moodle.tar.gz`, `${WEB_ROOT}/.webminai-installer-argv.php`, `${WEB_ROOT}/config.php`, ...cronPaths)
   built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/config.php`)} && test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)} && test -S ${quote(profile.phpFpmListener)} && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
-  built.verifyReverted = `test ! -e ${quote(WEB_ROOT)} && test ! -e ${quote(DATA_ROOT)} && test ! -e ${quote(ARTIFACTS)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && test ! -e ${quote(cronPath(profile))}`
+  built.verifyReverted = [WEB_ROOT, DATA_ROOT, ARTIFACTS, CREDENTIALS, state, ...cronPaths].map(path => `test ! -e ${quote(path)} && test ! -L ${quote(path)}`).join(' && ')
 }
 
 function configureComposePlan (built, taskId, linuxContext) {
@@ -276,11 +280,12 @@ function artifactCommand () {
     `install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}`,
     `if [ -s ${quote(archive)} ] && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(archive)} | sha256sum -c - >/dev/null 2>&1; then printf '%s\n' artifact-already-verified; exit 0; fi`,
     'deadline=$(($(date +%s) + 3300))',
+    'http1=',
     'for attempt in 1 2 3; do remaining=$((deadline - $(date +%s))); [ "$remaining" -gt 0 ] || break; [ "$remaining" -le 3300 ] || remaining=3300',
-    `if curl --fail --location --silent --show-error --connect-timeout 15 --max-time "$remaining" --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)} && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(`${archive}.tmp`)} | sha256sum -c - >/dev/null; then :`,
+    `if curl $http1 --fail --location --silent --show-error --connect-timeout 15 --max-time "$remaining" --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)} && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(`${archive}.tmp`)} | sha256sum -c - >/dev/null; then :`,
     `mv -f -- ${quote(`${archive}.tmp`)} ${quote(archive)}`,
     "printf '%s\n' artifact-verified; exit 0",
-    'fi; done',
+    'fi; http1=--http1.1; done',
     "printf '%s\n' ARTIFACT_DOWNLOAD_FAILED >&2; exit 1"
   ].join('; ')
 }
@@ -423,12 +428,12 @@ function nativeCronCommand (profile, state) {
     const owned = `${state}/cron-owned`
     const serviceLines = ['[Unit]', 'Description=Intent AI Ops Moodle cron', '[Service]', 'Type=oneshot', `User=${profile.phpFpmUser}`, `Group=${profile.phpFpmGroup}`, `ExecStart=/bin/sh -c ${quote(execution)}`]
     const timerLines = ['[Unit]', 'Description=Run Intent AI Ops Moodle cron every minute', '[Timer]', 'OnBootSec=1min', 'OnUnitActiveSec=1min', `Unit=${SITE}-cron.service`, '[Install]', 'WantedBy=timers.target']
-    return `set -eu; if [ ! -e ${quote(owned)} ]; then test ! -e ${quote(service)}; test ! -e ${quote(timer)}; : > ${quote(owned)}; fi; ${writeCandidate(service, serviceLines, '0644')}; ${writeCandidate(timer, timerLines, '0644')}; systemctl daemon-reload; systemctl enable --now ${quote(`${SITE}-cron.timer`)} >/dev/null; systemctl start ${quote(`${SITE}-cron.service`)}; test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)}; printf '%s\n' cron-ready`
+    return `set -eu; if [ ! -e ${quote(owned)} ]; then test ! -e ${quote(service)}; test ! -L ${quote(service)}; test ! -e ${quote(timer)}; test ! -L ${quote(timer)}; : > ${quote(owned)}; fi; ${writeCandidate(service, serviceLines, '0644')}; ${writeCandidate(timer, timerLines, '0644')}; systemctl daemon-reload; systemctl enable --now ${quote(`${SITE}-cron.timer`)} >/dev/null; systemctl start ${quote(`${SITE}-cron.service`)}; test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)}; printf '%s\n' cron-ready`
   }
   const periodic = cronPath(profile)
   const owned = `${state}/cron-owned`
   const lines = ['#!/bin/sh', `su -s /bin/sh -c ${quote(execution)} ${quote(profile.phpFpmUser)}`]
-  return `set -eu; if [ ! -e ${quote(owned)} ]; then if rc-service crond status >/dev/null 2>&1; then : > ${quote(`${state}/crond-active.before`)}; fi; if rc-update show default 2>/dev/null | grep -Eq '^[[:space:]]*crond([[:space:]]|$)'; then : > ${quote(`${state}/crond-enabled.before`)}; fi; test ! -e ${quote(periodic)}; : > ${quote(owned)}; fi; printf '%s\n' ${lines.map(quote).join(' ')} > ${quote(periodic)}; chmod 0755 ${quote(periodic)}; rc-update add crond default >/dev/null; rc-service crond start >/dev/null 2>&1 || true; ${quote(periodic)}; test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)}; printf '%s\n' cron-ready`
+  return `set -eu; if [ ! -e ${quote(owned)} ]; then if rc-service crond status >/dev/null 2>&1; then : > ${quote(`${state}/crond-active.before`)}; fi; if rc-update show default 2>/dev/null | grep -Eq '^[[:space:]]*crond([[:space:]]|$)'; then : > ${quote(`${state}/crond-enabled.before`)}; fi; test ! -e ${quote(periodic)}; test ! -L ${quote(periodic)}; : > ${quote(owned)}; fi; printf '%s\n' ${lines.map(quote).join(' ')} > ${quote(periodic)}; chmod 0755 ${quote(periodic)}; rc-update add crond default >/dev/null; rc-service crond start >/dev/null 2>&1 || true; ${quote(periodic)}; test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)}; printf '%s\n' cron-ready`
 }
 
 function nativeVerifyCommand (profile) {
@@ -463,13 +468,18 @@ function extendNativeRevert (plan, profile, state, taskId) {
   const files = plan.revertCommands.find(command => command.id === 'remove-application-files')
   if (!files) throw new Error('Moodle foundation is missing remove-application-files')
   files.command = files.command.replace(`rm -rf -- ${quote(WEB_ROOT)}`, `rm -rf -- ${quote(WEB_ROOT)} ${quote(DATA_ROOT)}`)
+  files.command = files.command.replace('for path in ', `for path in ${quote(DATA_ROOT)} `)
 }
 
 function nativeCronRevertCommand (profile, state, taskId) {
+  const paths = (profile.phpFpmService.endsWith('.service') ? [`/etc/systemd/system/${SITE}-cron.service`, cronPath(profile)] : [cronPath(profile)]).map(quote).join(' ')
+  const absent = `for path in ${paths}; do [ ! -e "$path" ] && [ ! -L "$path" ] || { printf '%s\n' 'MOODLE_CRON_OWNERSHIP_UNCONFIRMED: preserve units and request operator review' >&2; exit 1; }; done`
+  const ownership = `set -eu; if [ ! -d ${quote(state)} ]; then ${absent}; exit 0; fi; owned=; if [ -e ${quote(`${state}/cron-owned`)} ] || [ -L ${quote(`${state}/cron-owned`)} ]; then test -f ${quote(`${state}/cron-owned`)}; test ! -L ${quote(`${state}/cron-owned`)}; owned=yes; else ${absent}; fi`
   if (profile.phpFpmService.endsWith('.service')) {
-    return `set +e; systemctl stop ${quote(`webminai-moodle-install-${taskId}.service`)} >/dev/null 2>&1; systemctl reset-failed ${quote(`webminai-moodle-install-${taskId}.service`)} >/dev/null 2>&1; systemctl disable --now ${quote(`${SITE}-cron.timer`)} >/dev/null 2>&1; rm -f -- ${quote(`/etc/systemd/system/${SITE}-cron.service`)} ${quote(`/etc/systemd/system/${SITE}-cron.timer`)}; systemctl daemon-reload; exit 0`
+    const unit = quote(`webminai-moodle-install-${taskId}.service`)
+    return `${ownership}; load=$(systemctl show ${unit} --property=LoadState --value); if [ -n "$load" ] && [ "$load" != not-found ]; then systemctl stop ${unit}; fi; if [ "$owned" = yes ]; then systemctl disable --now ${quote(`${SITE}-cron.timer`)}; systemctl stop ${quote(`${SITE}-cron.service`)}; rm -f -- ${paths}; systemctl daemon-reload; fi`
   }
-  return `set +e; if [ -s ${quote(`${state}/install-moodle-database.pid`)} ]; then kill "$(sed -n 1p ${quote(`${state}/install-moodle-database.pid`)})" >/dev/null 2>&1; fi; rm -f -- ${quote(cronPath(profile))}; if [ -d ${quote(state)} ]; then if [ ! -e ${quote(`${state}/crond-active.before`)} ]; then rc-service crond stop >/dev/null 2>&1; fi; if [ ! -e ${quote(`${state}/crond-enabled.before`)} ]; then rc-update del crond default >/dev/null 2>&1; fi; fi; exit 0`
+  return `${ownership}; if [ -s ${quote(`${state}/install-moodle-database.pid`)} ]; then pid=$(sed -n 1p ${quote(`${state}/install-moodle-database.pid`)}); case "$pid" in ''|*[!0-9]*|0|1) printf '%s\n' MOODLE_INSTALLER_PID_UNCONFIRMED >&2; exit 1;; esac; if [ -d "/proc/$pid" ] || kill -0 "$pid" 2>/dev/null; then printf '%s\n' 'MOODLE_INSTALLER_PID_UNCONFIRMED: inspect the live process before cleanup; no signal was sent' >&2; exit 1; fi; fi; if [ "$owned" = yes ]; then rm -f -- ${paths}; if [ ! -e ${quote(`${state}/crond-active.before`)} ] && rc-service crond status >/dev/null 2>&1; then rc-service crond stop; fi; if [ ! -e ${quote(`${state}/crond-enabled.before`)} ]; then rc-update del crond default; fi; fi`
 }
 
 function cronPath (profile) {

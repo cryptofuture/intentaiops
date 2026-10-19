@@ -5,6 +5,16 @@ import { executeApprovedPlan, validateCommandPlan } from '../src/plan-validator.
 
 const ROOT_POLICY = rootExecutionPolicy({})
 
+test('redaction markers cannot become executable command inputs', () => {
+  for (const marker of ['[redacted-ssh-url]', '[redacted-64-hex]', '[redacted-private-key]']) {
+    for (const key of ['commands', 'revertCommands']) {
+      const candidate = plan()
+      candidate[key][0].command = `printf '%s' '${marker}' | sha256sum -c -`
+      assert.throws(() => validateCommandPlan(candidate, ROOT_POLICY), /redaction placeholder/u)
+    }
+  }
+})
+
 function plan () {
   return {
     summary: 'Inspect and then change',

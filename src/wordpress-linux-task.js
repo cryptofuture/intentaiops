@@ -1,4 +1,4 @@
-import { mariadbDataPreflight, wordpressArtifactCommand } from './linux-php-foundation.js'
+import { applicationFileOwnershipGuard, mariadbDataPreflight, wordpressArtifactCommand } from './linux-php-foundation.js'
 import { applicationDatabaseCommand } from './linux-application-database.js'
 
 const SITE = 'webminai-wordpress-18101'
@@ -45,7 +45,7 @@ export function buildWordpressLinuxTask (taskId, linuxContext) {
   }
   const revertCommands = [
     command('remove-wordpress-database', applicationDatabaseCommand({ state, database: DATABASE, host: profile.databaseHost, rollback: true }), 'Drop only the task-owned WordPress database and local user after verifying ownership'),
-    command('remove-wordpress-files', removeFilesCommand({ state, profile }), 'Remove task-owned site, credentials, artifacts, and configuration, restoring nginx main configuration', ['remove-wordpress-database']),
+    command('remove-wordpress-files', removeFilesCommand({ state, profile, modifiedFiles }), 'Remove task-owned site, credentials, artifacts, and configuration, restoring nginx main configuration', ['remove-wordpress-database']),
     command('restore-packages-services', restoreCommand({ state, family, profile, services }), 'Restore service activity, package state, and database data-directory baseline', ['remove-wordpress-files'])
   ]
   return {
@@ -76,7 +76,7 @@ function baselineCommand ({ state, family, profile, services }) {
     mariadbDataPreflight(),
     `state=${quote(state)}`,
     'if [ ! -s "$state/packages.before" ]; then :',
-    `for path in ${targets.map(quote).join(' ')}; do [ ! -e "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`,
+    `for path in ${targets.map(quote).join(' ')}; do [ ! -e "$path" ] && [ ! -L "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`,
     'install -d -o root -g root -m 0700 "$state"',
     packageSnapshot(family, '"$state/packages.before"'),
     ...services.map((service, index) => `${serviceActive(service)} && : > "$state/service-${index}.active" || true`),
@@ -211,9 +211,10 @@ function publishCommand (profile) {
   ].join('; ')
 }
 
-function removeFilesCommand ({ state, profile }) {
+function removeFilesCommand ({ state, profile, modifiedFiles }) {
   return [
     'set -eu',
+    applicationFileOwnershipGuard(state, modifiedFiles.filter(path => path !== state && path !== profile.nginxMainConfig)),
     `rm -rf -- ${quote(WEB_ROOT)} ${quote(ARTIFACTS)} ${quote(CREDENTIALS)} ${quote(profile.phpFpmRuntimeDirectory)}`,
     `rm -f -- ${quote(profile.phpFpmPool)} ${quote(profile.nginxVhost)}`,
     profile.phpExtensionConfig ? `rm -f -- ${quote(profile.phpExtensionConfig)}` : ':',
@@ -245,7 +246,7 @@ function packageSnapshot (family, destination) {
 
 function installPackages (family, packages) {
   const list = packages.map(quote).join(' ')
-  if (family === 'debian') return `env DEBIAN_FRONTEND=noninteractive apt-get update; env DEBIAN_FRONTEND=noninteractive apt-get install -y ${list}`
+  if (family === 'debian') return `env DEBIAN_FRONTEND=noninteractive apt-get update; env DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade -y ${list}`
   if (family === 'alpine') return `apk add --no-cache ${list}`
   if (family === 'arch') return `pacman -Sy --noconfirm --needed ${list}`
   if (family === 'suse') return `zypper --non-interactive refresh; zypper --non-interactive install --no-recommends ${list}`

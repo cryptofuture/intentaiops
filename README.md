@@ -221,6 +221,8 @@ Failure details now separate **what happened** from **why it may have happened**
 2. Inspect what completed and what remains. If a connection was lost, use **Reconcile durable remote outcomes** to check recorded remote jobs. If the outcome is still unknown, investigate the host before continuing. Do not assume the command failed or rerun it blindly.
 3. Choose **Review and resume** to continue, or **Revise remaining steps** to change the plan. Review the differences, approve the replacement, then resume. Completed commands stay unchanged.
 
+Use **Review a pending plan revision** to reopen a proposal you did not approve earlier. Approval leaves execution paused; **Review and resume** is a separate step.
+
 For example: “Use port 8080 instead of 80 for the remaining deployment steps.” You can also ask Codex a read-only question, abort remaining work, or review a rollback. A partly completed task needs a separately reviewed rollback proposal.
 
 To pause during a single-host task, enable **intervention at command boundaries** after reviewing the plan. Pausing stops before the next command; it does not kill a command already running.

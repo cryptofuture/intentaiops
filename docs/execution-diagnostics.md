@@ -39,6 +39,17 @@ not a presumed remote process result. Only a bounded JSON status from a complete
 curl HTTP failure is accepted. A request URL's `timeout` parameter is not evidence
 that execution timed out. Transport errors never authorize command replay.
 
+Explicit ENOENT or “No such file or directory” on a failed command yields
+`PATH_NOT_FOUND`. This reports missing-path evidence without exposing raw paths
+or claiming whether earlier changes completed. Successful warnings stay quiet.
+
+`TARGET_CONFLICT` reports an explicit target-preservation refusal without exposing
+the raw path. Existing data requires inspection, not automatic deletion or retry.
+
+`OWNERSHIP_UNCONFIRMED` reports an explicit application, database or cron ownership
+guard refusal without exposing private paths or raw output. It requests inspection,
+never adoption, retry or deletion of resources whose ownership is unclear.
+
 Host collectors run fixed, signed, read-only commands with five-second remote
 limits and an 8 KiB accepted snapshot limit. Platform discovery uses the existing
 health endpoint without its normal retry loop. After an unrecovered transport

@@ -21,6 +21,8 @@ test('interactive task menus expose verified platform applications and AI-assist
   ].join('\n')
 
   assert.match(source, /Run an AI-assisted task/)
+  assert.match(source, /Review a pending plan revision/u)
+  assert.match(source, /controller\.approve\(serverId, taskId, revision\.id, view\.stateVersion, revision\.fingerprint\)/u)
   assert.match(source, /Run a verified common task/)
   assert.match(source, /Unfinished execution \(may still be active\)/)
   assert.match(source, /Verified \$\{taskPlatform\} tasks eligible for this host/)

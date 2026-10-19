@@ -43,6 +43,26 @@ test('native plugin handles health, signed commands, and replay rejection', asyn
   assert.match(output, /replayed signed payload/)
 })
 
+test('native collector keeps idle connections alive without corrupting signed command responses', { timeout: 30000 }, async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'webminai-plugin-heartbeat-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const keyFile = path.join(directory, 'action.key')
+  await writeFile(keyFile, `${ACTION_KEY}\n`, { mode: 0o600 })
+  const session = startPluginSession(fileURLToPath(new URL('../dist/webminai.plugin', import.meta.url)), { WEBMINAI_KEY_FILE: keyFile })
+  t.after(() => session.stop())
+  await session.waitFor(output => output.includes('FUNCTION GLOBAL "webminai:health"'))
+  const samples = output => (output.match(/BEGIN webminai\.status\nSET active = 1\nEND\n/gu) ?? []).length
+  await session.waitFor(output => samples(output) >= 2, 18000)
+  const response = session.request('heartbeat-tx', 'command', createSignedCommand('sleep 2; printf keepalive-ok', ACTION_KEY))
+  const timer = setTimeout(() => session.signal('SIGALRM'), 250)
+  try {
+    const result = await response
+    assert.equal(result.statusCode, 200)
+    assert.equal(Buffer.from(result.body.stdout, 'base64').toString(), 'keepalive-ok')
+    await session.waitFor(output => samples(output) >= 3)
+  } finally { clearTimeout(timer) }
+})
+
 test('native plugin reports its independent release version', async () => {
   const plugin = fileURLToPath(new URL('../dist/webminai.plugin', import.meta.url))
   const version = await new Promise((resolve, reject) => {
@@ -144,7 +164,12 @@ test('native plugin starts, polls, cancels, and cleans durable command jobs', as
   assert.ok(Number.isInteger(controllerPid) && controllerPid > 1)
   assert.ok(Number.isInteger(commandPid) && commandPid > 1)
   process.kill(controllerPid, 'SIGKILL')
-  const orphaned = await request('job_status', orphanStart.body.jobId)
+  let orphaned
+  for (let attempt = 0; attempt < 20; attempt++) {
+    orphaned = await request('job_status', orphanStart.body.jobId)
+    if (orphaned.body.state !== 'running') break
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
   assert.equal(orphaned.body.state, 'unknown')
   assert.equal(orphaned.body.exitCode, 125)
   assert.match(Buffer.from(orphaned.body.stderr, 'base64').toString(), /controller exited before recording a result/u)
@@ -315,6 +340,7 @@ function startPluginSession (plugin, environment) {
 
   return {
     waitFor,
+    signal: value => child.kill(value),
     async request (transaction, functionName, envelope) {
       const offset = state.stdout.length
       child.stdin.write([

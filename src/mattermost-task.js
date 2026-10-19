@@ -1,3 +1,6 @@
+import { postgresApplicationDatabaseCommand } from './linux-application-database.js'
+import { applicationFileOwnershipGuard } from './linux-php-foundation.js'
+
 const VERSION = '11.7.8'
 const PORT = 18111
 const APP_PORT = 8065
@@ -58,16 +61,16 @@ function buildNativeTask (taskId, context, profile) {
     item('capture-baseline', 'baseline', nativeBaseline(state, paths, profile), 'Capture packages, services, repository stream, and task-owned paths exactly once'),
     item('install-stack', 'packages', nativePackages(state, profile), `Install nginx and PostgreSQL ${profile.postgresMajor}+ through the reviewed ${profile.family} route`, ['capture-baseline'], 1200000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(), 'Generate the PostgreSQL password on-host without emitting it', ['capture-baseline']),
-    item('initialize-database', 'database', nativeDatabase(profile), 'Initialize PostgreSQL and create the isolated Mattermost database role', ['install-stack', 'generate-credentials']),
+    item('initialize-database', 'database', nativeDatabase(state, profile), 'Initialize PostgreSQL and create the isolated Mattermost database role', ['install-stack', 'generate-credentials']),
     item('install-mattermost', 'acquire', nativeAcquire(state), `Download, checksum, and install the official Mattermost Team Edition ${VERSION} tarball`, ['install-stack'], 3600000, 'job'),
     item('configure-mattermost', 'configure', nativeConfigure(paths, profile), 'Create protected runtime configuration, systemd service, storage, and nginx proxy', ['initialize-database', 'install-mattermost']),
     item('verify-mattermost', 'verify', nativeVerify(profile), 'Verify Mattermost health, PostgreSQL persistence, version, marker, and restart recovery', ['configure-mattermost'], 1200000, 'job')
   ]
   commands.find(command => command.id === 'install-mattermost').retry = { attempts: 2, intervalMs: 2000, exitCodes: [143], states: ['timed_out'] }
   const revertCommands = [
-    item('stop-mattermost', 'cleanup', nativeStop(paths), 'Stop and remove only the task-owned Mattermost service and nginx site', [], 300000, undefined, 'destructive'),
-    item('drop-database', 'cleanup', nativeDropDatabase(profile), 'Drop only the task-owned PostgreSQL database and role', ['stop-mattermost'], 300000, undefined, 'destructive'),
-    item('remove-mattermost-files', 'cleanup', `set -eu; rm -rf -- ${quote(APP_ROOT)} ${quote(DATA_ROOT)} ${quote(CREDENTIALS)}`, 'Remove task-owned application, persistent data, and credentials', ['drop-database'], 300000, undefined, 'destructive'),
+    item('stop-mattermost', 'cleanup', nativeStop(state, paths), 'Stop and remove only the task-owned Mattermost service and nginx site', [], 300000, undefined, 'destructive'),
+    item('drop-database', 'cleanup', nativeDropDatabase(state, profile), 'Drop only the task-owned PostgreSQL database and role', ['stop-mattermost'], 300000, undefined, 'destructive'),
+    item('remove-mattermost-files', 'cleanup', `set -eu; ${applicationFileOwnershipGuard(state, [APP_ROOT, DATA_ROOT, CREDENTIALS, paths.serviceFile, paths.nginxVhost, ...(paths.nginxEnableLink ? [paths.nginxEnableLink] : [])])}; rm -rf -- ${quote(APP_ROOT)} ${quote(DATA_ROOT)} ${quote(CREDENTIALS)}`, 'Remove task-owned application, persistent data, and credentials', ['drop-database'], 300000, undefined, 'destructive'),
     item('restore-stack', 'cleanup', nativeRestore(state, paths, profile), 'Restore package, service, and module state from the factual baseline', ['remove-mattermost-files'], 1200000, 'job', 'destructive')
   ]
   return envelope({
@@ -173,7 +176,8 @@ function nativeBaseline (state, paths, profile) {
     ? `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)} | LC_ALL=C sort -u > ${quote(`${state}/packages.before`)}`
     : `rpm -qa --qf '%{NAME}\\n' | LC_ALL=C sort -u > ${quote(`${state}/packages.before`)}`
   return join([
-    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...owned.map(path => `test ! -e ${quote(path)}`),
+    'set -eu', `test ! -L ${quote(state)}`, `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...owned.map(path => `test ! -e ${quote(path)}; test ! -L ${quote(path)}`),
+    "if id webminai-mattermost >/dev/null 2>&1; then printf '%s\\n' 'BASELINE_DRIFT: Mattermost account already exists' >&2; exit 1; fi",
     `install -d -o root -g root -m 0700 ${quote(state)}`, packageSnapshot,
     `systemctl is-active --quiet nginx 2>/dev/null && : > ${quote(`${state}/nginx.active`)} || true`, `systemctl is-enabled --quiet nginx 2>/dev/null && : > ${quote(`${state}/nginx.enabled`)} || true`,
     `systemctl is-active --quiet ${quote(profile.service)} 2>/dev/null && : > ${quote(`${state}/postgres.active`)} || true`, `systemctl is-enabled --quiet ${quote(profile.service)} 2>/dev/null && : > ${quote(`${state}/postgres.enabled`)} || true`,
@@ -213,17 +217,10 @@ function credentialsCommand () {
   ])
 }
 
-function nativeDatabase (profile) {
+function nativeDatabase (state, profile) {
   return join([
     'set -eu', `systemctl start ${quote(profile.service)}`, 'ready=', 'for attempt in $(seq 1 60); do runuser -u postgres -- psql -Atqc \'SELECT 1\' postgres >/dev/null 2>&1 && ready=yes && break; sleep 2; done', '[ "$ready" = yes ]',
-    `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
-    `runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_roles WHERE rolname='${DATABASE_USER}'" postgres | grep -Fx 1 || runuser -u postgres -- createuser --login ${quote(DATABASE_USER)}`,
-    `runuser -u postgres -- psql -v ON_ERROR_STOP=1 -v password="$password" postgres <<'SQL'
-ALTER ROLE ${DATABASE_USER} WITH LOGIN PASSWORD :'password';
-SQL
-:`,
-    `runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_database WHERE datname='${DATABASE}'" postgres | grep -Fx 1 || runuser -u postgres -- createdb -O ${quote(DATABASE_USER)} ${quote(DATABASE)}`,
-    `PGPASSWORD="$password" psql -h 127.0.0.1 -U ${quote(DATABASE_USER)} -d ${quote(DATABASE)} -Atqc 'SELECT 1' | grep -Fx 1`, 'printf \'%s\\n\' database-ready'
+    postgresApplicationDatabaseCommand({ state, database: DATABASE, user: DATABASE_USER, credentials: CREDENTIALS })
   ])
 }
 
@@ -267,29 +264,25 @@ function nativeVerify (profile) {
   ])
 }
 
-function nativeStop (paths) {
+function nativeStop (state, paths) {
   return join([
-    'set -eu', `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, `rm -f -- ${quote(paths.serviceFile)}`, 'systemctl daemon-reload',
+    'set -eu', applicationFileOwnershipGuard(state, [APP_ROOT, DATA_ROOT, CREDENTIALS, paths.serviceFile, paths.nginxVhost, ...(paths.nginxEnableLink ? [paths.nginxEnableLink] : [])]), `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, `rm -f -- ${quote(paths.serviceFile)}`, 'systemctl daemon-reload',
     `rm -f -- ${quote(paths.nginxVhost)}`, ...(paths.nginxEnableLink ? [`rm -f -- ${quote(paths.nginxEnableLink)}`] : []),
     'if command -v nginx >/dev/null 2>&1; then nginx -t', 'systemctl is-active --quiet nginx && systemctl reload nginx || true', 'fi'
   ])
 }
 
-function nativeDropDatabase (profile) {
-  return join([
-    'set -eu', 'if command -v psql >/dev/null 2>&1 && runuser -u postgres -- psql -Atqc \'SELECT 1\' postgres >/dev/null 2>&1; then',
-    `runuser -u postgres -- psql -v ON_ERROR_STOP=1 postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DATABASE}' AND pid <> pg_backend_pid();" >/dev/null`,
-    `runuser -u postgres -- dropdb --if-exists ${quote(DATABASE)}`, `runuser -u postgres -- dropuser --if-exists ${quote(DATABASE_USER)}`, 'fi', 'printf \'%s\\n\' database-removed'
-  ])
+function nativeDropDatabase (state, profile) {
+  return postgresApplicationDatabaseCommand({ state, database: DATABASE, user: DATABASE_USER, credentials: CREDENTIALS, rollback: true })
 }
 
 function nativeRestore (state, paths, profile) {
   const removePackages = profile.family === 'debian'
-    ? `if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(awk '{print $1}' ${quote(`${state}/packages.added`)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages || true; fi`
-    : `if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(`${state}/packages.added`)} | tr '\\n' ' '); [ -z "$packages" ] || dnf remove -y $packages || true; fi`
-  const commands = ['set -eu', `[ -d ${quote(state)} ] || { printf '%s\\n' already-reverted; exit 0; }`]
+    ? `if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(awk '{print $1}' ${quote(`${state}/packages.added`)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages; fi`
+    : `if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(`${state}/packages.added`)} | tr '\\n' ' '); [ -z "$packages" ] || dnf remove -y $packages; fi`
+  const commands = ['set -eu', `test ! -L ${quote(state)}`, `[ -d ${quote(state)} ] || { printf '%s\\n' already-reverted; exit 0; }`]
   if (profile.family === 'debian') {
-    commands.push(`if [ -s ${quote(`${state}/postgres-cluster.created`)} ]; then major=$(sed -n '1p' ${quote(`${state}/postgres-cluster.created`)}); case "$major" in ''|*[!0-9]*) exit 1;; esac; command -v pg_dropcluster >/dev/null 2>&1 && pg_dropcluster --stop "$major" main || true; fi`)
+    commands.push(`if [ -s ${quote(`${state}/postgres-cluster.created`)} ]; then major=$(sed -n '1p' ${quote(`${state}/postgres-cluster.created`)}); case "$major" in ''|*[!0-9]*) exit 1;; esac; command -v pg_dropcluster >/dev/null 2>&1 ; pg_dropcluster --stop "$major" main; fi`)
   } else {
     commands.push(`if [ -f ${quote(`${state}/postgres-hba.before`)} ]; then cp -a -- ${quote(`${state}/postgres-hba.before`)} ${quote(profile.hba)}; elif [ -f ${quote(profile.hba)} ]; then rule='host ${DATABASE} ${DATABASE_USER} 127.0.0.1/32 scram-sha-256'; awk -v rule="$rule" '$0 != rule' ${quote(profile.hba)} > ${quote(`${profile.hba}.webminai-new`)}; chown postgres:postgres ${quote(`${profile.hba}.webminai-new`)}; chmod 0600 ${quote(`${profile.hba}.webminai-new`)}; mv ${quote(`${profile.hba}.webminai-new`)} ${quote(profile.hba)}; fi`)
   }
@@ -300,7 +293,7 @@ function nativeRestore (state, paths, profile) {
   commands.push(`if [ ! -e ${quote(`${state}/postgres-data.existed`)} ]; then rm -rf -- ${quote(profile.dataRoot)}; fi`)
   commands.push(`if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx >/dev/null 2>&1 || true; else systemctl disable nginx >/dev/null 2>&1 || true; fi`, `if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx 2>/dev/null || true; fi`)
   commands.push(`if [ -e ${quote(`${state}/postgres.enabled`)} ]; then systemctl enable ${quote(profile.service)} >/dev/null 2>&1 || true; else systemctl disable ${quote(profile.service)} >/dev/null 2>&1 || true; fi`, `if [ -e ${quote(`${state}/postgres.active`)} ]; then systemctl start ${quote(profile.service)}; else systemctl stop ${quote(profile.service)} 2>/dev/null || true; fi`)
-  commands.push('id webminai-mattermost >/dev/null 2>&1 && userdel webminai-mattermost 2>/dev/null || true', `rm -rf -- ${quote(state)}`)
+  commands.push('if id webminai-mattermost >/dev/null 2>&1; then userdel webminai-mattermost; fi', `rm -rf -- ${quote(state)}`)
   return join(commands)
 }
 

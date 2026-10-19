@@ -13,8 +13,10 @@ export function detectOperationLoop (history, { repeatedFailures = 3, maxAttempt
     if (!item) continue
     const signature = failed.failure ?? classifyFailure({ item, result: failed.result })
     const command = sanitizePlannerData(item.command).replace(/\s+/gu, ' ').trim()
-    const fingerprint = createHash('sha256').update(JSON.stringify([command, signature.code, sanitizePlannerData(failed.result), sanitizePlannerData(failed.diagnostic)])).digest('hex')
-    const diagnosticFingerprint = createHash('sha256').update(JSON.stringify([signature.code, sanitizePlannerData(failed.diagnostic ?? failed.result)])).digest('hex')
+    const result = sanitizePlannerData(failed.result)
+    if (result && typeof result === 'object') for (const key of ['jobId', 'attemptId', 'observedAt', 'startedAt', 'finishedAt', 'durationMs', 'pid']) delete result[key]
+    const fingerprint = createHash('sha256').update(JSON.stringify([command, signature.code, result, sanitizePlannerData(failed.diagnostic)])).digest('hex')
+    const diagnosticFingerprint = createHash('sha256').update(JSON.stringify([signature.code, sanitizePlannerData(failed.diagnostic) ?? result])).digest('hex')
     evidence.push({ taskId: task.id, fingerprint, diagnosticFingerprint, failureCode: signature.code, completed: (task.results ?? []).filter(result => result.status === 'completed').length })
   }
   const tail = evidence.slice(-repeatedFailures)

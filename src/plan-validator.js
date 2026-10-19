@@ -60,6 +60,7 @@ function validateCommandItems (commands, { policy, maxTimeoutMs, maxJobTimeoutMs
       throw new TypeError(`command ${item.id} is empty or too long`)
     }
     if (item.command.includes('\0')) throw new TypeError(`command ${item.id} contains a NUL byte`)
+    if (/\[redacted-(?:64-hex|private-key|ssh-url)\]/iu.test(item.command)) throw new Error(`command ${item.id} contains an unresolved redaction placeholder`)
     const invokesSudo = /(^|[^A-Za-z0-9_])sudo([^A-Za-z0-9_]|$)/u.test(item.command)
     if (invokesSudo) throw new Error(`command ${item.id} includes sudo but Stage 2 already executes as root`)
     if (/webminai(?::|%3a)command/iu.test(item.command)) {

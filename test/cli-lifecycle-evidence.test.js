@@ -30,6 +30,10 @@ function fixture () {
     afterFirstRevert: record(4, read),
     afterSecondRevert: record(5, read)
   }
+  return ordered(value)
+}
+
+function ordered (value) {
   const forward = task => task.events.filter(event => !event.metadata.operation)
   const rollback = task => task.events.filter(event => event.metadata.operation === 'rollback')
   let id = 1
@@ -43,11 +47,78 @@ test('CLI lifecycle evidence proves unchanged repeat state, both rollbacks and n
   assert.deepEqual(assertCliLifecycleEvidence(fixture()), { firstTask: 2, repeatTask: 3, commands: 1, rollbackCommands: 1, scope: 'reviewed state probe and single-dispatch journal evidence' })
 })
 
+function revisedFixture () {
+  const value = fixture()
+  const setup = command('setup', 'confirmed-original-setup')
+  const obsolete = command('failed', 'confirmed-failed-configuration')
+  const original = { commands: [setup, obsolete], revertCommands: value.first.plan.revertCommands }
+  const revised = { commands: [setup, command('continued', 'reviewed-remaining-work')], revertCommands: original.revertCommands }
+  value.first = record(2, revised, 'reverted')
+  value.repeat = record(3, { commands: [{ ...probe, id: 'before-repeat' }, ...structuredClone(revised.commands), { ...probe, id: 'after-repeat' }], revertCommands: structuredClone(revised.revertCommands) }, 'reverted', applied)
+  value.first.revisions = [{ approved: 1, plan: original }, { approved: 1, plan: revised }]
+  for (const event of value.first.events.filter(event => event.commandId === 'setup')) event.revision = planFingerprint(original)
+  value.first.events.splice(4, 0, ...['plan_approved', 'command_prepared', 'command_dispatched', 'command_failed'].map(type => ({ type, commandId: 'failed', attemptId: type === 'plan_approved' ? null : 'failed-attempt', revision: planFingerprint(original), metadata: type === 'command_failed' ? { exitCode: 1 } : {} })))
+  return ordered(value)
+}
+
+test('CLI lifecycle evidence preserves confirmed history across approved forward revisions', () => {
+  const result = assertCliLifecycleEvidence(revisedFixture())
+  assert.equal(result.commands, 2)
+})
+
+for (const [name, change] of [
+  ['unapproved historical revision', value => { value.first.revisions[0].approved = 0 }],
+  ['rewritten completed definition', value => { value.first.revisions[0].plan.commands[0].command = 'different-setup' }],
+  ['uncertain removed operation', value => { value.first.events.find(event => event.commandId === 'failed' && event.type === 'command_failed').type = 'command_outcome_unknown' }],
+  ['discarded completed operation', value => { value.first.events.find(event => event.commandId === 'failed' && event.type === 'command_failed').type = 'command_completed' }],
+  ['missing historical preparation', value => { value.first.events = value.first.events.filter(event => !(event.commandId === 'failed' && event.type === 'command_prepared')) }]
+]) {
+  test(`CLI lifecycle evidence rejects ${name}`, () => {
+    const value = revisedFixture()
+    change(value)
+    assert.throws(() => assertCliLifecycleEvidence(value))
+  })
+}
+
+function retriedFixture () {
+  const value = fixture()
+  const retry = { attempts: 3, intervalMs: 0, exitCodes: [75] }
+  value.first.plan.commands[0].retry = retry
+  value.repeat.plan.commands[1].retry = structuredClone(retry)
+  value.first.results[0].attempts = 2
+  value.first.events.splice(1, 0, ...['command_prepared', 'command_dispatched', 'command_failed'].map(type => ({ commandId: 'apply', attemptId: 'pending-poll', revision: '', type, metadata: type === 'command_failed' ? { exitCode: 75 } : {} })))
+  for (const task of [value.first, value.repeat]) for (const event of task.events) event.revision = planFingerprint(task.plan)
+  return ordered(value)
+}
+
+test('CLI lifecycle evidence accepts only confirmed attempts within a reviewed retry contract', () => {
+  assert.equal(assertCliLifecycleEvidence(retriedFixture()).scope, 'reviewed state probe and declared-retry journal evidence')
+})
+
+for (const [name, change] of [
+  ['uncertain retry', value => { value.first.events.find(event => event.type === 'command_failed').type = 'command_outcome_unknown' }],
+  ['undeclared exit code', value => { value.first.events.find(event => event.type === 'command_failed').metadata.exitCode = 1 }],
+  ['retry limit exceeded', value => { value.first.plan.commands[0].retry.attempts = 1 }],
+  ['unrecorded attempt count', value => { delete value.first.results[0].attempts }],
+  ['operator attestation is not an automatic retry result', value => { value.first.events.find(event => event.type === 'command_failed').metadata.reconciled = true }],
+  ['native state evidence missing', value => { value.first.plan.commands[0].retry.states = ['failed'] }],
+  ['overlapping attempts', value => { const events = value.first.events; const previous = events.find(event => event.type === 'command_failed'); events.splice(events.indexOf(previous), 1); events.splice(events.findIndex(event => event.type === 'command_completed'), 0, previous) }]
+]) {
+  test(`CLI lifecycle evidence rejects ${name}`, () => {
+    const value = retriedFixture()
+    change(value)
+    assert.throws(() => assertCliLifecycleEvidence(value))
+  })
+}
+
 for (const [name, change] of [
   ['duplicate dispatch', value => value.first.events.push(value.first.events.find(event => event.type === 'command_dispatched'))],
   ['missing approval', value => { value.first.events = value.first.events.filter(event => event.type !== 'plan_approved') }],
   ['missing durable intent', value => { value.first.events = value.first.events.filter(event => event.type !== 'command_prepared') }],
   ['wrong execution attempt', value => { value.first.events.find(event => event.type === 'command_completed').attemptId = 'different-attempt' }],
+  ['stale approval revision', value => { for (const event of value.first.events.filter(event => !event.metadata.operation && ['plan_approved', 'command_dispatched'].includes(event.type))) event.revision = 'old-approved-plan' }],
+  ['unapproved preparation revision', value => { value.first.events.find(event => event.type === 'command_prepared').revision = 'different-plan' }],
+  ['orphan completion', value => { const done = value.first.events.find(event => event.type === 'command_completed'); value.first.events.splice(value.first.events.indexOf(done) + 1, 0, { ...done, attemptId: 'unrecorded-attempt' }); ordered(value) }],
   ['unresolved observation', value => value.first.events.push({ ...value.first.events.at(-5), type: 'command_outcome_unknown', metadata: {} })],
   ['changed apply', value => { value.repeat.plan.commands[1].command = 'different-action' }],
   ['changed rollback', value => { value.repeat.plan.revertCommands = [{ ...value.repeat.plan.revertCommands[0], command: 'different-rollback' }] }],

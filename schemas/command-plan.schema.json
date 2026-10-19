@@ -2,6 +2,22 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "$defs": {
+    "retry": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["attempts", "intervalMs", "exitCodes", "states"],
+          "properties": {
+            "attempts": { "type": "integer", "minimum": 2, "maximum": 120 },
+            "intervalMs": { "type": "integer", "minimum": 0, "maximum": 10000 },
+            "exitCodes": { "type": "array", "minItems": 1, "maxItems": 8, "items": { "type": "integer", "minimum": 1, "maximum": 255 } },
+            "states": { "anyOf": [{ "type": "array", "minItems": 1, "maxItems": 2, "items": { "enum": ["failed", "timed_out"] } }, { "type": "null" }] }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
     "diagnostic": {
       "anyOf": [
         {
@@ -54,7 +70,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "command", "purpose", "risk", "timeoutMs", "executionMode", "requiresSudo", "phase", "diagnostic", "dependsOn"],
+        "required": ["id", "command", "purpose", "risk", "timeoutMs", "executionMode", "requiresSudo", "phase", "diagnostic", "dependsOn", "retry"],
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
           "command": { "type": "string", "minLength": 1, "maxLength": 32768 },
@@ -62,6 +78,7 @@
           "risk": { "enum": ["read", "change", "destructive"] },
           "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
           "executionMode": { "enum": ["job", null] },
+          "retry": { "$ref": "#/$defs/retry" },
           "requiresSudo": { "type": "boolean" },
           "phase": { "anyOf": [{ "type": "string", "enum": ["preflight", "baseline", "acquire", "packages", "secrets", "database", "configure", "initialize", "services", "health", "verify", "cleanup"] }, { "type": "null" }] },
           "diagnostic": { "$ref": "#/$defs/diagnostic" },
@@ -78,7 +95,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "command", "purpose", "risk", "timeoutMs", "executionMode", "requiresSudo", "phase", "diagnostic", "dependsOn"],
+        "required": ["id", "command", "purpose", "risk", "timeoutMs", "executionMode", "requiresSudo", "phase", "diagnostic", "dependsOn", "retry"],
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
           "command": { "type": "string", "minLength": 1, "maxLength": 32768 },
@@ -86,6 +103,7 @@
           "risk": { "enum": ["read", "change", "destructive"] },
           "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
           "executionMode": { "enum": ["job", null] },
+          "retry": { "$ref": "#/$defs/retry" },
           "requiresSudo": { "type": "boolean" },
           "phase": { "anyOf": [{ "type": "string", "enum": ["preflight", "baseline", "acquire", "packages", "secrets", "database", "configure", "initialize", "services", "health", "verify", "cleanup"] }, { "type": "null" }] },
           "diagnostic": { "$ref": "#/$defs/diagnostic" },

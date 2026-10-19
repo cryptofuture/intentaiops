@@ -250,6 +250,7 @@ export class AdminService {
     consultationContext,
     candidateContext,
     applicationDefaults,
+    requireRevert = true,
     onProgress
   }) {
     const loop = detectOperationLoop(previousAttempts, settings.operationLoop)
@@ -272,6 +273,7 @@ export class AdminService {
       deploymentBlueprint: foundation?.blueprint ?? null,
       candidateContext,
       applicationDefaults,
+      requireRevert,
       onProgress
     })
     if (!foundation) return applicationPlan
@@ -280,7 +282,7 @@ export class AdminService {
       applicationPlan,
       platform: observedPlatform(observed),
       docker: observed.webminaiDocker ?? {}
-    }), rules.policy)
+    }), rules.policy, { requireRevert })
   }
 
   async routeTask ({ settings, passphrase, serverId, request, inventory, candidates, onProgress }) {
@@ -397,6 +399,10 @@ export class AdminService {
     }, 10000)
     heartbeat.unref()
     try {
+      if (reviewedPlan) {
+        const executed = new Set(this.tasks.executionState(serverId, taskId).filter(command => command.status !== 'pending').map(command => command.commandId))
+        if (reviewedPlan.commands.some(command => executed.has(command.id))) throw new Error('rollback revision reuses an executed deployment command; propose new reviewed cleanup commands')
+      }
       if (this.tasks.executionState(serverId, taskId).some(command => command.status === 'uncertain')) throw new Error('rollback requires operator reconciliation of uncertain commands')
       if (this.tasks.rollbackState(serverId, taskId).some(command => command.status === 'uncertain')) throw new Error('rollback outcome requires reconciliation before further changes')
       if (!reviewedPlan && this.tasks.executionEvents(serverId, taskId).length && this.tasks.executionState(serverId, taskId).some(command => command.status !== 'completed')) throw new Error('partial execution requires a separately reviewed rollback plan; saved rollback commands do not identify their forward changes')

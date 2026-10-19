@@ -55,6 +55,81 @@ test('journal is durable, redacted, lease protected, and blocks plan replacement
   assert.throws(() => write({ type: 'execution_resumed' }), /ownership/u)
 })
 
+test('retry descendants cannot acquire execution while an ancestor outcome is uncertain', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-retry-uncertain-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new TaskStore(root)
+  const original = store.savePlan('host', store.create('host', 'Inspect').id, plan())
+  const lease = store.acquireExecution('host', original.id, plan())
+  store.appendExecutionEvent('host', original.id, lease.owner, { type: 'command_dispatched', commandId: 'first', attemptId: 'lost' })
+  store.releaseExecution('host', original.id, lease.owner)
+  const child = store.savePlan('host', store.create('host', 'Retry', { retryOfTaskId: original.id }).id, plan())
+  const grandchild = store.savePlan('host', store.create('host', 'Retry again', { retryOfTaskId: child.id }).id, plan())
+  for (const task of [child, grandchild]) assert.throws(() => store.acquireExecution('host', task.id, task.plan), /reconcil/u)
+  let called = false
+  const admin = new AdminService({ dataRoot: root, tasks: store, workspace: { loadRules: async () => ({ policy: {} }) } })
+  admin.serverSecrets = async () => ({})
+  admin.netdata = () => ({ runCommand: async () => { called = true; return { exitCode: 0 } } })
+  await assert.rejects(admin.execute({ settings: {}, serverId: 'host', taskId: child.id, plan: child.plan, approve: async () => true }), /reconcil/u)
+  assert.equal(called, false)
+  const reconciler = store.acquireExecution('host', original.id, plan())
+  store.appendExecutionEvent('host', original.id, reconciler.owner, { type: 'command_failed', commandId: 'first', attemptId: 'lost', metadata: { exitCode: 1 } })
+  store.releaseExecution('host', original.id, reconciler.owner)
+  const reviewed = store.acquireExecution('host', child.id, child.plan)
+  store.releaseExecution('host', child.id, reviewed.owner)
+})
+
+test('execution leases exclude retry siblings and ancestors but not unrelated tasks', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-retry-lease-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new TaskStore(root)
+  const original = store.savePlan('host', store.create('host', 'Inspect').id, plan())
+  const children = [1, 2].map(() => store.savePlan('host', store.create('host', 'Retry', { retryOfTaskId: original.id }).id, plan()))
+  const lease = store.acquireExecution('host', children[0].id, plan())
+  for (const task of [original, children[1]]) assert.throws(() => store.acquireExecution('host', task.id, plan()), /another operator/u)
+  const separate = store.savePlan('host', store.create('host', 'Separate task').id, plan())
+  const independent = store.acquireExecution('host', separate.id, plan())
+  store.releaseExecution('host', separate.id, independent.owner)
+  store.releaseExecution('host', children[0].id, lease.owner)
+  const next = store.acquireExecution('host', original.id, plan())
+  store.releaseExecution('host', original.id, next.owner)
+})
+
+test('legacy interrupted retry ancestors need review while completed legacy history remains usable', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-retry-legacy-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new TaskStore(root)
+  for (const completed of [false, true]) {
+    const original = store.savePlan('host', store.create('host', 'Legacy').id, plan())
+    store.saveResults('host', original.id, original.plan.commands.map(item => ({ id: item.id, status: completed ? 'completed' : 'failed', result: { exitCode: completed ? 0 : null } })))
+    const retry = store.savePlan('host', store.create('host', 'Retry', { retryOfTaskId: original.id }).id, plan())
+    if (!completed) assert.throws(() => store.acquireExecution('host', retry.id, plan()), /reconcil|journal/u)
+    else {
+      const lease = store.acquireExecution('host', retry.id, plan())
+      store.releaseExecution('host', retry.id, lease.owner)
+    }
+  }
+})
+
+test('retry family inspection rejects cycles and oversized families without blocking unrelated work', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-retry-bounds-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new TaskStore(root)
+  const cyclic = store.savePlan('host', store.create('host', 'Cycle fixture').id, plan())
+  store.withDatabase('host', database => database.prepare('UPDATE tasks SET retry_of_task_id = ? WHERE id = ?').run(cyclic.id, cyclic.id))
+  assert.throws(() => store.acquireExecution('host', cyclic.id, plan()), /cyclic/u)
+  const original = store.savePlan('host', store.create('host', 'Large family fixture').id, plan())
+  store.withDatabase('host', database => database.transaction(() => {
+    const insert = database.prepare("INSERT INTO tasks (request, status, retry_of_task_id, plan_json, created_at, updated_at) VALUES ('Retry fixture', 'planned', ?, ?, 0, 0)")
+    for (let index = 0; index < 1001; index++) insert.run(original.id, JSON.stringify(plan()))
+  })())
+  assert.throws(() => store.acquireExecution('host', original.id, plan()), /inspection limit/u)
+  const separate = store.savePlan('host', store.create('host', 'Unrelated').id, plan())
+  const lease = store.acquireExecution('host', separate.id, plan())
+  store.releaseExecution('host', separate.id, lease.owner)
+  assert.equal(store.withDatabase('host', database => database.prepare('SELECT count(*) AS total FROM execution_leases').get().total), 0)
+})
+
 test('a competing execution cannot slip between plan immutability validation and persistence', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'intent-plan-race-'))
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -169,6 +244,16 @@ test('journal write failure prevents remote dispatch', async () => {
 test('loop evidence distinguishes identical failures from new diagnostics and progress', () => {
   const attempt = id => ({ id, plan: plan(), results: [{ id: 'first', status: 'failed', result: { exitCode: 1, stderr: 'connection refused' } }] })
   assert.equal(detectOperationLoop([attempt(1), attempt(2), attempt(3)]).detected, true)
+  const jobs = [1, 2, 3].map(id => {
+    const value = attempt(id)
+    value.results[0].result.jobId = `job-${id}`
+    value.results[0].result.observedAt = `2026-10-18T09:00:0${id}Z`
+    return value
+  })
+  assert.equal(detectOperationLoop(jobs).detected, true)
+  assert.equal(jobs[0].results[0].result.jobId, 'job-1')
+  jobs[2].results[0].result.stderr = 'new diagnostic information'
+  assert.equal(detectOperationLoop(jobs).detected, false)
   const changed = attempt(3)
   changed.results[0].result.stderr = 'service started, new error'
   assert.equal(detectOperationLoop([attempt(1), attempt(2), changed]).detected, false)

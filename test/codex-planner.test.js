@@ -14,6 +14,24 @@ class CodexPlanner extends ProductionCodexPlanner {
   }
 }
 
+test('AI plans cannot set controller-owned rollback mode', async () => {
+  const planner = new CodexPlanner()
+  let attempts = 0
+  planner.runStructured = async () => {
+    attempts++
+    return JSON.stringify({
+      summary: 'Inspect',
+      changeOverview: 'Read-only observation',
+      modifiedFiles: [],
+      operatorRollback: true,
+      commands: [{ id: 'inspect', command: 'true', purpose: 'Inspect', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [] }],
+      revertCommands: []
+    })
+  }
+  await assert.rejects(planner.plan({ request: 'Inspect', inventory: { os: 'linux' }, policy: {} }), /operator rollback mode/u)
+  assert.equal(attempts, 3)
+})
+
 test('shared planner boundary isolates credentials and embeds references without execution tools', async t => {
   const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-boundary-'))
   t.after(() => rm(serverDirectory, { recursive: true, force: true }))
@@ -42,13 +60,16 @@ test('shared planner boundary isolates credentials and embeds references without
         assert.match(options.input, /Role: boundary fixture/)
         assert.match(options.input, /inventory-marker/)
         assert.match(options.input, /policy-marker/)
+        const effectivePolicy = JSON.parse(await readFile(path.join(options.cwd, 'policy.json'), 'utf8'))
+        assert.equal(effectivePolicy.maxTimeoutMs, model === 'mimo-v2.6-pro' ? 10000 : 300000)
+        assert.equal(effectivePolicy.maxJobTimeoutMs, model === 'mimo-v2.6-pro' ? 20000 : 3600000)
         assert.match(options.input, /No execution or connector tools are available/)
         assert.doesNotMatch(options.input, /fixture-context-password/)
         assert.doesNotMatch(await readFile(path.join(options.cwd, 'context.md'), 'utf8'), /fixture-context-password/)
         return { code: 0, stdout: '{}', stderr: '' }
       }
     })
-    await planner.runStructured({ serverDirectory, inventory: { note: 'inventory-marker' }, policy: { note: 'policy-marker' }, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' })
+    await planner.runStructured({ serverDirectory, inventory: { note: 'inventory-marker' }, policy: { note: 'policy-marker', ...(model === 'mimo-v2.6-pro' ? { maxTimeoutMs: 10000, maxJobTimeoutMs: 20000 } : {}) }, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' })
   }
   assert.equal(process.env.VAULT_TEST, 'synthetic-vault-only-value')
   assert.equal(process.env.SSH_AUTH_SOCK, '/synthetic/private-agent')
@@ -152,6 +173,25 @@ test('AI plans expose durable jobs while normal commands keep their timeout limi
       assert.equal(result.commands[0].executionMode, mode ?? undefined)
       assert.equal(Object.hasOwn(result.revertCommands[0], 'executionMode'), false)
     } else await assert.rejects(pending, /invalid timeout/)
+  }
+})
+
+test('AI schema preserves reviewed bounded retries and normalizes nullable policies', async () => {
+  const schema = JSON.parse(await readFile(new URL('../schemas/command-plan.schema.json', import.meta.url), 'utf8'))
+  for (const graph of ['commands', 'revertCommands']) {
+    assert.ok(schema.properties[graph].items.required.includes('retry'))
+    assert.deepEqual(schema.properties[graph].items.properties.retry, { $ref: '#/$defs/retry' })
+  }
+  const make = retry => ({ summary: 'Observe bounded readiness', changeOverview: 'Read-only readiness observation', modifiedFiles: [], assumptions: [], warnings: [], requiresConfirmation: true, commands: [{ id: 'observe', command: 'true', purpose: 'Observe readiness', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [], retry }], revertCommands: [] })
+  const planner = new CodexPlanner()
+  for (const retry of [null, { attempts: 73, intervalMs: 10000, exitCodes: [75], states: null }, { attempts: 3, intervalMs: 0, exitCodes: [75], states: ['failed'] }]) {
+    planner.runStructured = async () => JSON.stringify(make(retry))
+    const result = await planner.plan({ request: 'Observe readiness', inventory: {}, policy: {}, serverDirectory: '/unused' })
+    assert.deepEqual(result.commands[0].retry, retry === null ? undefined : Object.fromEntries(Object.entries(retry).filter(([, value]) => value !== null)))
+  }
+  for (const retry of [{ attempts: 121, intervalMs: 0, exitCodes: [75] }, { attempts: 2, intervalMs: 0, exitCodes: [0] }, { attempts: 120, intervalMs: 10000, exitCodes: [75] }]) {
+    planner.runStructured = async () => JSON.stringify(make(retry))
+    await assert.rejects(planner.plan({ request: 'Observe readiness', inventory: {}, policy: {}, serverDirectory: '/unused' }), /retry/u)
   }
 })
 

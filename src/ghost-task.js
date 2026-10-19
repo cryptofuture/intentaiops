@@ -1,3 +1,6 @@
+import { applicationDatabaseCommand } from './linux-application-database.js'
+import { applicationFileOwnershipGuard } from './linux-php-foundation.js'
+
 const VERSION = '6.57.0'
 const COMPOSE_VERSION = '6.56.0'
 const PORT = 18110
@@ -63,15 +66,15 @@ function buildUbuntuTask (taskId, context) {
     item('capture-baseline', 'baseline', ubuntuBaseline(state, paths), 'Capture package, repository, nginx, MySQL, and task-owned path state exactly once'),
     item('install-stack', 'packages', ubuntuPackages(state), 'Install NodeSource Node.js 22, Oracle MySQL 8, nginx, and required utilities', ['capture-baseline'], 1200000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(), 'Generate the database password on-host without emitting it', ['capture-baseline']),
-    item('initialize-database', 'database', ubuntuDatabase(), 'Create the isolated MySQL database and least-privilege Ghost account', ['install-stack', 'generate-credentials'], 900000, 'job'),
+    item('initialize-database', 'database', ubuntuDatabase(state), 'Create the isolated MySQL database and least-privilege Ghost account', ['install-stack', 'generate-credentials'], 900000, 'job'),
     item('install-ghost', 'acquire', ubuntuGhostInstall(state), `Install Ghost ${VERSION} through the pinned official Ghost-CLI`, ['install-stack'], 3600000, 'job'),
     item('configure-ghost', 'configure', ubuntuConfigure(paths), 'Create the locked service, protected environment, and nginx reverse proxy', ['initialize-database', 'install-ghost']),
     item('verify-ghost', 'verify', ubuntuVerify(), 'Verify Ghost, MySQL persistence, nginx marker, and restart recovery', ['configure-ghost'], 1200000, 'job')
   ]
   const revertCommands = [
-    item('stop-ghost', 'cleanup', ubuntuStop(paths), 'Stop and remove only the task-owned Ghost service and nginx site', [], 300000, undefined, 'destructive'),
-    item('drop-database', 'cleanup', ubuntuDropDatabase(), 'Drop only the task-owned MySQL database and account', ['stop-ghost'], 300000, undefined, 'destructive'),
-    item('remove-ghost-files', 'cleanup', `set -eu; rm -rf -- ${quote(APP_ROOT)} ${quote(CLI_ROOT)} ${quote(DATA_ROOT)} ${quote(CREDENTIALS)}`, 'Remove task-owned application, CLI, content, and protected credentials', ['drop-database'], 300000, undefined, 'destructive'),
+    item('stop-ghost', 'cleanup', ubuntuStop(state, paths), 'Stop and remove only the task-owned Ghost service and nginx site', [], 300000, undefined, 'destructive'),
+    item('drop-database', 'cleanup', ubuntuDropDatabase(state), 'Drop only the task-owned MySQL database and account', ['stop-ghost'], 300000, undefined, 'destructive'),
+    item('remove-ghost-files', 'cleanup', `set -eu; ${applicationFileOwnershipGuard(state, ubuntuOwnedPaths(paths))}; rm -rf -- ${quote(APP_ROOT)} ${quote(CLI_ROOT)} ${quote(DATA_ROOT)} ${quote(CREDENTIALS)}`, 'Remove task-owned application, CLI, content, and protected credentials', ['drop-database'], 300000, undefined, 'destructive'),
     item('restore-stack', 'cleanup', ubuntuRestore(state, paths), 'Restore package, repository, nginx, and MySQL service state from the baseline', ['remove-ghost-files'], 1200000, 'job', 'destructive')
   ]
   return envelope({
@@ -167,11 +170,15 @@ function ubuntuPaths () {
   }
 }
 
+function ubuntuOwnedPaths (paths) {
+  return [APP_ROOT, CLI_ROOT, DATA_ROOT, CREDENTIALS, paths.serviceFile, paths.nginxVhost, paths.nginxEnableLink]
+}
+
 function ubuntuBaseline (state, paths) {
-  const owned = [APP_ROOT, CLI_ROOT, DATA_ROOT, CREDENTIALS, paths.serviceFile, paths.nginxVhost, paths.nginxEnableLink]
+  const owned = ubuntuOwnedPaths(paths)
   const preserved = [paths.nodeKey, paths.nodeSource, paths.nodePreference, paths.nsolidPreference]
   return join([
-    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...owned.map(path => `test ! -e ${quote(path)}`),
+    'set -eu', `test ! -L ${quote(state)}`, `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...owned.map(path => `if [ -e ${quote(path)} ] || [ -L ${quote(path)} ]; then printf '%s\\n' ${quote(`BASELINE_DRIFT: managed path already exists: ${path}`)} >&2; exit 1; fi`),
     `install -d -o root -g root -m 0700 ${quote(`${state}/backup`)}`,
     `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)} | LC_ALL=C sort -u > ${quote(`${state}/packages.before`)}`,
     `systemctl is-active --quiet nginx 2>/dev/null && : > ${quote(`${state}/nginx.active`)} || true`,
@@ -215,11 +222,11 @@ function credentialsCommand () {
   ])
 }
 
-function ubuntuDatabase () {
+function ubuntuDatabase (state) {
   return join([
     'set -eu', 'ready=', 'for attempt in $(seq 1 60); do mysqladmin ping --silent >/dev/null 2>&1 && ready=yes && break; sleep 2; done', '[ "$ready" = yes ]',
     `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
-    `mysql --batch --skip-column-names -e "CREATE DATABASE IF NOT EXISTS ${DATABASE} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; CREATE USER IF NOT EXISTS '${DATABASE_USER}'@'127.0.0.1' IDENTIFIED BY '$password'; ALTER USER '${DATABASE_USER}'@'127.0.0.1' IDENTIFIED BY '$password'; GRANT ALL PRIVILEGES ON ${DATABASE}.* TO '${DATABASE_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;"`,
+    applicationDatabaseCommand({ state, database: DATABASE, user: DATABASE_USER, host: '127.0.0.1', credentials: CREDENTIALS, client: 'mysql', passwordFile: 'database_password', collation: 'utf8mb4_0900_ai_ci' }),
     `MYSQL_PWD="$password" mysql --protocol=TCP -h 127.0.0.1 -u ${DATABASE_USER} ${DATABASE} -e 'SELECT 1' >/dev/null`, 'printf \'%s\\n\' database-ready'
   ])
 }
@@ -265,20 +272,20 @@ function ubuntuVerify () {
   ])
 }
 
-function ubuntuStop (paths) {
+function ubuntuStop (state, paths) {
   return join([
-    'set -eu', `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, `rm -f -- ${quote(paths.serviceFile)}`, 'systemctl daemon-reload',
+    'set -eu', applicationFileOwnershipGuard(state, ubuntuOwnedPaths(paths)), `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, `rm -f -- ${quote(paths.serviceFile)}`, 'systemctl daemon-reload',
     `rm -f -- ${quote(paths.nginxEnableLink)} ${quote(paths.nginxVhost)}`, 'if command -v nginx >/dev/null 2>&1; then nginx -t', 'systemctl is-active --quiet nginx && systemctl reload nginx || true', 'fi'
   ])
 }
 
-function ubuntuDropDatabase () {
-  return join(['set -eu', `if command -v mysql >/dev/null 2>&1 && mysqladmin ping --silent >/dev/null 2>&1; then mysql --batch -e "DROP DATABASE IF EXISTS ${DATABASE}; DROP USER IF EXISTS '${DATABASE_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;"; fi`, 'printf \'%s\\n\' database-removed'])
+function ubuntuDropDatabase (state) {
+  return applicationDatabaseCommand({ state, database: DATABASE, user: DATABASE_USER, host: '127.0.0.1', client: 'mysql', rollback: true })
 }
 
 function ubuntuRestore (state, paths) {
   const preserved = [paths.nodeKey, paths.nodeSource, paths.nodePreference, paths.nsolidPreference]
-  const commands = ['set -eu', `[ -d ${quote(state)} ] || { printf '%s\n' already-reverted; exit 0; }`]
+  const commands = ['set -eu', `test ! -L ${quote(state)}`, `[ -d ${quote(state)} ] || { printf '%s\n' already-reverted; exit 0; }`]
   preserved.forEach((path, index) => commands.push(`if [ -e ${quote(`${state}/backup-${index}.existed`)} ]; then rm -rf -- ${quote(path)}; cp -a -- ${quote(`${state}/backup/${index}`)} ${quote(path)}; else rm -rf -- ${quote(path)}; fi`))
   commands.push(removeDebianPackages(`${state}/packages.added`))
   commands.push(`if systemctl cat nginx >/dev/null 2>&1; then if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx >/dev/null 2>&1 || true; else systemctl disable nginx >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx 2>/dev/null || true; fi; fi`)

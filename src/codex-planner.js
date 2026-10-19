@@ -63,6 +63,7 @@ export class CodexPlanner {
     deploymentBlueprint,
     candidateContext,
     applicationDefaults,
+    requireRevert = true,
     onProgress
   }) {
     const basePrompt = buildPrompt(request, taskId, inventory, { previousAttempts, retryInstructions, consultationContext, deploymentBlueprint, candidateContext, applicationDefaults })
@@ -86,14 +87,17 @@ export class CodexPlanner {
       })
       try {
         const proposed = parseStructuredOutput(output)
+        if (proposed && Object.hasOwn(proposed, 'operatorRollback')) throw new Error('AI plans cannot select operator rollback mode')
         for (const command of [...(proposed.commands ?? []), ...(proposed.revertCommands ?? [])]) {
           command.command = disableShellTracing(command.command)
           if (command.executionMode === null) delete command.executionMode
+          if (command.retry === null) delete command.retry
+          if (command.retry?.states === null) delete command.retry.states
         }
         if (/\bWEBMINAI_(?:N8N|GHOST)_OK\b/u.test(request)) {
           for (const command of [...(proposed.commands ?? []), ...(proposed.revertCommands ?? [])]) command.diagnostic = null
         }
-        const plan = validateCommandPlan(proposed, policy)
+        const plan = validateCommandPlan(proposed, policy, { requireRevert })
         if (deploymentBlueprint) validateApplicationDeltaPlan(plan)
         validatePlatformPlan(plan, inventory, request, previousAttempts)
         return annotateAiPlan(validateNetdataFunctions(plan, inventory))
@@ -179,7 +183,7 @@ export class CodexPlanner {
       )
       await writeFile(
         path.join(jobDirectory, 'policy.json'),
-        `${JSON.stringify(sanitizePlannerData(policy), null, 2)}\n`,
+        `${JSON.stringify(sanitizePlannerData({ ...policy, maxTimeoutMs: policy.maxTimeoutMs ?? 300000, maxJobTimeoutMs: policy.maxJobTimeoutMs ?? 3600000 }), null, 2)}\n`,
         { mode: 0o600 }
       )
       if (previousAttempts?.length) {
@@ -337,6 +341,7 @@ function buildPrompt (request, taskId, inventory, { previousAttempts, retryInstr
       ? 'Commands execute as LocalSystem. Never include sudo or elevation wrappers. Set requiresSudo true only as metadata when an operation requires administrator privileges.'
       : 'Commands execute as root. Never include sudo. Set requiresSudo true only as metadata when an operation requires root.',
     'Each command is executed separately by another process after explicit approval.',
+    'Set retry to null by default. Preserve explicitly reviewed bounded retry policies when reusing commands. Retries apply only to recorded failure exit codes, never lost acknowledgments or uncertain outcomes; prefer read-only readiness probes over repeating mutations. Set retry.states to null unless a native failed/timed_out state restriction is required.',
     'Classify risk across every execution path, including error handlers. A read command must never stop services, terminate processes, write files, or change policy on failure; put those actions in an explicitly changing command with reviewed rollback.',
     ...(defaults.adminEmail
       ? [`When the requested software needs an initial administrator or contact email, use the user preset ${defaults.adminEmail}. This email is not a password or secret; do not replace it with a generated or placeholder address.`]

@@ -31,14 +31,23 @@ test('execution outcome is independent of OOM, reboot, timeout and cancellation 
     assert.ok(!codes(executionDiagnostics({ result, before, after })).includes('OOM_KILL'))
   }
   assert.equal(codes(executionDiagnostics({ result: { exitCode: 0, stderr: 'no space left on device' } })).length, 0)
+  assert.equal(codes(executionDiagnostics({ result: { exitCode: 0, stderr: 'No such file or directory' } })).length, 0)
+  assert.equal(codes(executionDiagnostics({ result: { exitCode: 0, stderr: 'task target already exists: /private/operator-file' } })).length, 0)
 })
 
 test('structured reasons do not retain raw errors, payloads or secrets', () => {
   const cases = [
     ['DISK_FULL', 'No space left on device'], ['QUOTA_EXCEEDED', 'Disk quota exceeded'],
+    ['PATH_NOT_FOUND', 'nginx: [emerg] open() "/run/nginx/nginx.pid" failed (2: No such file or directory)'],
+    ['PATH_NOT_FOUND', 'ENOENT'],
+    ['TARGET_CONFLICT', 'task target already exists: /private/operator-file'],
+    ['OWNERSHIP_UNCONFIRMED', 'APPLICATION_OWNERSHIP_UNCONFIRMED: preserve files'],
+    ['OWNERSHIP_UNCONFIRMED', 'DATABASE_OWNERSHIP_UNCONFIRMED'],
+    ['OWNERSHIP_UNCONFIRMED', 'MOODLE_CRON_OWNERSHIP_UNCONFIRMED'],
     ['SSH_HOST_KEY', 'Host key verification failed'], ['SSH_AUTHENTICATION', 'Permission denied (publickey)'],
     ['NAME_RESOLUTION', 'Could not resolve hostname'], ['CONNECTION_LOST', 'Connection reset by peer'],
     ['CONNECTION_REFUSED', 'ECONNREFUSED'], ['CONNECTION_TIMEOUT', 'ETIMEDOUT'],
+    ['CONNECTION_FAILED', "error: failed retrieving file 'core.db' from mirrors.kernel.org : Failed to connect to mirrors.kernel.org:80 after 5033 ms: Could not connect to server"],
     ['MEMORY_ALLOCATION_FAILED', 'ENOMEM'], ['PERMISSION_DENIED', 'Operation not permitted'],
     ['PACKAGE_VERSION_MISMATCH', 'PACKAGE_VERSION_MISMATCH: jellyfin-server expected 10.11.11, observed 12.2']
   ]
@@ -46,6 +55,7 @@ test('structured reasons do not retain raw errors, payloads or secrets', () => {
     const observations = executionDiagnostics({ error: new Error(message + ' password=KNOWN_SECRET'), result: { exitCode: null } })
     assert.ok(codes(observations).includes(code))
     assert.ok(!JSON.stringify(observations).includes('KNOWN_SECRET'))
+    assert.ok(!JSON.stringify(observations).includes('/private/operator-file'))
     assert.match(diagnosticSummary(observations), /Inspect recorded remote state/u)
   }
   assert.deepEqual(codes(executionDiagnostics({ result: { exitCode: null } })), ['CAUSE_UNKNOWN'])

@@ -1,3 +1,6 @@
+import { postgresApplicationDatabaseCommand } from './linux-application-database.js'
+import { applicationFileOwnershipGuard } from './linux-php-foundation.js'
+
 const VERSION = '19.0.20260810'
 const SERIES = '19.0'
 const PORT = 18112
@@ -64,14 +67,14 @@ function buildNativeTask (taskId, context, profile) {
     item('install-foundation', 'packages', nativeFoundation(state, profile), `Install nginx and PostgreSQL 13+ through the reviewed ${profile.family} route`, ['capture-baseline'], 1200000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(), 'Generate database and master passwords on-host without emitting them', ['capture-baseline']),
     item('install-odoo', 'acquire', nativeAcquire(state, profile), `Download, checksum, and install the official Odoo Community ${VERSION} package`, ['install-foundation'], 1800000, 'job'),
-    item('initialize-database', 'database', nativeDatabase(profile), 'Create the isolated PostgreSQL role with a protected generated password', ['install-foundation', 'generate-credentials']),
+    item('initialize-database', 'database', nativeDatabase(state, profile), 'Create the isolated PostgreSQL role with a protected generated password', ['install-foundation', 'generate-credentials']),
     item('configure-odoo', 'configure', nativeConfigure(taskId, state, paths, profile), 'Create the protected Odoo configuration, initialize its database through systemd credentials, and install systemd and nginx definitions', ['install-odoo', 'initialize-database'], 1800000, 'job'),
     item('verify-odoo', 'verify', nativeVerify(profile), 'Verify Odoo HTTP, PostgreSQL schema, data storage, version, and restart recovery', ['configure-odoo'], 1200000, 'job')
   ]
   const revertCommands = [
-    item('stop-odoo', 'cleanup', nativeStop(paths), 'Stop and remove only task-owned Odoo and nginx services', [], 300000, undefined, 'destructive'),
-    item('drop-database', 'cleanup', nativeDropDatabase(profile), 'Drop only the task-owned PostgreSQL database and role', ['stop-odoo'], 300000, undefined, 'destructive'),
-    item('remove-odoo-files', 'cleanup', `set -eu; rm -rf -- ${quote(DATA_ROOT)} ${quote(CREDENTIALS)} /etc/odoo /var/lib/odoo`, 'Remove task-owned Odoo package configuration, data, and credentials', ['drop-database'], 300000, undefined, 'destructive'),
+    item('stop-odoo', 'cleanup', nativeStop(state, paths), 'Stop and remove only task-owned Odoo and nginx services', [], 300000, undefined, 'destructive'),
+    item('drop-database', 'cleanup', nativeDropDatabase(state, profile), 'Drop only the task-owned PostgreSQL database and role', ['stop-odoo'], 300000, undefined, 'destructive'),
+    item('remove-odoo-files', 'cleanup', `set -eu; ${applicationFileOwnershipGuard(state, [DATA_ROOT, CREDENTIALS, '/etc/odoo', '/var/lib/odoo', paths.serviceFile, paths.bootstrapFile, paths.nginxVhost, ...(paths.nginxEnableLink ? [paths.nginxEnableLink] : [])])}; rm -rf -- ${quote(DATA_ROOT)} ${quote(CREDENTIALS)} /etc/odoo /var/lib/odoo`, 'Remove task-owned Odoo package configuration, data, and credentials', ['drop-database'], 300000, undefined, 'destructive'),
     item('restore-stack', 'cleanup', nativeRestore(state, profile), 'Restore package, service, cluster, and authentication state from the factual baseline', ['remove-odoo-files'], 1200000, 'job', 'destructive')
   ]
   return envelope({
@@ -229,14 +232,10 @@ function nativeAcquire (state, profile) {
   ])
 }
 
-function nativeDatabase (profile) {
+function nativeDatabase (state, profile) {
   return join([
     'set -eu', `systemctl start ${quote(profile.service)}`, 'ready=', 'for attempt in $(seq 1 60); do runuser -u postgres -- psql -Atqc \'SELECT 1\' postgres >/dev/null 2>&1 && ready=yes && break; sleep 2; done', '[ "$ready" = yes ]',
-    `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`, `runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_roles WHERE rolname='${DATABASE_USER}'" postgres | grep -Fx 1 || runuser -u postgres -- createuser --login --createdb ${quote(DATABASE_USER)}`,
-    `runuser -u postgres -- psql -v ON_ERROR_STOP=1 -v password="$password" postgres <<'SQL'
-ALTER ROLE ${DATABASE_USER} WITH LOGIN CREATEDB PASSWORD :'password';
-SQL
-:`, 'printf \'%s\\n\' role-ready'
+    postgresApplicationDatabaseCommand({ state, database: DATABASE, user: DATABASE_USER, credentials: CREDENTIALS, createdb: true })
   ])
 }
 
@@ -264,27 +263,25 @@ function nativeVerify (profile) {
   ])
 }
 
-function nativeStop (paths) {
+function nativeStop (state, paths) {
   return join([
-    'set -eu', `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, `systemctl stop ${quote(`${SERVICE}-bootstrap.service`)} 2>/dev/null || true`, 'systemctl disable --now odoo 2>/dev/null || true', `rm -f -- ${quote(paths.serviceFile)} ${quote(paths.bootstrapFile)}`, 'systemctl daemon-reload', `rm -f -- ${quote(paths.nginxVhost)}`, ...(paths.nginxEnableLink ? [`rm -f -- ${quote(paths.nginxEnableLink)}`] : []),
+    'set -eu', applicationFileOwnershipGuard(state, [DATA_ROOT, CREDENTIALS, '/etc/odoo', '/var/lib/odoo', paths.serviceFile, paths.bootstrapFile, paths.nginxVhost, ...(paths.nginxEnableLink ? [paths.nginxEnableLink] : [])]), `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, `systemctl stop ${quote(`${SERVICE}-bootstrap.service`)} 2>/dev/null || true`, 'systemctl disable --now odoo 2>/dev/null || true', `rm -f -- ${quote(paths.serviceFile)} ${quote(paths.bootstrapFile)}`, 'systemctl daemon-reload', `rm -f -- ${quote(paths.nginxVhost)}`, ...(paths.nginxEnableLink ? [`rm -f -- ${quote(paths.nginxEnableLink)}`] : []),
     'if command -v nginx >/dev/null 2>&1; then nginx -t', 'systemctl is-active --quiet nginx && systemctl reload nginx || true', 'fi'
   ])
 }
 
-function nativeDropDatabase (profile) {
-  return join([
-    'set -eu', 'if command -v psql >/dev/null 2>&1 && runuser -u postgres -- psql -Atqc \'SELECT 1\' postgres >/dev/null 2>&1; then', `runuser -u postgres -- psql -v ON_ERROR_STOP=1 postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DATABASE}' AND pid <> pg_backend_pid();" >/dev/null`, `runuser -u postgres -- dropdb --if-exists ${quote(DATABASE)}`, `runuser -u postgres -- dropuser --if-exists ${quote(DATABASE_USER)}`, 'fi', 'printf \'%s\\n\' database-removed'
-  ])
+function nativeDropDatabase (state, profile) {
+  return postgresApplicationDatabaseCommand({ state, database: DATABASE, user: DATABASE_USER, credentials: CREDENTIALS, rollback: true })
 }
 
 function nativeRestore (state, profile) {
-  const commands = ['set -eu', `[ -d ${quote(state)} ] || { printf '%s\\n' already-reverted; exit 0; }`]
+  const commands = ['set -eu', `test ! -L ${quote(state)}`, `[ -d ${quote(state)} ] || { printf '%s\\n' already-reverted; exit 0; }`]
   if (profile.family === 'debian') {
-    commands.push(`if [ -s ${quote(`${state}/postgres-cluster.created`)} ]; then major=$(sed -n '1p' ${quote(`${state}/postgres-cluster.created`)}); case "$major" in ''|*[!0-9]*) exit 1;; esac; command -v pg_dropcluster >/dev/null 2>&1 && pg_dropcluster --stop "$major" main || true; fi`)
+    commands.push(`if [ -s ${quote(`${state}/postgres-cluster.created`)} ]; then major=$(sed -n '1p' ${quote(`${state}/postgres-cluster.created`)}); case "$major" in ''|*[!0-9]*) exit 1;; esac; command -v pg_dropcluster >/dev/null 2>&1 ; pg_dropcluster --stop "$major" main; fi`)
     commands.push(removeDebianPackages(`${state}/packages.added`))
   } else {
     commands.push(`if [ -f ${quote(`${state}/postgres-hba.before`)} ]; then cp -a -- ${quote(`${state}/postgres-hba.before`)} ${quote(profile.hba)}; elif [ -f ${quote(profile.hba)} ]; then rule='host ${DATABASE} ${DATABASE_USER} 127.0.0.1/32 scram-sha-256'; awk -v rule="$rule" '$0 != rule' ${quote(profile.hba)} > ${quote(`${profile.hba}.webminai-new`)}; chown postgres:postgres ${quote(`${profile.hba}.webminai-new`)}; chmod 0600 ${quote(`${profile.hba}.webminai-new`)}; mv ${quote(`${profile.hba}.webminai-new`)} ${quote(profile.hba)}; fi`)
-    commands.push(`if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(`${state}/packages.added`)} | tr '\\n' ' '); [ -z "$packages" ] || dnf remove -y $packages || true; fi`)
+    commands.push(`if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(`${state}/packages.added`)} | tr '\\n' ' '); [ -z "$packages" ] || dnf remove -y $packages; fi`)
   }
   commands.push(`if [ ! -e ${quote(`${state}/postgres-data.existed`)} ]; then rm -rf -- ${quote(profile.dataRoot)}; fi`)
   commands.push(`if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx >/dev/null 2>&1 || true; else systemctl disable nginx >/dev/null 2>&1 || true; fi`, `if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx 2>/dev/null || true; fi`)
@@ -350,7 +347,7 @@ function restoreDocker (state) {
 }
 
 function removeDebianPackages (list) {
-  return `if [ -s ${quote(list)} ]; then packages=$(awk '{print $1}' ${quote(list)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages || true; fi`
+  return `if [ -s ${quote(list)} ]; then packages=$(awk '{print $1}' ${quote(list)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages; fi`
 }
 
 function waitUrl (url, attempts) {

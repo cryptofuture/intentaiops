@@ -13,6 +13,12 @@ function commandsMatch (first, second) {
   return first.length === second.length && first.every((item, index) => planFingerprint(fields(item)) === planFingerprint(fields(second[index])))
 }
 
+function approvedPlan (task, revision) {
+  const plan = [task.plan, ...(task.revisions ?? []).filter(item => item.approved === 1 || item.approved === true).map(item => item.plan)].find(plan => planFingerprint(plan) === revision)
+  assert.ok(plan, 'attempt does not match the approved plan revision')
+  return plan
+}
+
 function confirmed (task, rollback = false) {
   const commands = rollback ? task.plan.revertCommands : task.plan.commands
   const results = rollback ? task.revertResults : task.results
@@ -21,15 +27,51 @@ function confirmed (task, rollback = false) {
     assert.ok(results.some(result => result.id === item.id), 'result does not identify the reviewed command')
     const events = task.events.filter(event => event.commandId === item.id && (event.metadata?.operation === 'rollback') === rollback)
     const dispatched = events.filter(event => event.type === 'command_dispatched')
-    assert.ok(dispatched.length === 1, 'expected exactly one dispatch per command and task')
-    const intent = events.findIndex(event => event.type === 'command_prepared' && event.attemptId === dispatched[0].attemptId)
+    const result = results.find(result => result.id === item.id)
+    assert.ok(dispatched.length > 0 && dispatched.length === (result.attempts ?? 1), 'dispatch count differs from recorded attempts')
+    assert.ok(dispatched.every(event => typeof event.attemptId === 'string' && event.attemptId) && new Set(dispatched.map(event => event.attemptId)).size === dispatched.length, 'each dispatch requires a distinct attempt')
+    assert.ok(events.filter(event => ['command_prepared', 'command_acknowledged', 'command_completed', 'command_failed', 'command_outcome_unknown'].includes(event.type)).every(event => dispatched.some(dispatch => dispatch.attemptId === event.attemptId)), 'orphan command observation has no dispatch')
+    if (dispatched.length > 1) {
+      const retry = item.retry
+      assert.ok(Number.isInteger(retry?.attempts) && retry.attempts >= dispatched.length && retry.attempts <= 120, 'repeated dispatch exceeds the declared retry limit')
+      assert.ok(Number.isInteger(retry.intervalMs) && retry.intervalMs >= 0 && retry.intervalMs <= 10000 && (retry.attempts - 1) * retry.intervalMs <= 900000, 'invalid declared retry window')
+      assert.ok(Array.isArray(retry.exitCodes) && retry.exitCodes.length > 0 && retry.exitCodes.length <= 8 && retry.exitCodes.every(code => Number.isInteger(code) && code > 0 && code <= 255), 'declared retry exit codes required')
+      assert.ok(!retry.states, 'state-restricted retries require native state evidence not recorded in this journal')
+    }
     const approval = events.findIndex(event => event.type === 'plan_approved' && event.revision === dispatched[0].revision)
-    assert.ok(approval >= 0 && intent > approval && events.indexOf(dispatched[0]) > intent, 'approved execution intent must precede dispatch')
-    const done = events.filter(event => event.type === 'command_completed' && event.attemptId === dispatched[0].attemptId)
-    assert.ok(done.length === 1 && done[0].revision === planFingerprint(task.plan), 'completion does not confirm the approved attempt')
+    let previous = approval
+    for (const [index, dispatch] of dispatched.entries()) {
+      const attempts = events.filter(event => event.attemptId === dispatch.attemptId)
+      const prepared = attempts.filter(event => event.type === 'command_prepared')
+      const terminal = attempts.filter(event => ['command_completed', 'command_failed', 'command_outcome_unknown'].includes(event.type))
+      const definition = approvedPlan(task, dispatch.revision)[rollback ? 'revertCommands' : 'commands'].find(command => command.id === item.id)
+      assert.ok(definition && planFingerprint(definition) === planFingerprint(item) && dispatch.revision === dispatched[0].revision && prepared.every(event => event.revision === dispatch.revision), 'attempt does not match the approved plan revision')
+      assert.ok(approval >= 0 && prepared.length === 1 && events.indexOf(prepared[0]) > previous && events.indexOf(dispatch) > events.indexOf(prepared[0]), 'approved ordered execution intent must precede dispatch')
+      assert.ok(terminal.length === 1 && events.indexOf(terminal[0]) > events.indexOf(dispatch) && terminal[0].revision === dispatch.revision, 'missing authoritative attempt outcome')
+      if (index === dispatched.length - 1) assert.ok(terminal[0].type === 'command_completed' && (terminal[0].metadata?.exitCode ?? 0) === 0, 'completion does not confirm the approved attempt')
+      else assert.ok(terminal[0].type === 'command_failed' && item.retry.exitCodes.includes(terminal[0].metadata?.exitCode) && !terminal[0].metadata?.reconciled, 'retry requires a confirmed declared failure, not an uncertain outcome')
+      previous = events.indexOf(terminal[0])
+    }
     assert.ok(events.at(-1)?.type === 'command_completed', 'command still has an unresolved execution state')
   }
+  if (!rollback) {
+    const ids = new Set(commands.map(command => command.id))
+    const removed = task.events.filter(event => event.commandId && !ids.has(event.commandId) && event.metadata?.operation !== 'rollback')
+    const dispatched = removed.filter(event => event.type === 'command_dispatched')
+    assert.ok(removed.filter(event => ['command_prepared', 'command_acknowledged', 'command_completed', 'command_failed', 'command_outcome_unknown'].includes(event.type)).every(event => dispatched.some(dispatch => dispatch.commandId === event.commandId && dispatch.attemptId === event.attemptId)), 'removed operation has an orphan observation')
+    for (const dispatch of dispatched) {
+      const definition = approvedPlan(task, dispatch.revision).commands.find(command => command.id === dispatch.commandId)
+      const attempts = removed.filter(event => event.commandId === dispatch.commandId && event.attemptId === dispatch.attemptId)
+      const prepared = attempts.filter(event => event.type === 'command_prepared')
+      const terminal = attempts.filter(event => ['command_completed', 'command_failed', 'command_outcome_unknown'].includes(event.type))
+      const approval = removed.findIndex(event => event.commandId === dispatch.commandId && event.type === 'plan_approved' && event.revision === dispatch.revision)
+      assert.ok(definition && dispatch.attemptId && dispatched.filter(event => event.commandId === dispatch.commandId).length === 1 && approval >= 0 && prepared.length === 1 && prepared[0].revision === dispatch.revision && removed.indexOf(prepared[0]) > approval && removed.indexOf(dispatch) > removed.indexOf(prepared[0]), 'removed operation requires one approved ordered attempt')
+      assert.ok(terminal.length === 1 && terminal[0].type === 'command_failed' && terminal[0].revision === dispatch.revision && removed.indexOf(terminal[0]) > removed.indexOf(dispatch) && Number.isInteger(terminal[0].metadata?.exitCode) && terminal[0].metadata.exitCode !== 0 && !terminal[0].metadata.reconciled, 'removed operation lacks a confirmed failure; completed or uncertain history cannot disappear')
+    }
+  }
 }
+
+export { confirmed as assertCliTaskExecutionEvidence }
 
 function output (task, commandId) {
   const result = task.results.find(result => result.id === commandId)
@@ -70,7 +112,8 @@ export function assertCliLifecycleEvidence ({ baseline, first, repeat, afterFirs
   }
   const phases = [phase(baseline), phase(first), phase(repeat), phase(first, true), phase(afterFirstRevert), phase(repeat, true), phase(afterSecondRevert)]
   assert.ok(phases.every((value, index) => index === 0 || phases[index - 1].end < value.start), 'observations and execution phases are out of order')
-  return { firstTask: first.id, repeatTask: repeat.id, commands: first.plan.commands.length, rollbackCommands: first.plan.revertCommands.length, scope: 'reviewed state probe and single-dispatch journal evidence' }
+  const retried = tasks.some(task => [...task.results, ...(task.revertResults ?? [])].some(result => result.attempts > 1))
+  return { firstTask: first.id, repeatTask: repeat.id, commands: first.plan.commands.length, rollbackCommands: first.plan.revertCommands.length, scope: retried ? 'reviewed state probe and declared-retry journal evidence' : 'reviewed state probe and single-dispatch journal evidence' }
 }
 
 async function main () {
@@ -87,7 +130,11 @@ async function main () {
       assert.ok(row && [row.plan_json, row.results_json, row.revert_results_json].every(value => !value || value.length <= 2 * 1024 * 1024), 'task evidence is missing or exceeds the inspection limit')
       const events = database.prepare('SELECT id, command_id AS commandId, attempt_id AS attemptId, revision, type, metadata_json FROM execution_events WHERE task_id = ? ORDER BY id LIMIT 1001').all(row.id)
       assert.ok(events.length <= 1000, 'journal exceeds the inspection limit')
-      return { id: row.id, status: row.status, kind: row.kind, plan: JSON.parse(row.plan_json), results: JSON.parse(row.results_json ?? '[]'), revertResults: JSON.parse(row.revert_results_json ?? '[]'), events: events.map(event => ({ ...event, metadata: JSON.parse(event.metadata_json) })) }
+      const revisions = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plan_revisions'").get()
+        ? database.prepare('SELECT approved, substr(plan_json, 1, 2097153) AS plan_json FROM plan_revisions WHERE task_id = ? AND approved = 1 ORDER BY id LIMIT 33').all(row.id)
+        : []
+      assert.ok(revisions.length <= 32 && revisions.reduce((size, revision) => size + revision.plan_json.length, 0) <= 2 * 1024 * 1024, 'revision evidence exceeds the inspection limit')
+      return { id: row.id, status: row.status, kind: row.kind, plan: JSON.parse(row.plan_json), revisions: revisions.map(revision => ({ approved: revision.approved, plan: JSON.parse(revision.plan_json) })), results: JSON.parse(row.results_json ?? '[]'), revertResults: JSON.parse(row.revert_results_json ?? '[]'), events: events.map(event => ({ ...event, metadata: JSON.parse(event.metadata_json) })) }
     })
     const [baseline, first, repeat, afterFirstRevert, afterSecondRevert] = tasks
     console.log(JSON.stringify({ passed: true, host, ...assertCliLifecycleEvidence({ baseline, first, repeat, afterFirstRevert, afterSecondRevert }) }))

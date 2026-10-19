@@ -126,7 +126,7 @@ test('task record rendering retains consultation, retry, progress, result, and r
     consumedByTaskId: 24,
     changeOverview: 'Install the application',
     modifiedFiles: ['/srv/wordpress/compose.yaml'],
-    progress: [{ type: 'reasoning', message: 'Inspecting inventory' }],
+    progress: [{ type: 'reasoning', message: 'Inspecting inventory' }, { phase: 'execution-diagnostics', message: 'Connection failure evidence' }],
     results: [{ id: 'apply', status: 'completed', result: { stdout: 'applied', stderr: '' } }],
     revertResults: [{ id: 'revert', status: 'failed', result: { stdout: '', stderr: 'revert failed' } }],
     error: 'apply warning',
@@ -138,6 +138,8 @@ test('task record rendering retains consultation, retry, progress, result, and r
     'Used by task', 'Overview', 'Modified files and paths', 'Codex progress',
     'Execution results', 'Revert results', 'apply warning', 'rollback warning'
   ]) assert.match(output.text, new RegExp(escapeRegex(value)))
+  assert.match(output.text, /\[execution-diagnostics\] Connection failure evidence/u)
+  assert.doesNotMatch(output.text, /\[undefined\]/u)
 })
 
 test('task record renders a saved host health report and reusable diagnostic context', () => {

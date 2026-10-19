@@ -232,8 +232,21 @@ export class TaskStore {
     return this.withDatabase(serverId, database => database.transaction(() => {
       const task = this.getFromDatabase(database, taskId)
       if (!task.plan || planFingerprint(task.plan) !== fingerprint) throw new Error('execution plan differs from saved plan')
-      const lease = database.prepare('SELECT * FROM execution_leases WHERE task_id = ?').get(taskId)
-      if (lease && lease.expires_at > Date.now()) throw new Error('task execution is owned by another operator')
+      const ancestors = new Set([taskId])
+      let ancestor = task
+      while (ancestor.retryOfTaskId) {
+        if (ancestors.has(ancestor.retryOfTaskId) || ancestors.size >= 100) throw new Error('retry history is cyclic or exceeds the execution inspection limit')
+        ancestor = this.getFromDatabase(database, ancestor.retryOfTaskId)
+        ancestors.add(ancestor.id)
+        const uncertain = [...this.executionState(serverId, ancestor.id), ...this.rollbackState(serverId, ancestor.id)].some(command => command.status === 'uncertain')
+        const legacy = ancestor.plan?.commands?.length && ['running', 'reverting', 'partial', 'failed', 'revert_failed'].includes(ancestor.status) && !database.prepare('SELECT 1 FROM execution_events WHERE task_id = ? LIMIT 1').get(ancestor.id)
+        if (uncertain || legacy) throw new Error('retry ancestor requires operator reconciliation before execution; no commands were dispatched')
+      }
+      const related = database.prepare(`WITH RECURSIVE related(id) AS (
+        SELECT ? UNION SELECT tasks.id FROM tasks JOIN related ON tasks.retry_of_task_id = related.id LIMIT 1001
+      ) SELECT related.id, execution_leases.expires_at AS expiresAt FROM related LEFT JOIN execution_leases ON execution_leases.task_id = related.id`).all(ancestor.id)
+      if (related.length > 1000) throw new Error('retry family exceeds the execution inspection limit')
+      if (related.some(lease => lease.expiresAt > Date.now())) throw new Error('task or related retry execution is owned by another operator')
       database.prepare('INSERT OR REPLACE INTO execution_leases (task_id, owner, fingerprint, expires_at) VALUES (?, ?, ?, ?)')
         .run(taskId, owner, fingerprint, Date.now() + 30000)
       return { owner, fingerprint }
@@ -573,6 +586,7 @@ export class TaskStore {
       ensureColumn(database, 'kind', "TEXT NOT NULL DEFAULT 'ai'")
       ensureColumn(database, 'catalog_id', 'TEXT')
       ensureColumn(database, 'retry_of_task_id', 'INTEGER')
+      database.exec('CREATE INDEX IF NOT EXISTS tasks_retry_parent ON tasks(retry_of_task_id)')
       ensureColumn(database, 'retry_instructions', 'TEXT')
       ensureColumn(database, 'group_run_id', 'INTEGER')
       ensureColumn(database, 'consultation_ids_json', "TEXT NOT NULL DEFAULT '[]'")

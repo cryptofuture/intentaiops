@@ -752,6 +752,7 @@ export function commonTaskFoundationIds (catalogId, options = {}) {
 function catalogFoundationIds (catalogId, options) {
   const platform = options.platform ?? DEFINITIONS.find(item => item.id === catalogId)?.platform ?? 'linux'
   const common = ['host-generated-credentials', 'service-verification', 'safe-baseline-rollback']
+  if (catalogId === `intent-ai-ops-${platform}`) return [...(platform === 'linux' ? ['linux-baseline'] : []), 'service-verification', 'safe-baseline-rollback']
   if (catalogId === 'docker-linux') return ['linux-docker-readiness', 'safe-baseline-rollback']
   if (catalogId === 'docker-desktop-windows') return ['windows-docker-wsl-readiness', 'safe-baseline-rollback']
   if (catalogId === 'podman-freebsd') return ['freebsd-podman-readiness', 'safe-baseline-rollback']
@@ -936,7 +937,7 @@ function buildSystemdService (taskId, definition) {
   return simpleTask(definition, state, {
     overview: 'Install and run an isolated systemd oneshot service.',
     files: [unit, '/run/webminai-test-service', state],
-    apply: `set -eu; test ! -e ${quote(unit)}; install -d -m 0700 ${quote(state)}; printf '%s\n' '[Unit]' 'Description=Intent AI Ops reversible test service' '[Service]' 'Type=oneshot' 'ExecStart=/usr/bin/touch /run/webminai-test-service' 'RemainAfterExit=yes' > ${quote(unit)}; chmod 0644 ${quote(unit)}; systemctl daemon-reload; systemctl start webminai-test.service`,
+    apply: `set -eu; test ! -e ${quote(unit)}; test ! -e /run/webminai-test-service; install -d -m 0700 ${quote(state)}; printf '%s\n' '[Unit]' 'Description=Intent AI Ops reversible test service' '[Service]' 'Type=oneshot' 'ExecStart=/usr/bin/touch /run/webminai-test-service' 'RemainAfterExit=yes' > ${quote(unit)}; chmod 0644 ${quote(unit)}; systemctl daemon-reload; systemctl start webminai-test.service`,
     applyPurpose: 'Install and start the test service',
     revert: `set -eu; systemctl stop webminai-test.service 2>/dev/null || true; rm -f -- ${quote(unit)} /run/webminai-test-service; systemctl daemon-reload; systemctl reset-failed webminai-test.service 2>/dev/null || true; rm -rf -- ${quote(state)}`,
     revertPurpose: 'Stop and remove the test service',
@@ -953,7 +954,7 @@ function buildSystemdTimer (taskId, definition) {
   return simpleTask(definition, state, {
     overview: 'Install and enable an isolated systemd maintenance timer.',
     files: [service, timer, '/run/webminai-test-timer', state],
-    apply: `set -eu; test ! -e ${quote(service)}; test ! -e ${quote(timer)}; install -d -m 0700 ${quote(state)}; printf '%s\n' '[Service]' 'Type=oneshot' 'ExecStart=/usr/bin/touch /run/webminai-test-timer' > ${quote(service)}; printf '%s\n' '[Unit]' 'Description=Intent AI Ops reversible test timer' '[Timer]' 'OnActiveSec=1s' 'Unit=webminai-test-timer.service' '[Install]' 'WantedBy=timers.target' > ${quote(timer)}; chmod 0644 ${quote(service)} ${quote(timer)}; systemctl daemon-reload; systemctl enable --now webminai-test.timer`,
+    apply: `set -eu; test ! -e ${quote(service)}; test ! -e ${quote(timer)}; test ! -e /run/webminai-test-timer; install -d -m 0700 ${quote(state)}; printf '%s\n' '[Service]' 'Type=oneshot' 'ExecStart=/usr/bin/touch /run/webminai-test-timer' > ${quote(service)}; printf '%s\n' '[Unit]' 'Description=Intent AI Ops reversible test timer' '[Timer]' 'OnActiveSec=1s' 'Unit=webminai-test-timer.service' '[Install]' 'WantedBy=timers.target' > ${quote(timer)}; chmod 0644 ${quote(service)} ${quote(timer)}; systemctl daemon-reload; systemctl enable --now webminai-test.timer`,
     applyPurpose: 'Install and enable the test timer',
     revert: `set -eu; systemctl disable --now webminai-test.timer 2>/dev/null || true; rm -f -- ${quote(service)} ${quote(timer)} /run/webminai-test-timer; systemctl daemon-reload; systemctl reset-failed webminai-test-timer.service 2>/dev/null || true; rm -rf -- ${quote(state)}`,
     revertPurpose: 'Disable and remove the test timer',
@@ -1027,8 +1028,8 @@ function simpleTask (definition, state, options) {
     plan: {
       changeOverview: options.overview,
       modifiedFiles: options.files,
-      commands: [command('apply', `set -eu; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${options.apply}; : > ${quote(`${state}/apply-complete`)}; fi`, options.applyPurpose, 'change', 300000)],
-      revertCommands: [command('revert', options.revert, options.revertPurpose, 'change', 300000)]
+      commands: [command('apply', `set -eu; for path in ${options.files.map(quote).join(' ')}; do test ! -L "$path"; done; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${options.apply}; : > ${quote(`${state}/apply-complete`)}; fi`, options.applyPurpose, 'change', 300000)],
+      revertCommands: [command('revert', `set -eu; test ! -L ${quote(state)}; [ -d ${quote(state)} ] || exit 0; ${options.revert}`, options.revertPurpose, 'change', 300000)]
     },
     verifyApplied: options.verifyApplied,
     verifyReverted: options.verifyReverted,
