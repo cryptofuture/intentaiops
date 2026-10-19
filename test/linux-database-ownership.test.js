@@ -31,9 +31,11 @@ test('PostgreSQL ownership binds repeated execution and rollback to the original
     assert.equal(run().status, 1)
     assert.equal(readFileSync(log, 'utf8'), '')
     writeFileSync(identity, '71|0|0|0\n')
-    writeFileSync(path.join(credentials, 'database_password'), "unsafe'; SQL")
-    assert.equal(run().status, 1)
-    assert.equal(readFileSync(log, 'utf8'), '')
+    for (const password of ["unsafe'; SQL", 'a'.repeat(64) + '\n' + 'b'.repeat(64)]) {
+      writeFileSync(path.join(credentials, 'database_password'), password)
+      assert.equal(run().status, 1)
+      assert.equal(readFileSync(log, 'utf8'), '')
+    }
     writeFileSync(path.join(credentials, 'database_password'), 'a'.repeat(64))
     for (const value of ['bad-name', 'x'.repeat(64), "x';DROP ROLE x;"]) {
       assert.throws(() => postgresApplicationDatabaseCommand({ state, credentials, database: value, user: 'webminai_test' }), /invalid PostgreSQL/u)

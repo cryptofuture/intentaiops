@@ -5,6 +5,7 @@ import { buildCandidatePlanningContext, buildCommonTask, commonTaskEligibility, 
 import { rootExecutionPolicy } from '../src/execution-policy.js'
 import { LinuxHostContextService } from '../src/linux-host-context.js'
 import { validateCommandPlan } from '../src/plan-validator.js'
+import { validateDockerAndSecrets } from '../src/planner-platform-policy.js'
 import { hostHealthProfile, isHostHealthTask } from '../src/host-health-task.js'
 import { isSystemUpdateTask, systemUpdateProfile } from '../src/system-update-task.js'
 
@@ -227,6 +228,7 @@ test('promoted native Linux applications remain eligible across the lab distribu
     for (const catalogId of expected) {
       const built = buildCommonTask(catalogId, 901, options)
       assert.equal(validateCommandPlan(built.plan, rootExecutionPolicy({})), built.plan, `${id}/${catalogId}`)
+      assert.doesNotThrow(() => validateDockerAndSecrets(built.plan, { webminaiDocker: options.docker }), `${id}/${catalogId} must remain reusable under AI planning policy`)
       assert.ok(!built.plan.commands.some(command => command.id === 'record-compatibility'), `${id}/${catalogId} must deploy, not substitute a no-change report`)
     }
   }

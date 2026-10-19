@@ -490,6 +490,9 @@ test('portable Jellyfin rollback preserves unrelated default data and service', 
       const built = buildJellyfinTask(319, { identity: { id, architecture: 'x86_64' }, management: { family } })
       if (family === 'arch') assert.ok(built.plan.modifiedFiles.includes('/etc/nginx/nginx.conf'))
       const remap = command => command.replaceAll('/opt/', `${root}/opt/`).replaceAll('/var/', `${root}/var/`).replaceAll('/root/', `${root}/root/`).replaceAll('/etc/', `${root}/etc/`)
+      const state = `${root}/var/lib/webminai/task-state/319-jellyfin-linux`
+      mkdirSync(state, { recursive: true })
+      writeFileSync(path.join(state, 'packages.before'), 'base-package\n')
       for (const directory of defaults) {
         mkdirSync(`${root}${directory}`, { recursive: true })
         writeFileSync(`${root}${directory}/keep`, 'pre-existing')
@@ -563,7 +566,7 @@ test('Jellyfin rejects a mismatched server or web package even when its meta-pac
     const built = buildJellyfinTask(316, { identity: { id: 'debian', versionId: '13', architecture: 'x86_64' }, management: { family: 'debian' } })
     const command = built.plan.commands.find(c => c.id === 'install-jellyfin').command.replaceAll('/var/lib/webminai/task-state/316-jellyfin-linux', root).replaceAll('apt-get', 'mock_apt_get').replaceAll('dpkg-query', 'mock_dpkg_query')
     for (const mismatched of ['', 'jellyfin-server', 'jellyfin-web']) {
-      const result = spawnSync('/bin/sh', ['-c', `mock_apt_get () { case "$*" in *'jellyfin=10.11.11+deb13'*'jellyfin-server=10.11.11+deb13'*'jellyfin-web=10.11.11+deb13'*) return 0;; *) return 99;; esac; }; systemctl () { return 0; }; mock_dpkg_query () { if [ "$#" -eq 2 ]; then return 0; fi; if [ "$3" = '${mismatched}' ]; then printf '12.2+deb13'; else printf '10.11.11+deb13'; fi; }; ` + command], { encoding: 'utf8' })
+      const result = spawnSync('/bin/sh', ['-c', `mock_apt_get () { case "$*" in *'jellyfin=10.11.11+deb13'*'jellyfin-server=10.11.11+deb13'*'jellyfin-web=10.11.11+deb13'*) return 0;; *) return 99;; esac; }; systemctl () { return 0; }; mock_dpkg_query () { if [ "$#" -eq 2 ]; then printf '%s\\n' 'base-package 1' 'jellyfin 10.11.11+deb13' 'jellyfin-server 10.11.11+deb13' 'jellyfin-web 10.11.11+deb13'; return 0; fi; if [ "$3" = '${mismatched}' ]; then printf '12.2+deb13'; else printf '10.11.11+deb13'; fi; }; ` + command], { encoding: 'utf8' })
       assert.equal(result.status, mismatched ? 1 : 0, result.stderr)
       if (mismatched) assert.match(result.stderr, new RegExp(`PACKAGE_VERSION_MISMATCH: ${mismatched}`))
     }
@@ -578,6 +581,7 @@ test('Jellyfin rollback tolerates a removed nginx unit but still restores an ins
     const command = built.plan.revertCommands.find(c => c.id === 'restore-foundation').command.replaceAll('/var/lib/webminai/task-state/314-jellyfin-linux', state)
     for (const installed of [false, true]) {
       mkdirSync(state)
+      writeFileSync(path.join(state, 'packages.before'), 'base-package\n')
       writeFileSync(path.join(state, 'nginx.active'), '')
       writeFileSync(path.join(state, 'nginx.enabled'), '')
       const result = spawnSync('/bin/sh', ['-c', `getent () { return 2; }; systemctl () { printf '%s\\n' "$*" >> '${root}/calls'; case "$1" in cat) ${installed ? 'return 0' : 'return 1'};; start) ${installed ? 'return 0' : 'return 5'};; esac; }; ` + command], { encoding: 'utf8' })

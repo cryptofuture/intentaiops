@@ -1,6 +1,7 @@
 const POSIX_INSTALLER = 'https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.sh'
 const WINDOWS_INSTALLER = 'https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.ps1'
 const PACKAGE_URL = 'https://raw.githubusercontent.com/cryptofuture/intentaiops/main/dist/intent-ai-ops.tgz'
+const NODE_VERSION = '24.16.0'
 
 export function buildIntentAiOpsInstallTask (taskId, platform, source = {}, linuxContext) {
   if (!Number.isInteger(taskId) || taskId < 1) throw new TypeError('task id must be a positive integer')
@@ -34,19 +35,20 @@ function posixTask (taskId, platform, source, linuxContext) {
       ].join('; ') + '; '
     : ''
   const packageLocation = acquirePackage ? '"$state/package.tgz"' : quote(source.packageUrl)
-  const install = `set -eu; state=${quote(state)}; root=${quote(root)}; bin=${quote(bin)}; test ! -L "$state"; test -f "$state/baseline"; [ ! -e "$state/preexisting" ] || { printf '%s\n' 'Intent AI Ops is already installed; leaving it unchanged'; exit 0; }; if [ -e "$state/installed" ]; then test ! -L "$root"; "$bin/intentaiops" --help >/dev/null; exit 0; fi; [ ! -e "$state/root.existed" ] || { printf '%s\n' 'INSTALL_ROOT_ALREADY_EXISTS: refusing to overwrite an unowned Intent AI Ops directory' >&2; exit 78; }; for target in "$root" "$bin/intentaiops" "$bin/intentops"; do [ ! -e "$target" ] && [ ! -L "$target" ] || { printf '%s\\n' 'task target already exists: protected CLI installation path' >&2; exit 78; }; done; : > "$state/owns-root"; chmod 0600 "$state/owns-root"; ${alpine ? 'apk add --no-cache nodejs npm; ' : ''}${acquireInstaller}; chmod 0700 "$state/install.sh"; grep -Fq 'INTENTAI_OPS_PACKAGE_URL' "$state/install.sh"; ${acquirePackage}HOME=${quote(home)} npm_config_cache="$state/npm-cache" NODE_OPTIONS="\${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000" INTENTAI_OPS_PACKAGE_URL=${packageLocation} INTENTAI_OPS_INSTALL_ROOT="$root" INTENTAI_OPS_BIN_DIR="$bin" sh "$state/install.sh"; "$bin/intentaiops" --help >/dev/null; : > "$state/installed"; chmod 0600 "$state/installed"`
+  const runtime = platform === 'linux' ? 'umask 022; ' + (alpine ? '' : privateLinuxRuntime() + '; ') : ''
+  const install = `set -eu; state=${quote(state)}; root=${quote(root)}; bin=${quote(bin)}; test ! -L "$state"; test -f "$state/baseline"; [ ! -e "$state/preexisting" ] || { printf '%s\n' 'Intent AI Ops is already installed; leaving it unchanged'; exit 0; }; if [ -e "$state/installed" ]; then test ! -L "$root"; "$bin/intentaiops" --help >/dev/null; exit 0; fi; [ ! -e "$state/root.existed" ] || { printf '%s\n' 'INSTALL_ROOT_ALREADY_EXISTS: refusing to overwrite an unowned Intent AI Ops directory' >&2; exit 78; }; for target in "$root" "$bin/intentaiops" "$bin/intentops"; do [ ! -e "$target" ] && [ ! -L "$target" ] || { printf '%s\\n' 'task target already exists: protected CLI installation path' >&2; exit 78; }; done; : > "$state/owns-root"; chmod 0600 "$state/owns-root"; ${runtime}${alpine ? 'apk add --no-cache nodejs npm; ' : ''}${acquireInstaller}; chmod 0700 "$state/install.sh"; grep -Fq 'INTENTAI_OPS_PACKAGE_URL' "$state/install.sh"; ${acquirePackage}HOME=${quote(home)} npm_config_cache="$state/npm-cache" NODE_OPTIONS="\${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000" INTENTAI_OPS_PACKAGE_URL=${packageLocation} INTENTAI_OPS_INSTALL_ROOT="$root" INTENTAI_OPS_BIN_DIR="$bin" sh "$state/install.sh"; "$bin/intentaiops" --help >/dev/null; : > "$state/installed"; chmod 0600 "$state/installed"`
   const revert = `set -eu; state=${quote(state)}; root=${quote(root)}; bin=${quote(bin)}; [ -d "$state" ] || exit 0; test ! -L "$state"; if [ -e "$state/owns-root" ]; then rm -f -- "$bin/intentaiops" "$bin/intentops"; rm -rf -- "$root"; ${removePackages || ':'}; fi; rm -rf -- "$state"`
   return {
     plan: {
       summary: `Install Intent AI Ops on ${platform}`,
-      changeOverview: 'Install the reviewed GitHub package and Node.js 24 only when Node is absent, while preserving any existing installation.',
+      changeOverview: platform === 'linux' && !alpine ? 'Install the reviewed GitHub package, reusing compatible Node.js or adding task-private Node.js 24 without changing an incompatible system runtime.' : 'Install the reviewed GitHub package and Node.js 24 only when Node is absent, while preserving any existing installation.',
       modifiedFiles: [state, root, `${bin}/intentaiops`, `${bin}/intentops`],
       assumptions: ['The host can reach raw.githubusercontent.com, nodejs.org, and the npm registry.'],
       warnings: ['This installs the administration CLI on the selected host. Codex and working OpenSSH are still required before that host can administer other machines.'],
       requiresConfirmation: true,
       commands: [
         item('capture-intent-ai-ops-baseline', baseline, 'Capture the existing CLI, install root, and package baseline'),
-        item('install-intent-ai-ops', install, 'Install Node.js only when absent, install Intent AI Ops, and verify its CLI', ['capture-intent-ai-ops-baseline'], platform === 'linux' ? 1800000 : 900000, 'job')
+        item('install-intent-ai-ops', install, platform === 'linux' && !alpine ? 'Preserve system Node.js, add a compatible private runtime when needed, install Intent AI Ops and verify its CLI' : 'Install Node.js only when absent, install Intent AI Ops, and verify its CLI', ['capture-intent-ai-ops-baseline'], platform === 'linux' ? 1800000 : 900000, 'job')
       ],
       revertCommands: [item('remove-task-owned-intent-ai-ops', revert, 'Remove only the CLI, runtime, links, and FreeBSD packages introduced by this task', [], 300000, 'job', 'destructive')]
     },
@@ -54,6 +56,26 @@ function posixTask (taskId, platform, source, linuxContext) {
     verifyReverted: `[ ! -e ${quote(state)} ]`,
     stateProbe: `if [ -e ${quote(`${state}/installed`)} ]; then printf 'intent-ai-ops=task-owned\n'; elif command -v intentaiops >/dev/null 2>&1; then printf 'intent-ai-ops=preexisting\n'; else printf 'intent-ai-ops=absent\n'; fi`
   }
+}
+
+function privateLinuxRuntime () {
+  const compatible = "const [major,minor]=process.versions.node.split('.').map(Number); process.exit(major>24||(major===24&&minor>=7)?0:1)"
+  return [
+    `if command -v node >/dev/null 2>&1 && ! node -e ${quote(compatible)} >/dev/null 2>&1; then`,
+    "case $(uname -m) in x86_64|amd64) node_arch=x64;; aarch64|arm64) node_arch=arm64;; *) printf '%s\\n' 'UNSUPPORTED_PRIVATE_NODE_ARCHITECTURE' >&2; exit 1;; esac",
+    `archive="node-v${NODE_VERSION}-linux-$node_arch.tar.gz"`,
+    `curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 900 --max-filesize 134217728 --silent --show-error "https://nodejs.org/dist/v${NODE_VERSION}/$archive" --output "$state/node-runtime.tar.gz"`,
+    `curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 30 --max-filesize 65536 --silent --show-error 'https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt' --output "$state/node-runtime.sha256"`,
+    "expected=$(awk -v name=\"$archive\" '$2 == name {print $1}' \"$state/node-runtime.sha256\"); case \"$expected\" in ''|*[!0-9a-fA-F]*) printf '%s\\n' 'NODE_CHECKSUM_INVALID' >&2; exit 1;; esac",
+    `[ "${'$'}{#expected}" -eq 64 ] || exit 1`,
+    'actual=$(sha256sum "$state/node-runtime.tar.gz" | awk \'{print $1}\'); [ "$actual" = "$expected" ] || { printf \'%s\\n\' NODE_CHECKSUM_MISMATCH >&2; exit 1; }',
+    'install -d -m 0755 "$root" "$root/runtime"',
+    'tar -xzf "$state/node-runtime.tar.gz" --no-same-owner -C "$root/runtime" --strip-components=1',
+    `"$root/runtime/bin/node" -e ${quote(compatible)}`,
+    'test -x "$root/runtime/bin/npm"',
+    'PATH="$root/runtime/bin:$PATH"; export PATH',
+    'rm -f -- "$state/node-runtime.tar.gz" "$state/node-runtime.sha256"', 'fi'
+  ].join('\n')
 }
 
 function windowsTask (taskId, source) {

@@ -92,10 +92,19 @@ export function validateDockerAndSecrets (plan, inventory) {
   if (items.some(item => enablesShellTracing(item.command))) {
     throw new Error('commands that may handle credentials must not enable shell tracing')
   }
-  if (/\bcat\s+(?:--\s+)?['"]?\/root\/[^\s'"]*_credentials(?:\/[^\s'"]*)?/iu.test(commandText)) {
+  if (items.some(item => {
+    const visible = withoutPrivateCredentialWrites(item.command)
+    if (/\bcat\s+(?:--\s+)?['"]?\/root\/[^\s'"]*_credentials(?:\/[^\s'"]*)?/iu.test(visible)) return true
+    return /\bcat[ \t]+(?:(?:[A-Za-z0-9_./=+,:@%-]+|'[^'\r\n]*'|"[^"\r\n]*")[ \t]+)*(?:<[ \t]*)?['"]?\/root\/[^\s'"]*_credentials(?:\/|\b)/iu.test(visible)
+  })) {
     throw new Error('commands must not print root-only service credential files')
   }
-  if (/\b(?:password|passwd|token|secret|api[_-]?key|username|login)\s*[:=]\s*['"]?(?!['"$%<{(])[^\s'";]{6,}/iu.test(commandText) || /--(?:password|token|secret|api-key)\s+['"]?(?!['"$<{])[^\s'"]{6,}/iu.test(commandText)) {
+  const literals = commandText.matchAll(/\b(?:password|passwd|token|secret|api[_-]?key|username|login)\s*[:=]\s*['"]?(?!['"$%<{(])[^\s'";]{6,}/giu)
+  const hasPrivateLiteral = [...literals].some(match => {
+    const publicJoomlaLogin = match[0] === 'username=webminai_admin' && /(?:^|\s)--admin-$/u.test(commandText.slice(0, match.index)) && /^(?:\s|$)/u.test(commandText.slice(match.index + match[0].length))
+    return !publicJoomlaLogin
+  })
+  if (hasPrivateLiteral || /--(?:password|token|secret|api-key)\s+['"]?(?!['"$<{])[^\s'"]{6,}/iu.test(commandText)) {
     throw new Error('plans must not contain literal login or secret values; generate them only during remote execution')
   }
   const generatesSecret = /openssl\s+rand|\/dev\/(?:u?random)\b/iu.test(commandText)
@@ -139,4 +148,17 @@ export function validateNetdataFunctions (plan, inventory) {
 function enablesShellTracing (command) {
   return /\bset\s+-[A-Za-z]*x[A-Za-z]*\b/u.test(command) ||
     /\bset[^;\r\n]*\s-o\s+xtrace\b/u.test(command)
+}
+
+function withoutPrivateCredentialWrites (command) {
+  const variables = []
+  const handoff = /(^|[;\r\n])\s*(?<variable>[A-Za-z_][A-Za-z0-9_]*)=\$\(cat\s+'\/root\/(?<service>[A-Za-z0-9_.-]+)_credentials\/[A-Za-z0-9][A-Za-z0-9_.-]*'\);\s*umask\s+0?77;\s*printf\s+'(?<format>[^'\r\n]*)'\s+"\$\k<variable>"\s*>\s*'\/root\/\k<service>_credentials\/[A-Za-z0-9][A-Za-z0-9_.-]*'(?=\s*(?:[;\r\n]|$))/gu
+  const stripped = command.replace(handoff, (...match) => {
+    const groups = match.at(-1)
+    if (!/^(?:[A-Za-z0-9_][A-Za-z0-9_.:= -]*)?%s(?:\\n)?$/u.test(groups.format)) return match[0]
+    variables.push(groups.variable)
+    return match[1]
+  })
+  if (variables.some(variable => new RegExp(`\\b${variable}\\b`, 'u').test(stripped))) return command
+  return stripped
 }

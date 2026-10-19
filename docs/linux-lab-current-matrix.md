@@ -1,6 +1,6 @@
 # Current Linux lab coverage
 
-Updated 2026-10-19 08:43 UTC. Source: the existing normal vault's task journals and cached host inventories, checked through the current checkout. Remote execution uses the binary CLI, not a separate service runner. Exact active owners and recovery obligations are in [the checkpoint](linux-lab-validation-status.md).
+Updated 2026-10-19 16:59 UTC. Source: the existing normal vault's task journals and cached host inventories, checked through the current checkout. Remote execution uses the binary CLI, not a separate service runner. Exact active owners and recovery obligations are in [the checkpoint](linux-lab-validation-status.md).
 
 ## Scope
 
@@ -16,6 +16,20 @@ health reports and system updates below are separate supplementary coverage and
 must not inflate application coverage. Docker/Podman is excluded from live tests.
 These cycle passes do not prove universal repeated-execution restoration or
 completion of the branch-feature audit.
+
+The read-only strict audit now checks the stronger assertions independently:
+
+```sh
+node scripts/audit-linux-cli-history.js /home/vscode/.intentaiops --require-repeat-restoration
+```
+
+It currently exits1: **15/87 application cases pass,72 lack complete evidence**.
+Verified cases are Debian n8n and Jellyfin, Fedora Intent AI Ops install, Alpine Drupal and
+Moodle, Arch Moodle, openSUSE Moodle, and Intent AI Ops installs on all nine hosts.
+The remaining8 of the23 formal cycles are supplementary system
+fixtures. A null `repeatRestoration` identifies a missing application case;
+the audit does not contact hosts, decrypt the vault or change history. This is
+an unfinished acceptance check, not an additional87-case pass.
 
 Current catalog eligibility resolves to **183 host/task combinations**: 87 application, 78 system, and 18 diagnostic/maintenance combinations. These are eligibility counts, not passes. Eligibility must be refreshed before execution; unsupported routes are not successes. The default picker exposes application, diagnostic and maintenance categories. Explicit `--lab-tasks` also exposes eligible Linux system fixtures, with normal review and approval.
 
@@ -35,8 +49,10 @@ Current catalog eligibility resolves to **183 host/task combinations**: 87 appli
 
 Current authoritative total: **182/183**. Alma21, Alpine16, Arch20, Debian21,
 Fedora20, openSUSE20, Oracle21, Rocky21, Ubuntu22. All78 system fixtures, all9
-health, all9 Drupal, all9 PrestaShop and all9 Moodle cases pass. Twelve formal
-repeat/scoped restoration cases pass, including Arch29/30/31/32/33. Older totals
+health, all9 Drupal, all9 PrestaShop and all9 Moodle cases pass. Twenty-two formal
+repeat/scoped restoration cases pass, including Debian52/53/57/58/59 for n8n
+and Fedora33/34/35/36/37 for Intent AI Ops install. The n8n probes exclude protected credentials, its runtime
+database and dependency contents. Older totals
 below are historical, not current counts.
 
 Ghost57 lifecycle assertion passes seven active forward commands and four

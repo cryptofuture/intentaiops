@@ -1,8 +1,8 @@
 # Linux lab branch audit
 
-Updated 2026-10-19 08:43 UTC. Comparison: `main` at
+Updated 2026-10-19 16:59 UTC. Comparison: `main` at
 `fe55614b5ef780dbae582008103a0e905e41cdd2`, checkout HEAD
-`983ff09aa5c82823516c4207f60a503b1112bfa7` plus uncommitted fixes.
+`d81e10e236f2335690a3fc61f758cef267dae2c4` plus uncommitted fixes.
 This is an evidence ledger, not a completed release sign-off.
 
 Live acceptance scope is the README's Linux-without-Docker application column:
@@ -30,6 +30,130 @@ decrypt the vault, contact hosts or repair history projections.
 | Signed remote common-task records | Real OpenSSL storage, isolated fresh-install clients, signature/identity/CAS/baseline tests. New regression reproduces and fixes rejection of execution_recovery events and lost baseline selection after a confirmed completion followed by pause. | Ubuntu51/52/53 service and Debian42/43 timer cycles use the real binary. Debian source chain verifies9 records; independent SSH inspection confirms fixture paths absent and ledger/key root0700/0600. No real fresh second vault, key rotation, broad task-family recovery or forced disconnect is claimed by these cycles. |
 
 ## Latest continuation
+
+- Stronger live assertions now pass for15/87 application cases: all9 native CLI
+  host cases, Debian n8n and Jellyfin, Alpine Drupal and three Moodle cases.
+  Seventy-two application assertions remain;23 scoped cycles include8 system
+  fixtures. Ubuntu's old task66 swap directory is preserved after a pre-dispatch
+  collision, and its new67/68/69/70/71 cycle passes without adopting that state.
+- Additional Jellyfin audit reproduced false-success cleanup and deletion of
+  later unowned files. Native cleanup now requires its valid nonsymlink baseline,
+  skips missing state without deleting later files, propagates service/account/
+  package restoration failures and retains unresolved baseline evidence. All32
+  restore-failure/success cases,9 baseline cases and3 service-failure fixtures
+  pass. Previously saved plans are immutable. Reviewed Rocky45 and Arch45
+  cleanup now restores each selected baseline44, confirmed by fresh probe46.
+  Debian74/75 additionally passes both repeated apply and both rollbacks through
+  fresh probes76/77. No Docker live coverage is claimed.
+- openSUSE56 demonstrates confirmed execution-timeout diagnostics, not OOM:
+  failed FFmpeg job recorded exit143, signal15 and timed_out. Its retained
+  partial archive motivated bounded, checksum-verified resumable acquisition.
+  The new downloader passes deterministic fixtures and openSUSE56 live
+  continuation: all4 replacement steps completed once, original4 were not
+  replayed, independent HTTP health passed, and reviewed original rollback
+  completed all3 steps. Final restoration probe57 exactly matches55. Full suite
+  PASS801 total/798 passed/3 opt-in skips; lint/typecheck/package-install and
+  artifact checksums PASS. Broader recovery profiles remain unimplemented.
+- Debian Jellyfin70 completed all7 forward commands. Exact repeat proposal71
+  hit a catalog/planner-policy mismatch, then changed its initializer; both
+  approvals were declined and zero commands dispatched. The catalog now uses
+  captured one-line `sed` readers instead of `cat`, matching existing policy
+  without a new secret-read exemption. Regression covers the native plan and
+  shared initializer; protected execution output remains redacted. Source70's
+  original strict rollback is being validated, not counted as an exact-repeat pass.
+
+- Arch37 reproduced a genuine setup gap: released installer refused the existing
+  Node22.23.3. Its empty task-owned root/state were removed by separately reviewed
+  guarded rollback revision7, retaining the original failure. The trusted Linux
+  common-task builder now supplies checksum-verified private Node24.16.0 without
+  replacing system Node, bounds downloads, removes temporary archives and sets
+  umask022. Six isolated regressions pass, including checksum failures, compatible
+  system reuse, repeat/double cleanup and hostile inherited umask. Native37 was
+  not replayed; fresh39 installed successfully. Independent binary SSH confirmed
+  both versions, safe ownership and removed downloads. Its exact repeat40 passed
+  unchanged snapshots, current-catalog remote recovery proposal41 regenerated
+  successfully but was declined, and its first original rollback removed only
+  the private runtime. Final assertion38/39/40/42/43 now PASSES: both restoration
+  probes match baseline38, including unchanged global Node22 and Netdata state.
+- Alma46/47/48/49/50 and Alpine38/39/40/41/42 now pass full scoped repeat/restore
+  assertions. These add two application cases, not new platform-family recovery
+  claims. Including Arch, nine application cases and17 scoped cycles overall
+  are verified so far; the strict audit reports78 missing application assertions.
+- Ubuntu66 was blocked before task dispatch by a real legacy-ID collision with
+  old root-owned0700 swap state. It remains preserved. Remote transport now
+  reports only exact allowlisted conflict/busy messages with safe next actions,
+  never arbitrary stderr. Regression failed before/pass after, including secret
+  exclusion and inherited-object-property inputs. The guard is unchanged; no
+  occupied state is adopted or removed, and no retry is automatic.
+
+- Current-profile native n8n remote recovery is now live-verified on Debian:
+  source60 completed six commands once, followed by reviewed regenerated
+  recovery63's single guarded job. All27 source records verified before recovery
+  and all33 afterwards, ending rollback_completed/completed. Independent normal
+  binary SSH inspection confirms task-owned paths/account absent and Netdata
+  active. Acquisition took43 minutes with no observed OOM kill. Other Linux
+  families have reconstruction/collector fixtures, not extra live recovery passes.
+
+- Fedora33/34/35/36/37 now passes the complete selected-tree/package/service
+  repeat/restoration assertion. Both applies and both reviewed rollbacks dispatched
+  once; fresh probes after each rollback exactly match baseline33. Signed source34
+  also proves pause after completed baseline and resume of only the pending
+  installer. All18 remote records verify through rollback completion. Application
+  repeat/restoration coverage is now6/87 with81 missing;14 formal cycles overall
+  include8 supplementary system cases. Debian n8n60 is still acquiring packages.
+- Regenerated n8n cleanup plans pass the authoritative executor validator for
+  all five reconstructed Linux families, in addition to shell parsing and ordering
+  fixtures. Live current-profile n8n recovery still awaits source60 completion.
+
+- The strict read-only application repeat/restoration gate is implemented and
+  regression-tested. It currently fails honestly:5/87 cases verified,82 missing.
+  The broader13 formal cycles include8 supplementary system fixtures. The gate
+  makes no remote calls and does not change the normal audit's narrower meaning.
+- Signed pause/resume is now also live-verified on Debian61, through a fresh
+  binary. The source's six records verified before recovery62 and all11 verified
+  afterwards, ending rollback_completed/completed. One apply and one reviewed
+  recovery dispatched. Independent SSH inspection confirms fixture paths absent
+  and Netdata active. Source60 n8n acquisition continues separately.
+
+- Superseding validation:782 tests total,779 passed,0 failed,3 opt-in skips;
+  lint, typecheck, package-install and five artifact checksums pass. The archive
+  SHA-256 before this documentation refresh is
+  `462adbff6d3cc6d2c2f277bc84e010d98b8119ad8afd5203e25c17cefd74de35`.
+- Debian n8n52/53/57/58/59 passes the formal scoped two-apply/two-rollback
+  assertion, bringing that stronger coverage to13 cycles, not all87 application
+  cases. Both original and repeated cleanup completed once, with exact selected
+  static-file/package/service baseline restoration. Private runtime contents were
+  outside the probe scope. The planner-policy private-file handoff false positive
+  was fixed without relaxing output redaction or approval.
+- Remote pause/resume now goes through the shared signed-event hook. New remote
+  execution claims refuse occupied legacy task-state paths instead of reusing
+  unsigned leftovers after local task-ID collisions. Focused recovery/admin/
+  journal tests63/63 pass. Windows path checks are fixture-only.
+- Source60 is the fresh current-catalog n8n application test. Acquisition is
+  running without intervention; do not replay it or treat it as complete. Normal
+  binary inspection confirms0700 state/backup and0600 package baseline. Current
+  n8n remote-recovery execution remains pending, as do broader application/database
+  profiles and universal live repeated-apply/exact-restoration assertions.
+
+- Native n8n recovery now has a fixed Linux baseline collector, current-catalog
+  reconstruction, customized-target rejection and one guarded dependency-ordered
+  cleanup job. Fixtures cover all five Linux families, tampered package lists,
+  repository drift, unsafe backups and mounts, and stopping on cleanup failure.
+  Live inspection of Debian53 caught implicit state-parent creation at0755;
+  the new explicit0700 creation regression failed before the fix and passes now.
+  Repository writes also get an explicit022 umask. Source53 is an immutable older
+  plan and cannot count as live coverage for these final catalog changes. Its
+  acquisition remains active; see the checkpoint before any continuation.
+- Four isolated complete-tree restoration fixtures now execute unchanged apply
+  twice and rollback twice while preserving unrelated contents and links.
+  These are not extra live application passes. Probe version2 hashes selected
+  recursive contents, not only root-directory metadata. Protected application
+  credentials/runtime databases remain explicitly outside the current Debian
+  n8n live probe scope. No whole-host restoration claim follows.
+- Shared heartbeat failures stop further renewals, retain their original error,
+  and record timing/drift without owner secrets. The earlier Debian45 lease loss
+  remains unexplained. CLI remote-history inspection now also shows the recorded
+  outcome, so a terminal event with a partial outcome is not shown as success.
 
 - Superseding check:741 total/738 passed/0 failed/3 opt-in skips; lint,
   typecheck, package-install, native checksums and diff-check pass. Installed

@@ -1,12 +1,16 @@
-export function recoveryBaselineCommand (catalogId, taskId) {
+import { n8nRecoveryBaselineCommand } from './n8n-recovery-baseline.js'
+
+export function recoveryBaselineCommand (catalogId, taskId, family) {
   if (!Number.isSafeInteger(taskId) || taskId < 1 || taskId > 2147483647) throw new Error('Invalid recovery baseline task identity')
   if (catalogId === 'intent-ai-ops-linux') return cliInstallBaselineCommand(taskId)
-  const files = catalogId === 'systemd-service'
-    ? ['/etc/systemd/system/webminai-test.service']
-    : catalogId === 'systemd-timer'
-      ? ['/etc/systemd/system/webminai-test-timer.service', '/etc/systemd/system/webminai-test.timer']
-      : null
-  if (!files) throw new Error('No audited remote recovery baseline profile for this common task')
+  if (catalogId === 'n8n-linux') return n8nRecoveryBaselineCommand(taskId, family)
+  const files = {
+    'systemd-service': ['/etc/systemd/system/webminai-test.service'],
+    'systemd-timer': ['/etc/systemd/system/webminai-test-timer.service', '/etc/systemd/system/webminai-test.timer'],
+    'logrotate-rule': ['/etc/logrotate.d/webminai-test', '/var/log/webminai-test.log'],
+    'tmpfiles-rule': ['/etc/tmpfiles.d/webminai-test.conf']
+  }[catalogId]
+  if (!Array.isArray(files)) throw new Error('No audited remote recovery baseline profile for this common task')
   const state = `/var/lib/webminai/task-state/${taskId}-${catalogId}`
   return [
     'set -eu', '[ "$(id -u)" -eq 0 ]',
@@ -23,6 +27,14 @@ export function recoveryBaselineCommand (catalogId, taskId) {
     'identity=$(stat -c \'%d:%i:%u:%g:%a:%s\' "$file")',
     'digest=$(openssl dgst -sha256 "$file")',
     'evidence="$evidence\n$identity\n$digest"', 'done',
+    ...(catalogId === 'tmpfiles-rule'
+      ? [
+          'directory=/run/webminai-test-tmpfiles', 'safe_parent "$directory"', '[ ! -L "$directory" ]',
+          '[ "$(find "$directory" -prune -type d -user root -perm 0750 -print)" = "$directory" ]',
+          '[ -z "$(find "$directory" -mindepth 1 -maxdepth 1 -print)" ]',
+          'identity=$(stat -c \'%d:%i:%u:%g:%a\' "$directory")', 'evidence="$evidence\n$identity"'
+        ]
+      : []),
     'printf \'%s\\n\' "$evidence" | openssl dgst -sha256'
   ].join('\n')
 }
@@ -67,17 +79,17 @@ function cliInstallBaselineCommand (taskId) {
   ].join('\n')
 }
 
-export async function inspectRecoveryBaseline (client, catalogId, taskId) {
-  const result = await client.runCommand(recoveryBaselineCommand(catalogId, taskId), { timeoutSeconds: 10 })
+export async function inspectRecoveryBaseline (client, catalogId, taskId, family) {
+  const result = await client.runCommand(recoveryBaselineCommand(catalogId, taskId, family), { timeoutSeconds: 10 })
   if (result.exitCode !== 0 || result.stdoutTruncated || result.stderrTruncated || Buffer.byteLength(result.stdout ?? '') > 256) throw new Error('Recovery baseline ownership or integrity inspection failed')
   const match = /^(?:SHA2?-?256\([^\n]*\)|SHA256|\(stdin\))?\s*=?\s*([a-f0-9]{64})\s*$/u.exec(result.stdout.trim())
   if (!match) throw new Error('Invalid recovery baseline digest')
   return match[1]
 }
 
-export function guardRecoveryBaseline (command, catalogId, taskId, digest) {
+export function guardRecoveryBaseline (command, catalogId, taskId, digest, family) {
   if (!/^[a-f0-9]{64}$/u.test(digest)) throw new Error('Invalid expected recovery baseline digest')
-  const probe = recoveryBaselineCommand(catalogId, taskId)
+  const probe = recoveryBaselineCommand(catalogId, taskId, family)
   const check = `observed=$(sh -c ${quote(probe)}); observed=\${observed##* }; [ "$observed" = ${quote(digest)} ] || { printf '%s\\n' 'RECOVERY_BASELINE_CHANGED' >&2; exit 1; }`
   return { ...command, command: `set -eu; ${check}; ${command.command}` }
 }

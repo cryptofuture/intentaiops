@@ -2394,6 +2394,7 @@ async function browseRemoteCommonTasks ({ ui, admin, settings, passphrase, serve
     ui.line('Original task ID', original.taskId)
     ui.line('Signed records', verified.sequence)
     ui.line('Last observed event', verified.records.at(-1).event)
+    ui.line('Recorded outcome', verified.records.at(-1).outcome)
     ui.info('Signature and host identity verified. This is remote evidence, not local execution history or approval.')
     if (!await ui.confirm('Inspect the baseline and generate a new recovery plan?', false)) continue
     const inventory = await admin.refreshInventory(connection)
@@ -2749,7 +2750,7 @@ export function renderTaskRecord (ui, task) {
     for (const file of task.modifiedFiles) writeWrapped(ui, file)
   }
   if (task.progress.length > 0) {
-    ui.heading('Codex progress')
+    ui.heading('Task progress')
     for (const event of task.progress) {
       if (event.type === 'health_report') {
         ui.heading('Host health report')

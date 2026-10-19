@@ -40,13 +40,15 @@ export function executionDiagnostics ({ item = { id: 'execution' }, result = {},
   if (failed) {
     for (const [code, pattern, scope, explanation] of patterns) if (pattern.test(text)) add(code, 'confirmed', scope, explanation, {}, 'explicit-error')
     const failure = classifyFailure({ item, result, error })
-    const explanation = failure.code === 'PACKAGE_MANAGER_BUSY'
-      ? 'The package manager reported an installation lock held by another process. Wait for it to finish; do not remove its lock.'
-      : failure.code === 'PACKAGE_CONFIGURATION_CONFLICT'
-        ? 'dpkg required a configuration-file decision but no interactive input was available. Review the affected package configuration before continuing.'
-        : failure.code === 'BASELINE_RESTORATION_BLOCKED'
-          ? 'The baseline guard refused cleanup because data remains or recorded baseline integrity changed. Preserve the data and baseline, inspect ownership, and review a new cleanup plan; restoration is not complete.'
-          : `Recorded failure category: ${failure.code}.`
+    const explanation = failure.code === 'RUNTIME_VERSION_INCOMPATIBLE'
+      ? 'The installer rejected an incompatible Node.js version. Review a compatible task-private runtime or a separately approved system upgrade.'
+      : failure.code === 'PACKAGE_MANAGER_BUSY'
+        ? 'The package manager reported an installation lock held by another process. Wait for it to finish; do not remove its lock.'
+        : failure.code === 'PACKAGE_CONFIGURATION_CONFLICT'
+          ? 'dpkg required a configuration-file decision but no interactive input was available. Review the affected package configuration before continuing.'
+          : failure.code === 'BASELINE_RESTORATION_BLOCKED'
+            ? 'The baseline guard refused cleanup because data remains or recorded baseline integrity changed. Preserve the data and baseline, inspect ownership, and review a new cleanup plan; restoration is not complete.'
+            : `Recorded failure category: ${failure.code}.`
     if (!['COMMAND_FAILED', 'TIMEOUT', 'PERMISSION_DENIED', 'INSUFFICIENT_MEMORY'].includes(failure.code)) add(failure.code, 'confirmed', 'remote-command', explanation, {}, 'failure-classifier')
   }
   const elapsed = Date.parse(after?.observedAt) - Date.parse(before?.observedAt)

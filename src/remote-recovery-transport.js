@@ -14,7 +14,16 @@ export class RemoteRecoveryTransport {
   async request (operation, parameters = {}) {
     const command = await recoveryStorageCommand(this.platform, operation, parameters)
     const result = await this.client.runCommand(command, { timeoutSeconds: 15 })
-    if (result.exitCode !== 0 || result.stdoutTruncated || result.stderrTruncated) throw new Error(`Remote recovery ${operation} failed; no automatic retry is authorized`)
+    if (result.exitCode !== 0 || result.stdoutTruncated || result.stderrTruncated) {
+      const reasons = {
+        'Legacy remote task state is already occupied': 'legacy task state is occupied; preserve it and review a new task identity',
+        'Remote task identity is already occupied': 'task identity is already reserved; preserve it and review a new task identity',
+        'recovery storage is busy or requires stale-lock investigation': 'storage is busy; inspect ownership before continuing'
+      }
+      const message = (result.stderr ?? '').trim()
+      const reason = !result.stdoutTruncated && !result.stderrTruncated && Object.hasOwn(reasons, message) ? reasons[message] : null
+      throw new Error(`Remote recovery ${operation} failed${reason ? ': ' + reason : ''}; no automatic retry is authorized`)
+    }
     if (Buffer.byteLength(result.stdout ?? '') > 8192) throw new Error('Remote recovery response exceeds limit')
     try {
       const value = JSON.parse(result.stdout)

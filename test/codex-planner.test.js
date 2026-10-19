@@ -49,7 +49,7 @@ test('catalog revision references preserve public checksums without unredacting 
   })
   assert.match(prompt, /Current verified catalog templates/u)
   assert.match(prompt, /0fc1637ca6cec0a53fc7112a22f67651dba50fe3667e5ed957acf0d3bbb9da93/u)
-  assert.ok(prompt.includes("password=$(cat '/root/mattermost_credentials/database_password')"))
+  assert.ok(prompt.includes("password=$(sed -n 1p '/root/mattermost_credentials/database_password')"))
   assert.ok(!prompt.includes('KNOWN_SECRET'))
   assert.ok(!prompt.includes('a'.repeat(64)))
 })

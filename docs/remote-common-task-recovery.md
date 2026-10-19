@@ -71,17 +71,44 @@ and the recovery-signing public-key fingerprint; none replaces another.
   persistent task-ID reservations prevent overwrite and conflicting recovery.
   Local history contains only actual local recovery commands, not fabricated
   imported deployment events.
-- Linux `systemd-service` and `systemd-timer` are explicitly registered recovery
+- Linux `systemd-service`, `systemd-timer`, `logrotate-rule` and `tmpfiles-rule` are explicitly registered recovery
   profiles. Their signed baseline covers durable unit bytes, inode/owner/mode
   identity, the private task-state directory and its completion marker. A fixed
   guard rechecks these before the destructive command. Missing or altered evidence
-  blocks recovery. Native `intent-ai-ops-linux` adds a separate profile on
+  blocks recovery. Logrotate also fingerprints the task log. Tmpfiles requires
+  the original root-owned0750 runtime directory to remain empty and unchanged;
+  added contents, a reboot that removes it, or a recreated directory block recovery.
+  Both additional profiles passed reviewed Debian apply/discovery/recovery cycles.
+  Native `intent-ai-ops-linux` adds a separate profile on
   non-Alpine Linux: protected baseline markers, the task-owned installation tree
   and both launchers are fingerprinted and rechecked before its single rollback.
   It rejects writable/multiply linked files, unsafe paths and changed tree contents.
   Collection is limited to512MiB,30000 entries and10 seconds, so large or unusual
   installations may fail closed. Deterministic fixtures and a reviewed Debian
-  install/discovery/recovery cycle pass. Other families are recorded but not recoverable.
+  install/discovery/recovery cycle pass.
+- Native `n8n-linux` adds an application recovery profile. It validates private
+  baseline/package files, repository backups and flags, current package versions,
+  account and task-owned directory identities, and fixed application/service
+  files. Mounted subtrees, writable backups, invalid package names, custom service
+  names or paths, and the Compose route are rejected. Existing pre-change n8n
+  plans do not inherit support: their catalog fingerprints differ.
+  The regenerated recovery is one signed job containing the three trusted
+  rollback bodies in dependency order, stopping at the first failure. One fresh
+  baseline guard runs before mutation, rather than comparing the original
+  pre-cleanup baseline after earlier cleanup steps have deliberately changed it.
+  Partial, unknown or interrupted recovery is not replayed. Runtime database
+  contents can change normally; directory ownership is checked, not an assertion
+  that application data has remained unchanged. Approval authorizes deletion of
+  the task-owned n8n data and credentials shown in the plan.
+  Deterministic Linux fixtures pass. Reviewed Debian source60/recovery63 also
+  passed through the normal binary: all six deployment steps and one regenerated
+  recovery job completed once, all33 signed records verified, task-owned paths
+  and account were absent afterwards, and Netdata remained active. This is not
+  live recovery coverage for every Linux distribution.
+  Other application/database families are recorded but not recoverable.
+- Package evidence uses the reconstructed distro family, never incidental tool
+  availability. A later completed attempt cannot hide an earlier uncertain
+  attempt; that exact attempt must be reconciled before verified recovery.
 - A CLI host action retrieves and inspects records, prepares a new plan and uses
   normal validation, approval and local leases to execute it. Generic history
   execution cannot bypass source-head and ownership checks for these proposals.
@@ -234,8 +261,9 @@ was not created. It is not a native Windows/FreeBSD/macOS or Kubernetes live pas
 
 ## Verification
 
-- Latest full source suite:741 total,738 passed, zero failed, three opt-in skips.
-  The unfiltered log is `/tmp/intent-recovery-final-tests.log`.
+- Full source tests passed. Current counts and live limitations are recorded in
+  [the Linux validation checkpoint](linux-lab-validation-status.md).
+  The unfiltered log is `/tmp/intent-final-suite.log`.
 - `npm run lint` and `npm run typecheck`: passed.
 - `npm run test:package-install`: passed on Linux/x64; package checks require both
   fixed storage helpers and the recovery modules.
@@ -244,5 +272,6 @@ was not created. It is not a native Windows/FreeBSD/macOS or Kubernetes live pas
   introduced, and there is no claim of a native non-Linux feature test.
 
 These results cover this milestone, not the outstanding full-task requirements
-listed above. Key rotation has Linux live coverage; application/database-family
-recovery and partial recovery are not claimed implemented or verified.
+listed above. Key rotation, native CLI and Debian native n8n recovery have Linux
+live coverage. Other application/database recovery profiles and partial recovery
+remain unsupported; their records cannot authorize verified recovery.

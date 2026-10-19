@@ -1,6 +1,7 @@
 const FAILURE_CODES = new Set([
   'PACKAGE_NOT_FOUND',
   'PACKAGE_VERSION_MISMATCH',
+  'RUNTIME_VERSION_INCOMPATIBLE',
   'PACKAGE_MANAGER_FAILED',
   'PACKAGE_MANAGER_BUSY',
   'PACKAGE_CONFIGURATION_CONFLICT',
@@ -34,6 +35,7 @@ export function classifyFailure ({ item, result, error }) {
   else if (error?.netdataHttpStatus) code = 'COMMAND_FAILED'
   else if (/firmware_virtualization_disabled/u.test(lower)) code = 'FIRMWARE_VIRTUALIZATION_DISABLED'
   else if (/unsupported_windows_version/u.test(lower)) code = 'UNSUPPORTED_WINDOWS_VERSION'
+  else if (/^error: node\.js \d+(?:\.\d+){1,2} is installed, but intent ai ops requires \d+(?:\.\d+){1,2} or newer\./mu.test(lower)) code = 'RUNTIME_VERSION_INCOMPATIBLE'
   else if (/insufficient_memory/u.test(lower)) code = 'INSUFFICIENT_MEMORY'
   else if (/slat_unavailable/u.test(lower)) code = 'SLAT_UNAVAILABLE'
   else if (/wsl_runtime_unavailable/u.test(lower)) code = 'WSL_RUNTIME_UNAVAILABLE'

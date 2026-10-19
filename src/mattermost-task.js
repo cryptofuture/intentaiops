@@ -241,7 +241,7 @@ function nativeConfigure (paths, profile) {
   return join([
     'set -eu', `id webminai-mattermost >/dev/null 2>&1 || useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-mattermost`,
     `install -d -o webminai-mattermost -g webminai-mattermost -m 0750 ${quote(DATA_ROOT)} ${quote(`${DATA_ROOT}/data`)} ${quote(`${DATA_ROOT}/logs`)} ${quote(`${DATA_ROOT}/plugins`)} ${quote(`${DATA_ROOT}/client/plugins`)}`,
-    `chown -R webminai-mattermost:webminai-mattermost ${quote(APP_ROOT)} ${quote(DATA_ROOT)}`, `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
+    `chown -R webminai-mattermost:webminai-mattermost ${quote(APP_ROOT)} ${quote(DATA_ROOT)}`, `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`,
     "primary=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (field=1; field<=NF; field++) if ($field == \"src\") { print $(field+1); exit }}' || true)", "[ -n \"$primary\" ] || primary=$(hostname -I 2>/dev/null | awk '{print $1}')", "case \"$primary\" in ''|*[!0-9a-fA-F:.]*) printf 'could not resolve a safe primary address\\n' >&2; exit 1;; esac",
     `chgrp webminai-mattermost ${quote(CREDENTIALS)}`, `chmod 0710 ${quote(CREDENTIALS)}`,
     `umask 077; printf 'MM_SERVICESETTINGS_LISTENADDRESS=127.0.0.1:${APP_PORT}\\nMM_SERVICESETTINGS_SITEURL=http://%s:${PORT}\\nMM_SQLSETTINGS_DRIVERNAME=postgres\\nMM_SQLSETTINGS_DATASOURCE=postgres://${DATABASE_USER}:%s@127.0.0.1:5432/${DATABASE}?sslmode=disable&connect_timeout=10\\nMM_FILESETTINGS_DIRECTORY=${DATA_ROOT}/data\\nMM_PLUGINSETTINGS_DIRECTORY=${DATA_ROOT}/plugins\\nMM_PLUGINSETTINGS_CLIENTDIRECTORY=${DATA_ROOT}/client/plugins\\nMM_LOGSETTINGS_ENABLEFILE=false\\nMM_LOGSETTINGS_ENABLECONSOLE=true\\n' "$primary" "$password" > ${quote(`${CREDENTIALS}/service.env`)}`,
@@ -256,7 +256,7 @@ function nativeConfigure (paths, profile) {
 function nativeVerify (profile) {
   return join([
     'set -eu', waitUrl(`http://127.0.0.1:${APP_PORT}/api/v4/system/ping`, 180),
-    `${quote(`${APP_ROOT}/bin/mattermost`)} version | grep -F ${quote(VERSION)}`, `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
+    `${quote(`${APP_ROOT}/bin/mattermost`)} version | grep -F ${quote(VERSION)}`, `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`,
     `PGPASSWORD="$password" psql -h 127.0.0.1 -U ${quote(DATABASE_USER)} -d ${quote(DATABASE)} -Atqc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" | awk '$1 > 0 { ok=1 } END { exit !ok }'`,
     `curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${PORT}/ | grep -Fx ${quote(MARKER)}`,
     `curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${PORT}/api/v4/system/ping | grep -F 'OK'`,
@@ -326,7 +326,7 @@ function writeCompose () {
   ].join('\n')
   const nginx = ['server {', `    listen ${PORT};`, '    server_name _;', '    location = / { default_type text/plain; return 200 "' + MARKER + '\\n"; }', '    location /api/ {', `        proxy_pass http://app:${APP_PORT};`, '        proxy_set_header Host $host;', '        proxy_set_header X-Real-IP $remote_addr;', '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;', '        proxy_set_header X-Forwarded-Proto $scheme;', '    }', '}'].join('\n')
   return join([
-    'set -eu', `install -d -o root -g root -m 0755 ${quote(SERVICE_ROOT)}`, `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
+    'set -eu', `install -d -o root -g root -m 0755 ${quote(SERVICE_ROOT)}`, `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`,
     "primary=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (field=1; field<=NF; field++) if ($field == \"src\") { print $(field+1); exit }}' || true)", "[ -n \"$primary\" ] || primary=$(hostname -I 2>/dev/null | awk '{print $1}')", "case \"$primary\" in ''|*[!0-9a-fA-F:.]*) printf 'could not resolve a safe primary address\\n' >&2; exit 1;; esac",
     `umask 077; printf 'POSTGRES_PASSWORD=%s\\nMM_SQLSETTINGS_DATASOURCE=postgres://${DATABASE_USER}:%s@db:5432/${DATABASE}?sslmode=disable&connect_timeout=10\\nMM_SERVICESETTINGS_SITEURL=http://%s:${PORT}\\n' "$password" "$password" "$primary" > ${quote(`${CREDENTIALS}/credentials.env`)}`, `chmod 0600 ${quote(`${CREDENTIALS}/credentials.env`)}`,
     `printf '%s\\n' ${compose.split('\n').map(quote).join(' ')} > ${quote(`${SERVICE_ROOT}/compose.yaml`)}`, `chmod 0644 ${quote(`${SERVICE_ROOT}/compose.yaml`)}`,

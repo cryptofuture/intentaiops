@@ -9,7 +9,7 @@ import { resolveServerDirectory, validateServerId } from '../src/server-id.js'
 const completed = result => result?.status === 'completed' && result.result?.exitCode === 0 && !result.result.timedOut && !result.result.signal
 
 function commandsMatch (first, second) {
-  const fields = item => ({ id: item.id, command: item.command, risk: item.risk, timeoutMs: item.timeoutMs, requiresSudo: item.requiresSudo, executionMode: item.executionMode ?? null, dependsOn: item.dependsOn ?? [], retry: item.retry ?? null })
+  const fields = item => ({ id: item.id, command: item.command, risk: item.risk, timeoutMs: item.timeoutMs, requiresSudo: item.requiresSudo, executionMode: item.executionMode ?? null, dependsOn: item.dependsOn ?? [], retry: item.retry ?? null, diagnostic: item.diagnostic ?? null })
   return first.length === second.length && first.every((item, index) => planFingerprint(fields(item)) === planFingerprint(fields(second[index])))
 }
 
@@ -140,6 +140,41 @@ export function assertCliLifecycleEvidence ({ baseline, first, repeat, afterFirs
   assert.ok(phases.every((value, index) => index === 0 || phases[index - 1].end < value.start), 'observations and execution phases are out of order')
   const retried = tasks.some(task => [...task.results, ...(task.revertResults ?? [])].some(result => result.attempts > 1))
   return { firstTask: first.id, repeatTask: repeat.id, commands: first.plan.commands.length, rollbackCommands: first.plan.revertCommands.length, scope: retried ? 'reviewed state probe and declared-retry journal evidence' : 'reviewed state probe and single-dispatch journal evidence' }
+}
+
+export function findCliLifecycleEvidence (tasks, first) {
+  assert.ok(Array.isArray(tasks) && tasks.length <= 1024, 'lifecycle discovery exceeds the inspection limit')
+  const range = (task, rollback = false) => {
+    const events = task.events.filter(event => (event.metadata?.operation === 'rollback') === rollback)
+    const starts = events.filter(event => event.type === 'command_dispatched').map(event => event.id)
+    const ends = events.filter(event => event.type === 'command_completed').map(event => event.id)
+    return starts.length && ends.length ? { start: Math.min(...starts), end: Math.max(...ends) } : null
+  }
+  const original = range(first)
+  const cleanup = range(first, true)
+  if (!original || !cleanup || first.kind !== 'catalog' || first.status !== 'reverted') return null
+  for (const repeat of tasks) {
+    if (repeat.status !== 'reverted' || repeat.plan.commands.length !== first.plan.commands.length + 2) continue
+    const applied = range(repeat)
+    const reverted = range(repeat, true)
+    if (!applied || !reverted || applied.start <= original.end || applied.end >= cleanup.start) continue
+    const probe = repeat.plan.commands[0]
+    const observations = tasks.filter(task => task.status === 'completed' && task.plan.commands.length === 1 && task.plan.commands[0].risk === 'read' && task.plan.commands[0].command === probe.command && range(task))
+    for (const baseline of observations.filter(task => range(task).end < original.start)) {
+      const before = baseline.results?.[0]?.result?.stdout?.trim()
+      const matches = task => task.results?.[0]?.result?.stdout?.trim() === before
+      const afterFirstRevert = observations.find(task => range(task).start > cleanup.end && range(task).end < reverted.start && matches(task))
+      const afterSecondRevert = observations.find(task => range(task).start > reverted.end && matches(task))
+      if (!afterFirstRevert || !afterSecondRevert) continue
+      try {
+        assertCliLifecycleEvidence({ baseline, first, repeat, afterFirstRevert, afterSecondRevert })
+        return { baseline: baseline.id, first: first.id, repeat: repeat.id, afterFirstRevert: afterFirstRevert.id, afterSecondRevert: afterSecondRevert.id }
+      } catch (error) {
+        if (!(error instanceof assert.AssertionError)) throw error
+      }
+    }
+  }
+  return null
 }
 
 async function main () {

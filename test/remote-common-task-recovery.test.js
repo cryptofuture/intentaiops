@@ -8,6 +8,7 @@ import test from 'node:test'
 import { buildCommonTask } from '../src/common-tasks.js'
 import { AdminService } from '../src/admin-service.js'
 import { rootExecutionPolicy } from '../src/execution-policy.js'
+import { validateCommandPlan } from '../src/plan-validator.js'
 import { planFingerprint } from '../src/execution-journal.js'
 import { RemoteRecoveryState } from '../src/remote-recovery-state.js'
 import { RemoteRecoveryTransport, recoveryStorageCommand } from '../src/remote-recovery-transport.js'
@@ -17,6 +18,26 @@ import { recoveryBaselineCommand, inspectRecoveryBaseline } from '../src/remote-
 
 const target = 'SHA256:' + 'a'.repeat(64)
 const options = { platform: 'linux' }
+
+test('remote storage failures explain allowlisted conflicts without disclosing arbitrary stderr', async () => {
+  for (const [stderr, expected] of [
+    ['Legacy remote task state is already occupied\n', /legacy task state is occupied; preserve it and review a new task identity/u],
+    ['Remote task identity is already occupied\n', /task identity is already reserved; preserve it and review a new task identity/u],
+    ['recovery storage is busy or requires stale-lock investigation\n', /storage is busy; inspect ownership before continuing/u],
+    ['password=known-secret Legacy remote task state is already occupied', /^Remote recovery claim failed; no automatic retry is authorized$/u],
+    ['toString', /^Remote recovery claim failed; no automatic retry is authorized$/u],
+    ['__proto__', /^Remote recovery claim failed; no automatic retry is authorized$/u]
+  ]) {
+    let calls = 0
+    const transport = new RemoteRecoveryTransport({ platform: 'linux', client: { async runCommand () { calls++; return { exitCode: 1, stdout: '', stderr } } } })
+    await assert.rejects(transport.claim({ executionId: 'a'.repeat(32), owner: 'b'.repeat(32), sequence: 0, head: null, taskId: 1 }), error => {
+      assert.match(error.message, expected)
+      assert.doesNotMatch(error.message, /known-secret/u)
+      return true
+    })
+    assert.equal(calls, 1)
+  }
+})
 
 test('public-key pins are automatic, persistent and cannot be silently replaced', () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-recovery-pins-'))
@@ -60,7 +81,7 @@ test('real OpenSSL storage survives a fresh client, rejects racing owners and ne
     assert.equal(recovery.plan.commands.length, original.revertCommands.length)
     assert.match(recovery.plan.commands[0].command, /RECOVERY_BASELINE_CHANGED/u)
     assert.equal(recovery.plan.revertCommands.length, 0)
-    await assert.rejects(transport.claim({ executionId: randomBytes(16).toString('hex'), owner: 'f'.repeat(32), sequence: 0, head: null, taskId: 61 }))
+    await assert.rejects(transport.claim({ executionId: randomBytes(16).toString('hex'), owner: 'f'.repeat(32), sequence: 0, head: null, taskId: 61 }), /task identity is already reserved/u)
     const signing = path.join(directory, 'parent/recovery/signing.pem')
     chmodSync(signing, 0o644)
     await assert.rejects(transport.key())
@@ -70,6 +91,30 @@ test('real OpenSSL storage survives a fresh client, rejects racing owners and ne
     rmSync(signing)
     symlinkSync(displaced, signing)
     await assert.rejects(transport.key())
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('new executions cannot adopt occupied legacy state even without a signed task reservation', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-legacy-state-collision-'))
+  try {
+    const transport = new RemoteRecoveryTransport({ client: shellClient(directory), platform: 'linux' })
+    await transport.key({ initialize: true })
+    const args = { executionId: 'b'.repeat(32), owner: 'c'.repeat(32), sequence: 0, head: null, taskId: 91 }
+    for (const name of ['task-state/91-n8n-linux', 'db-task-state/91-intent-ai-ops-install', 'tasks/91', 'db-tasks/91']) {
+      const occupied = path.join(directory, 'legacy', name)
+      mkdirSync(occupied, { recursive: true, mode: 0o700 })
+      writeFileSync(occupied + '/original', 'preserve legacy data')
+      await assert.rejects(transport.claim(args), /legacy task state is occupied/u)
+      assert.equal(readFileSync(occupied + '/original', 'utf8'), 'preserve legacy data')
+      assert.equal(existsSync(directory + '/parent/recovery/' + args.executionId), false)
+      rmSync(occupied, { recursive: true })
+    }
+    const dangling = directory + '/legacy/task-state/91-unresolved'
+    symlinkSync(directory + '/missing', dangling)
+    await assert.rejects(transport.claim(args), /legacy task state is occupied/u)
+    rmSync(dangling)
+    await transport.claim(args)
+    await transport.release(args)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
@@ -86,6 +131,58 @@ test('catalog mismatch, incomplete execution, changed baseline and unregistered 
   assert.throws(() => regenerateCommonTaskRecovery({ ...input, records: [{ ...record, catalogId: 'ghost-linux' }] }), /not registered/u)
   assert.throws(() => regenerateCommonTaskRecovery({ ...input, records: [{ ...record, operation: 'recovery' }] }), /already started/u)
   assert.throws(() => commonTaskRecoveryManifest({ catalogId: 'systemd-service', taskId: 62, target, options, plan: { ...plan, commands: [{ ...plan.commands[0], command: 'malicious' }] } }), /unchanged/u)
+})
+
+test('boundary pause and resume are signed remotely without repeating completed commands', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-recovery-boundaries-'))
+  try {
+    const storage = shellClient(directory)
+    const executed = []
+    const settings = { servers: { lab: { hostFingerprint: target } } }
+    const admin = new AdminService({ dataRoot: directory + '/client', ssh: { async hostFingerprint () { return target } }, settings: { async decryptServer () { return { connectionUrl: 'ssh://fixture' } } }, workspace: { async loadRules () { return { policy: rootExecutionPolicy() } } } })
+    admin.netdata = () => ({
+      async health () { return { platform: 'linux' } },
+      async runCommand (command) {
+        if (command.includes('intentaiops-recovery')) return storage.runCommand(command)
+        if (command.includes('safe_parent ()')) return { exitCode: 0, stdout: 'SHA2-256(stdin)= ' + 'd'.repeat(64), stderr: '' }
+        executed.push(command)
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+      async runJob (command, request) {
+        await request.onStarted?.({ jobId: 'c'.repeat(32), state: 'running' })
+        return this.runCommand(command)
+      }
+    })
+    const task = admin.createTask('lab', 'Install CLI', { kind: 'catalog', catalogId: 'intent-ai-ops-linux' })
+    const plan = buildCommonTask('intent-ai-ops-linux', task.id, options).plan
+    assert.equal(plan.commands.length, 2)
+    admin.saveTaskPlan('lab', task.id, plan, { catalogId: 'intent-ai-ops-linux', options, target })
+    const args = { settings, passphrase: 'unused', serverId: 'lab', taskId: task.id, plan, approve: async () => true, onResult: result => admin.appendTaskResult('lab', task.id, result) }
+    await admin.execute({ ...args, beforeCommand: async item => item.id === plan.commands[0].id })
+    const executionId = admin.remoteRecovery.get(target, task.id).manifest.executionId
+    const connection = { settings, passphrase: 'unused', serverId: 'lab', executionId }
+    const paused = await admin.inspectRemoteCommonTask(connection)
+    assert.equal(paused.records.at(-1).event, 'execution_paused')
+    assert.equal(executed.length, 1)
+    await admin.execute(args)
+    const resumed = await admin.inspectRemoteCommonTask(connection)
+    assert.equal(resumed.records.filter(record => record.event === 'execution_resumed').length, 1)
+    assert.deepEqual(executed, plan.commands.map(command => command.command))
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('a later completed attempt cannot hide an earlier uncertain attempt in signed recovery history', () => {
+  const plan = buildCommonTask('systemd-service', 62, options).plan
+  const manifest = { ...commonTaskRecoveryManifest({ catalogId: 'systemd-service', taskId: 62, target, options, plan }), executionId: 'b'.repeat(32) }
+  const command = { commandId: 'apply', commandDigest: planFingerprint(plan.commands[0]) }
+  const firstAttempt = '11111111-1111-1111-1111-111111111111'
+  const secondAttempt = '22222222-2222-2222-2222-222222222222'
+  const unknown = recoveryRecord(manifest, { ...command, type: 'command_outcome_unknown', attemptId: firstAttempt }, { sequence: 1 })
+  const completed = recoveryRecord(manifest, { ...command, type: 'command_completed', attemptId: secondAttempt }, { sequence: 2, previousHash: 'e'.repeat(64), baselineDigest: 'd'.repeat(64) })
+  const input = { records: [unknown, completed], head: 'e'.repeat(64), baselineDigest: 'd'.repeat(64), options }
+  assert.throws(() => regenerateCommonTaskRecovery(input), /earlier execution attempt remains uncertain/u)
+  assert.ok(regenerateCommonTaskRecovery({ ...input, records: [unknown, { ...completed, attemptId: firstAttempt }] }).plan)
+  assert.throws(() => regenerateCommonTaskRecovery({ ...input, records: [{ ...unknown, attemptId: null }, { ...completed, attemptId: null }] }), /uncertain/u)
 })
 
 test('reviewed key rotation preserves historical verification and fresh-install retrieval without exposing private keys', async () => {
@@ -185,6 +282,8 @@ test('Windows storage uses fixed CNG, protected ACLs and durable publication rat
   assert.match(command, /ReparsePoint/u)
   assert.match(command, /FileOptions\]::WriteThrough/u)
   assert.match(command, /MoveFileEx/u)
+  assert.match(command, /EnumerateFileSystemEntries/u)
+  assert.match(command, /Legacy remote task state is already occupied/u)
   assert.doesNotMatch(command, /openssl|\/var\/lib/u)
 })
 
@@ -431,6 +530,46 @@ test('systemd completion evidence stays private under the plugin group-writable 
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
+for (const catalogId of ['logrotate-rule', 'tmpfiles-rule']) {
+  test(`${catalogId} recovery binds fixed baseline files and refuses changed or unrelated data`, async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-fixture-recovery-'))
+    try {
+      const state = directory + '/state'
+      const paths = catalogId === 'logrotate-rule'
+        ? ['/etc/logrotate.d/webminai-test', '/var/log/webminai-test.log']
+        : ['/etc/tmpfiles.d/webminai-test.conf', '/run/webminai-test-tmpfiles']
+      const relocate = text => paths.reduce((text, original, index) => text.replaceAll(original, `${directory}/file-${index}`), text.replaceAll(`/var/lib/webminai/task-state/83-${catalogId}`, state))
+      const built = buildCommonTask(catalogId, 83, options)
+      const applyCommand = `umask 0007; logrotate () { :; }; fixture_tmpfiles () { mkdir -m 0750 '${directory}/file-1'; }; ${relocate(built.plan.commands[0].command).replaceAll('systemd-tmpfiles', 'fixture_tmpfiles')}`
+      const apply = spawnSync('/bin/sh', ['-c', applyCommand], { encoding: 'utf8' })
+      assert.equal(apply.status, 0, apply.stderr)
+      const script = relocate(recoveryBaselineCommand(catalogId, 83)).replaceAll('-user root', '-user ' + os.userInfo().username).replaceAll('safe_parent "$state"', ':').replaceAll('safe_parent "$file"', ':').replaceAll('safe_parent "$directory"', ':')
+      const client = { async runCommand () { const value = spawnSync('/bin/sh', ['-c', 'id () { printf 0; }; ' + script], { encoding: 'utf8' }); return { exitCode: value.status, stdout: value.stdout, stderr: value.stderr } } }
+      const digest = await inspectRecoveryBaseline(client, catalogId, 83)
+      const repeat = spawnSync('/bin/sh', ['-c', applyCommand], { encoding: 'utf8' })
+      assert.equal(repeat.status, 0, repeat.stderr)
+      assert.equal(await inspectRecoveryBaseline(client, catalogId, 83), digest)
+      const manifest = { ...commonTaskRecoveryManifest({ catalogId, taskId: 83, target, options, plan: built.plan }), executionId: 'b'.repeat(32) }
+      const record = recoveryRecord(manifest, { type: 'command_completed', commandId: 'apply', commandDigest: planFingerprint(built.plan.commands[0]) }, { sequence: 1, baselineDigest: digest })
+      assert.match(regenerateCommonTaskRecovery({ records: [record], head: 'e'.repeat(64), options, baselineDigest: digest }).plan.commands[0].command, /RECOVERY_BASELINE_CHANGED/u)
+      writeFileSync(directory + '/file-0', 'modified configuration', { mode: 0o644 })
+      assert.notEqual(await inspectRecoveryBaseline(client, catalogId, 83), digest)
+      if (catalogId === 'tmpfiles-rule') {
+        writeFileSync(directory + '/file-1/unrelated-data', 'must be preserved')
+        await assert.rejects(inspectRecoveryBaseline(client, catalogId, 83), /ownership/u)
+      }
+      chmodSync(directory + '/file-0', 0o664)
+      await assert.rejects(inspectRecoveryBaseline(client, catalogId, 83), /ownership/u)
+      if (catalogId === 'tmpfiles-rule') rmSync(directory + '/file-1/unrelated-data')
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const rollback = spawnSync('/bin/sh', ['-c', relocate(built.plan.revertCommands[0].command)], { encoding: 'utf8' })
+        assert.equal(rollback.status, 0, rollback.stderr)
+        for (const entry of [state, directory + '/file-0', directory + '/file-1']) assert.equal(existsSync(entry), false)
+      }
+    } finally { rmSync(directory, { recursive: true, force: true }) }
+  })
+}
+
 test('native CLI recovery binds protected markers, complete owned tree and launchers without executing installed files', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-cli-recovery-baseline-'))
   try {
@@ -484,6 +623,128 @@ test('native CLI recovery regenerates trusted cleanup while refusing Alpine pack
   assert.throws(() => regenerateCommonTaskRecovery({ ...input, baselineDigest: 'f'.repeat(64) }), /baseline/u)
 })
 
+test('native n8n recovery checks immutable backups, package drift, mount boundaries and directory identities', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-n8n-recovery-'))
+  try {
+    const state = directory + '/state'
+    const roots = ['/opt/webminai-n8n-18109', '/var/lib/webminai-n8n-18109', '/root/n8n_credentials']
+    mkdirSync(state, { mode: 0o700 })
+    mkdirSync(state + '/repo-backup', { mode: 0o700 })
+    writeFileSync(state + '/packages.before', 'nginx\nnodejs\n', { mode: 0o600 })
+    writeFileSync(state + '/repo-0.existed', '', { mode: 0o600 })
+    writeFileSync(state + '/repo-backup/0', 'original protected repository config', { mode: 0o600 })
+    writeFileSync(directory + '/mountinfo', '')
+    for (let index = 0; index < roots.length; index++) mkdirSync(`${directory}/root-${index}`, { mode: index === 0 ? 0o755 : 0o700 })
+    writeFileSync(directory + '/root-0/package.json', '{}', { mode: 0o644 })
+    const relocate = text => roots.reduce((value, entry, index) => value.replaceAll(entry, `${directory}/root-${index}`), text.replaceAll('/var/lib/webminai/task-state/84-n8n-linux', state))
+    const script = relocate(recoveryBaselineCommand('n8n-linux', 84, 'debian'))
+      .replaceAll('/etc/', directory + '/etc/').replaceAll('/usr/share/keyrings/', directory + '/keyrings/')
+      .replaceAll('-user root', '-user ' + os.userInfo().username)
+      .replaceAll('safe_parent "$state"', ':').replaceAll('safe_parent "$file"', ':').replaceAll('safe_parent "$directory"', ':').replaceAll('safe_parent "$state/repo-backup"', ':')
+      .replaceAll(' -eq 0 ]', ` -eq ${os.userInfo().uid} ]`)
+      .replaceAll('/proc/self/mountinfo', directory + '/mountinfo')
+      .replaceAll('dpkg-query', 'fixture_packages')
+    let packageVersion = '1'
+    const client = {
+      async runCommand () {
+        const result = spawnSync('/bin/sh', ['-c', `id () { printf ${os.userInfo().uid}; }; getent () { printf fixture-account; }; fixture_packages () { printf 'nginx ${packageVersion}\\nnodejs 24\\n'; }; ` + script], { encoding: 'utf8' })
+        return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr }
+      }
+    }
+    const inspect = () => inspectRecoveryBaseline(client, 'n8n-linux', 84, 'debian')
+    const digest = await inspect()
+    assert.equal(await inspect(), digest)
+    packageVersion = '2'
+    assert.notEqual(await inspect(), digest)
+    packageVersion = '1'
+    mkdirSync(directory + '/etc/apt/sources.list.d', { recursive: true })
+    writeFileSync(directory + '/etc/apt/sources.list.d/nodesource.sources', 'changed live repository', { mode: 0o600 })
+    assert.notEqual(await inspect(), digest)
+    writeFileSync(state + '/repo-backup/0', 'modified backup')
+    assert.notEqual(await inspect(), digest)
+    writeFileSync(state + '/packages.before', '--remove-everything\n')
+    await assert.rejects(inspect(), /ownership/u)
+    writeFileSync(state + '/packages.before', 'nginx\nnodejs\n')
+    writeFileSync(directory + '/mountinfo', `1 2 0:1 / ${directory}/root-1/nested rw - tmpfs tmpfs rw\n`)
+    await assert.rejects(inspect(), /ownership/u)
+    writeFileSync(directory + '/mountinfo', '')
+    chmodSync(state + '/repo-backup/0', 0o664)
+    await assert.rejects(inspect(), /ownership/u)
+    chmodSync(state + '/repo-backup/0', 0o600)
+    rmSync(state + '/repo-backup/0')
+    symlinkSync(directory + '/root-0/package.json', state + '/repo-backup/0')
+    await assert.rejects(inspect(), /ownership/u)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('native n8n regenerates one guarded dependency-ordered job and refuses Compose', () => {
+  const context = { identity: { id: 'debian', versionId: '13', architecture: 'x86_64' }, management: { family: 'debian', packageManager: 'apt', serviceManager: 'systemd' } }
+  const options = { platform: 'linux', linuxContext: context, docker: { preferred: false } }
+  const original = buildCommonTask('n8n-linux', 84, options).plan
+  const manifest = { ...commonTaskRecoveryManifest({ catalogId: 'n8n-linux', taskId: 84, target, options, plan: original }), executionId: 'b'.repeat(32) }
+  const records = original.commands.map((command, index) => recoveryRecord(manifest, { type: 'command_completed', commandId: command.id, commandDigest: planFingerprint(command) }, { sequence: index + 1, previousHash: index ? 'e'.repeat(64) : null, baselineDigest: 'd'.repeat(64) }))
+  const recovery = regenerateCommonTaskRecovery({ records, head: 'e'.repeat(64), options, baselineDigest: 'd'.repeat(64) })
+  assert.doesNotThrow(() => validateCommandPlan(recovery.plan, rootExecutionPolicy(), { requireRevert: false }))
+  assert.equal(recovery.plan.commands.length, 1)
+  const command = recovery.plan.commands[0]
+  assert.equal(command.executionMode, 'job')
+  assert.equal(command.risk, 'destructive')
+  assert.equal(command.timeoutMs, 1500000)
+  assert.match(recovery.plan.warnings.join(' '), /without an intervention boundary/u)
+  assert.match(command.command, /RECOVERY_BASELINE_CHANGED/u)
+  assert.ok(command.command.indexOf('systemctl disable') < command.command.indexOf('rm -rf'))
+  assert.ok(command.command.indexOf('rm -rf') < command.command.indexOf('apt-get purge'))
+  assert.equal(spawnSync('/bin/sh', ['-n', '-c', command.command]).status, 0)
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-n8n-recovery-order-'))
+  try {
+    const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
+    const start = command.command.indexOf('; set -eu\nsh -c ')
+    assert.ok(start > 0)
+    for (const failAt of [-1, 0, 1]) {
+      let script = command.command.slice(start + 2)
+      for (const [index, item] of original.revertCommands.entries()) script = script.replace(quote(item.command), quote(`printf '${index}\\n' >> '${directory}/order'; exit ${index === failAt ? 1 : 0}`))
+      const result = spawnSync('/bin/sh', ['-c', script])
+      assert.equal(result.status, failAt < 0 ? 0 : 1)
+      assert.equal(readFileSync(directory + '/order', 'utf8'), Array.from({ length: failAt < 0 ? 3 : failAt + 1 }, (_, index) => `${index}\n`).join(''))
+      rmSync(directory + '/order')
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+  assert.throws(() => regenerateCommonTaskRecovery({ records, head: 'e'.repeat(64), options: { ...options, docker: { preferred: true, ready: true } }, baselineDigest: 'd'.repeat(64) }), /native Linux route/u)
+  for (const profile of [{ nginxService: 'unrelated.service' }, { nginxEnableLink: '/etc/unrelated-link' }, { nginxVhost: '/etc/unrelated.conf' }]) {
+    const custom = { ...options, linuxContext: { ...context, applications: { wordpress: profile } } }
+    const plan = buildCommonTask('n8n-linux', 84, custom).plan
+    const manifest = { ...commonTaskRecoveryManifest({ catalogId: 'n8n-linux', taskId: 84, target, options: custom, plan }), executionId: 'b'.repeat(32) }
+    const records = plan.commands.map((command, index) => recoveryRecord(manifest, { type: 'command_completed', commandId: command.id, commandDigest: planFingerprint(command) }, { sequence: index + 1, previousHash: index ? 'e'.repeat(64) : null, baselineDigest: 'd'.repeat(64) }))
+    assert.throws(() => regenerateCommonTaskRecovery({ records, head: 'e'.repeat(64), options: custom, baselineDigest: 'd'.repeat(64) }), /customized/u)
+  }
+})
+
+for (const [id, family, packageManager, serviceManager] of [
+  ['debian', 'debian', 'apt', 'systemd'], ['alpine', 'alpine', 'apk', 'openrc'],
+  ['arch', 'arch', 'pacman', 'systemd'], ['almalinux', 'rhel', 'dnf', 'systemd'],
+  ['opensuse-leap', 'suse', 'zypper', 'systemd']
+]) {
+  test(`native n8n recovery reconstructs the ${family} catalog without substituting another platform`, () => {
+    const options = { platform: 'linux', linuxContext: { identity: { id, versionId: 'fixture', architecture: 'x86_64' }, management: { family, packageManager, serviceManager } }, docker: { preferred: false } }
+    const plan = buildCommonTask('n8n-linux', 85, options).plan
+    const manifest = { ...commonTaskRecoveryManifest({ catalogId: 'n8n-linux', taskId: 85, target, options, plan }), executionId: 'b'.repeat(32) }
+    const records = plan.commands.map((command, index) => recoveryRecord(manifest, { type: 'command_completed', commandId: command.id, commandDigest: planFingerprint(command) }, { sequence: index + 1, previousHash: index ? 'e'.repeat(64) : null, baselineDigest: 'd'.repeat(64) }))
+    const recovery = regenerateCommonTaskRecovery({ records, head: 'e'.repeat(64), options, baselineDigest: 'd'.repeat(64) })
+    assert.doesNotThrow(() => validateCommandPlan(recovery.plan, rootExecutionPolicy(), { requireRevert: false }))
+    assert.equal(recovery.plan.compatibilityManifest.selectedRoute.id, `native-${family}`)
+    assert.equal(recovery.plan.commands.length, 1)
+    const binary = { debian: 'dpkg-query', alpine: 'apk', arch: 'pacman', rhel: 'rpm', suse: 'rpm' }[family]
+    assert.ok(recoveryBaselineCommand('n8n-linux', 85, family).includes(`packages=$(${binary} `))
+    assert.equal(spawnSync('/bin/sh', ['-n', '-c', recovery.plan.commands[0].command]).status, 0)
+    assert.throws(() => regenerateCommonTaskRecovery({ records, head: 'e'.repeat(64), options: { ...options, platform: 'windows' }, baselineDigest: 'd'.repeat(64) }), /platform/u)
+    assert.throws(() => regenerateCommonTaskRecovery({ records: records.slice(0, -1), head: 'e'.repeat(64), options, baselineDigest: 'd'.repeat(64) }), /uncertain/u)
+  })
+}
+
+test('native n8n recovery refuses unknown package families rather than guessing from installed tools', () => {
+  for (const family of [undefined, '__proto__', 'unknown']) assert.throws(() => recoveryBaselineCommand('n8n-linux', 85, family), /audited package family/u)
+})
+
 function shellClient (directory) {
   const owner = os.userInfo().username
   mkdirSync(path.join(directory, 'parent'), { mode: 0o700 })
@@ -491,6 +752,10 @@ function shellClient (directory) {
     async runCommand (command) {
       const script = command
         .replaceAll('/var/lib/intentaiops/recovery', path.join(directory, 'parent/recovery'))
+        .replaceAll('/var/lib/webminai/task-state', path.join(directory, 'legacy/task-state'))
+        .replaceAll('/var/db/webminai/task-state', path.join(directory, 'legacy/db-task-state'))
+        .replaceAll('/var/lib/webminai/tasks', path.join(directory, 'legacy/tasks'))
+        .replaceAll('/var/db/webminai/tasks', path.join(directory, 'legacy/db-tasks'))
         .replaceAll('-user root', '-user ' + owner)
         .replaceAll('safe_directory "$' + '{ancestor%/*}"', ':')
         .replaceAll('safe_directory "$current"', ':')

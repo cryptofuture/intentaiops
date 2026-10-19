@@ -1,8 +1,679 @@
 # Linux lab validation checkpoint
 
-Updated 2026-10-19 08:43 UTC. This file supersedes all earlier checkpoint instructions. Full prior evidence remains in [the history](linux-lab-validation-history.md); current coverage is in [the matrix](linux-lab-current-matrix.md).
+Updated 2026-10-19 18:09 UTC. This file supersedes all earlier checkpoint instructions. Full prior evidence remains in [the history](linux-lab-validation-history.md); current coverage is in [the matrix](linux-lab-current-matrix.md).
 
 ## Current continuation, supersedes the chronological notes below
+
+- FINAL openSUSE restoration probe57 exactly equals original55 for all selected
+  paths, package versions, service states and account/data-root observations.
+  Reviewed continuation56 and all3 cleanup commands succeeded once. Session
+  50454 closed normally; inspector18621 and Debian/Rocky/Arch sessions are also
+  closed. No live task or background test from this continuation remains.
+  The normal history audit passes87/87; strict audit correctly exits1 with
+  15/87 complete repeated-apply/two-rollback selected-baseline cases and72
+  missing. Broader signed recovery still supports only the6 audited profiles;
+  Jellyfin is NOT registered for verified signed recovery. The overall goal is
+  unfinished. Next work: implement audited profiles and complete the72 strict
+  application cases using actual binary, normal vault and VAULT_TEST; preserve
+  all protected old n8n/database quarantines. No uncertain command was replayed.
+
+- openSUSE56 reviewed continuation COMPLETED all4 replacement steps once.
+  The original first4 remained single-dispatch; original timed-out attempt is
+  retained, not replayed. Resumed FFmpeg job `17562e3ca6d2b40f108a1dee76171f64`
+  produced the verified58,599,712-byte archive. Independent normal-binary SSH
+  confirmed active Jellyfin and HTTP Healthy. All3 original rollback commands
+  were then separately approved and completed once; task56 is reverted.
+  Session50454 is now planning read-only restoration probe57 against55.
+  No workload is running. This completes live resumable-download and safe
+  partial-plan intervention evidence, but is not a repeated-apply cycle.
+  Inspector18621 closed normally. Installed-Codex boundary53/53 also passed.
+
+- Debian Jellyfin73/74/75/76/77 PASS: exact repeated execution, both separately
+  approved three-command rollbacks, and both fresh selected-baseline probes.
+  `assert-cli-lifecycle.js` passed. Stronger coverage is now15/87 applications,
+  72 missing,23 formal cycles including8 supplementary fixtures.
+- Rocky45 and Arch45 original rollbacks each completed all3 commands once.
+  Fresh probes46 exactly match baseline44 on both hosts. These older-template
+  cleanup cases are NOT formal repeat passes. Sessions22447,11836 and69838
+  closed normally after successful final probes. No remote work remains there.
+- openSUSE56 FFmpeg attempt authoritatively timed out: job
+  `fb1f1ba7ab92522031ee0f688ffd5586`, exit143, signal15, native timed_out.
+  Its first4 commands completed and must not replay. OOM counters were0;
+  this is a confirmed deadline, not an OOM diagnosis. Partial archive retained
+  at41,742,336 bytes; official endpoint accepted a read-only HTTP206 range.
+  Session50454 is RUNNING the separately approved remaining-work revision with
+  new command IDs, bounded resumable download, and unchanged completed history.
+  Both revision approval and separate resume were explicitly accepted. The first oversized
+  instruction request was rejected before proposal; shorter3360-character
+  request produced the reviewed proposal. Four completed command definitions
+  and all original rollback definitions were compared byte-for-byte. Pending
+  dependency references to already completed steps were omitted in the
+  self-contained replacement; the completed prefix remains immutable. The
+  failed original attempt remains historical. Do not run cleanup until the
+  replacement reaches a confirmed outcome; then review saved rollback and
+  collect an exact fresh restoration probe against original55.
+- Jellyfin server/FFmpeg downloads now resume partial bytes across at most6
+  540-second requests, cap expected archive size, verify pinned SHA256 before
+  extraction, reject symlinks, and retain transient partial downloads. Portable
+  acquisition jobs allow3600000ms. Eleven focused tests pass, including cache,
+  partial resume, bounded exhaustion, terminal errors and invalid checksums.
+  This new downloader has not yet completed a live lab acquisition.
+- Latest complete checks:801 tests,798 passed,0 failed,3 opt-in skips;
+  lint/typecheck/package-install and all5 artifact checksums PASS.
+  Package SHA256 `b47fb38e31703e7613f61c7ac6870c78797be1d82d7c3f7f22ec95c104a44cfb`.
+  Older totals and active-session descriptions below are superseded.
+
+- Rocky45 and Arch45 old-reader deployments BOTH completed all8 forward commands
+  once, including version/HTTP/database/restart verification. Their original three
+  saved rollback commands were separately reviewed and are now RUNNING in22447
+  and11836. These are positive strict-cleanup tests, NOT current-template repeat
+  passes. Expected post-original probes46 on each host, to compare against44.
+  openSUSE56 still running; do not dispatch its cleanup until confirmed complete.
+  Read-only inspector48961 closed normally after confirming artifact progress.
+- Debian74 first original rollback completed; exact fresh restoration76 is at
+  approval in69838. Repeat75 already passed unchanged snapshots. Then repeat75
+  saved rollback and fresh77 are still required. Stronger count14/87 until done.
+- Installed-Codex fixture-provider boundary PASS53/53, zero skips. Normal full
+  suite PASS800 total/797 passed/0 failed/3 skips. Archive remains60ef4f98...;
+  no native protocol or new remote agent was introduced by the reader fixes.
+
+- Latest complete verification PASS after all87-template policy alignment:
+  800 tests total/797 passed/0 failed/3 opt-in skips; lint/typecheck,
+  package-install/5 checksums/diff-check PASS. Current archive SHA256
+  `60ef4f98574386661090792f9ee41e59484b6cbba6d146217e861337973d9db2`.
+  Installed-Codex fixture-provider boundary is rerunning separately; no real-host
+  fault or production command is part of that opt-in.
+
+- CURRENT Debian75 exact repeat PASSED all9 commands and identical before/after
+  selected static trees, package versions, service states, account/group/data-root
+  metadata. Original74's three-command rollback is approved/RUNNING in69838.
+  First fresh restoration76, repeat75 saved rollback and final77 remain before
+  formal73/74/75/76/77 can count. Stronger count remains14/87.
+- Broader audit added AI-policy reuse checks to ALL87 eligible native Linux
+  application templates. It reproduced17 rejected host/task routes. Fixed captured
+  one-line readers in Mattermost/Ghost/Odoo and Alpine n8n's generated launcher;
+  shared PostgreSQL reader preserves full malformed-input rejection via captured
+  `sed -n p`. The published Joomla default is allowed ONLY as the exact canonical
+  `--admin-username=webminai_admin` argument. Arbitrary usernames/passwords,
+  prefix/suffix variants and password-valued lookalikes still reject. Private
+  output redaction/approval unchanged. All87 policy checks now pass;100 focused
+  application/policy tests passed. A multiline PostgreSQL credential regression
+  also passes without SQL writes. These latest reader changes have NOT yet been
+  live-retested for Mattermost/Ghost/Odoo/Alpine n8n.
+- The existing public-template planner fixture now expects the new captured
+  reader. Full checks rerunning in57696 after that assertion repair; earlier
+  failure was its stale `cat` expectation. Do not claim final green until polled.
+
+- Debian baseline73 completed with account AND group identity digests, all managed
+  roots absent. CURRENT Jellyfin74 matched final reader/snapshot/rollback bodies
+  and was explicitly approved in69838, now RUNNING. Do not replay. New repeat75,
+  first restoration76 and second restoration77 pending. This cycle is the one
+  eligible to prove current initializer and immutable snapshot behavior; previous
+  70/71/72 are immutable historical positive-cleanup/declined-repeat evidence.
+- Latest full checks PASS:799 total/796 passed/0 failed/3 opt-in skips, plus lint,
+  typecheck, package-install,5 checksums and diff-check. Current archive
+  `fdb6cac9ac06d0f4b55230f65b8097ff8cfc2ee73287ce38a4e9aae2094e0d3b`.
+
+- Latest complete checks PASS after all reader/snapshot fixes:799 total,
+  796 passed,0 failed,3 opt-in skips; lint/typecheck/package-install/5 artifact
+  checksums and `git diff --check` PASS. Current archive SHA256
+  `fdb6cac9ac06d0f4b55230f65b8097ff8cfc2ee73287ce38a4e9aae2094e0d3b`.
+  Log `/tmp/intent-final-suite.log`. A StandardJS quote repair was formatting only;
+  the earlier lint failure must not be reported as the final result.
+- Debian new baseline73 matched exact requested read-only account/group probe
+  and is approved in69838. Catalog74 still pending. Rocky45 and openSUSE56 have
+  confirmed server acquisition/extraction and are running their separate FFmpeg
+  jobs. Arch45 server acquisition still running. No new repeats or rollbacks of
+  those three old-reader sources have been approved. Stronger coverage14/87.
+
+- Current Debian owner69838, log `/tmp/intent-cli-repeat-debian-jellyfin-snapshots.log`,
+  baseline73 PLANNING for future CURRENT catalog74. It loads the reader and
+  immutable/fail-closed snapshot fixes. Independent binary SSH confirms future74
+  state, executable, data and credential roots absent, and BOTH account and group
+  absent. New73 also hashes group identity, not raw account/group data. Previous
+  70/71/72 history stays unchanged. Planned new cycle73/74/75/76/77, not approved yet.
+- The version-pin fixture now returns a valid full package inventory when asked,
+  while retaining mismatched meta/server/web version rejection. Its focused test
+  passes; full checks running in73239 after that fixture repair. Earlier51/52
+  failure was fixture incompleteness, not grounds to remove the new snapshot guard.
+
+- Additional deterministic Jellyfin repeat regression reproduced mutation of
+  `packages.foundation` after acquisition and ignored failed package queries in
+  a pipeline. Both failed before/pass after: foundation snapshot is now captured
+  once; all native package snapshots capture a successful nonempty query before
+  publishing output and preserve its failure status. Four Linux families have
+  positive/repeat/failed/empty fixtures. One older version-check fixture still
+  needs a valid full package-query response; focused run51/52 passed, not green.
+  New Debian69838 loads these final snapshot/reader changes and is connected,
+  no new task created yet. Prior current-reader owner92277 closed at dashboard.
+- Rocky archive verification/extraction completed: exact110228765-byte archive
+  present, acquisition no longer replayable. FFmpeg's own job is RUNNING with
+ 15593472-byte temporary progress. Independent binary SSH confirms app root,
+  server executable and web index root-owned0755/0755/0644, private state0700.
+  Other running sources remain openSUSE56/Arch45. Do not kill or replay them.
+
+- Debian70 positive strict-rollback validation is complete: post-probe72 exactly
+  matches baseline69 (static trees, versions, service state, account/data-root
+  metadata). All3 rollback commands completed once. Proposal71 remained cancelled
+  with zero dispatches. Old owner27244 closed normally. A new current-reader owner
+  is launching in `/tmp/intent-cli-repeat-debian-jellyfin-current.log` for a fresh
+  baseline73/catalog74 cycle; do not reuse old70 for an exact-reapply claim.
+- Latest Rocky read-only inspection saw99610624-byte acquisition progress.
+  Official FFmpeg artifact is58599712 bytes; its own approved job has a separate
+ 20-minute deadline. No deadline was extended or command replayed.
+
+- Debian70's original reviewed rollback PASSED all3 commands once, including
+  strict service/package/account restoration. Proposal71 is cancelled, zero
+  dispatches. Post-rollback exact probe72 is PLANNING in27244 to compare against69.
+  This is a successful fresh apply/rollback, NOT a formal repeated cycle. A new
+  current-reader catalog cycle will be needed after restarting its old CLI owner.
+- Latest checks after the reader fix PASS:798 total/795 passed/0 failed/3 opt-in
+  skips, lint/typecheck/package-install/5 checksums. Archive SHA256 before the
+  feature-documentation refresh: `e356a57e2ba9f62af49a0c7de953b8361894bd6110cfd1506696dd31814f99ec`.
+  No new verified-recovery profile was enabled. Broad profiles and73 stronger
+  application cases remain outstanding. Never silently approve changed repeat71.
+- Rocky inspector48961 observed91729920 bytes in source45's verified-download
+  temporary path at the latest check. It remains in a read-only SSH shell.
+
+- New actual planning regression: exact Debian Jellyfin repeat71 was rejected
+  by existing credential-output policy, then Codex changed initialize-jellyfin.
+  Before approval SQLite confirmed ONLY that command differed and zero dispatches.
+  Both approval prompts were DECLINED. Do not count71 as an exact repeat or run it.
+  Trusted Jellyfin initialization now captures raw one-line credential values with
+  `sed -n 1p`, as existing planner guidance requires, instead of `cat`. No policy
+  restriction or execution redaction was relaxed. Failing-before/passing-after
+  regression covers native plans and shared native/Compose initialization;30
+  focused tests pass. Existing four approved source plans remain immutable and
+  predate this reader-only fix. Finish their original reviewed cleanup, then use
+  a NEW current-catalog cycle for exact-repeat coverage. Stronger count14/87.
+- Rocky read-only inspector48961 is in its normal SSH shell. It observed the
+  exact acquisition `.tmp` grow from57815040 to70774784 bytes, demonstrating
+  download progress, not a hung/failed command. Public HEAD confirmed110228765-byte
+  official archive. Do not replay or kill the running acquisition. No credential
+  files, process arguments, environment or raw logs were read by this inspector.
+- Full checks/package rerunning after credential-reader fix. Prior797/794/3
+  result and `bcf580...` archive do NOT include this latest source change.
+
+- Four current Jellyfin cases: Rocky44 baseline/source45 running; Debian69
+  baseline/source70 COMPLETED all7 forward commands, exact repeat71 is PLANNING;
+  openSUSE55 baseline/source56 RUNNING after exact trusted comparison and explicit
+  approval; Arch44 baseline/source45 RUNNING after the same checks. Owners remain
+  22447/27244/50454/11836 respectively. No Jellyfin rollback has run. Planned
+  assertion IDs: Rocky44/45/46/47/48, Debian69/70/71/72/73,
+  openSUSE55/56/57/58/59, Arch44/45/46/47/48, provided no declined proposals allocate
+  extra IDs. Check SQLite before approval; never reuse or rewrite an occupied ID.
+  Stronger application count is STILL14/87,73 missing, not18.
+
+- Current Jellyfin owners (all normal binary, existing vault):
+  Rocky22447 source45 RUNNING after confirmed baseline/foundation/credentials;
+  Debian27244 source70 RUNNING after trusted seven-command plan comparison;
+  openSUSE50454 baseline55 PLANNING, source56 pending;
+  Arch11836 baseline44 PLANNING, source45 pending.
+  Logs `/tmp/intent-cli-repeat-{rocky-jellyfin-guarded,debian-jellyfin,suse-jellyfin,arch-jellyfin}.log`.
+  No repeats or rollbacks for these four deployments have executed yet. Do NOT
+  replay running sources. openSUSE and Arch independent binary SSH confirmed
+  target state/app paths/account absent and2GiB memory with1899/1881MiB available.
+  Existing protected n8n/database quarantines are untouched. Stronger count14/87.
+
+- Debian CLI43247 closed normally. New Debian27244 loads final Jellyfin guards:
+  read-only SSH confirms future70 state, managed/default app paths, package
+  executable, repository files and account absent. Baseline69 is PLANNING for
+  catalog70, log `/tmp/intent-cli-repeat-debian-jellyfin.log`. No Debian Jellyfin
+  mutations yet. Rocky45 continues in22447, do not replay; only capture-baseline
+  was confirmed at the latest local projection. Both complete repeat/restore
+  assertions are pending and are NOT included in the14/87 stronger count.
+
+- Debian64/65/66/67/68 formal assertion PASSED. Native CLI installation now has
+  complete selected-state repeat/two-rollback assertions on all9 Linux hosts.
+  Strict read-only audit reports14/87 stronger application cases,73 missing,
+  87 completed-step no-replay checks and4 reviewed recovery exceptions. Twenty-two
+  scoped cycles overall. No Debian command remains running;43247 is closing.
+- Final source checks PASS:797 total/794 passed/0 failed/3 opt-in skips, lint,
+  typecheck, package-install and5 native checksums. Archive SHA256
+  `bcf580189a56f7e2bc4bd2226f892f3151017e09e559a7420bea0991a92166b2`.
+  `git diff --check` PASS. Log `/tmp/intent-final-suite.log`. These supersede the
+  earlier two-fixture failure and earlier archive hashes. Current remaining live
+  owner22447 is executing Rocky Jellyfin45; do not replay it.
+
+- Rocky FINAL owner22447: refined baseline44 completed with unredacted hashes,
+  native Jellyfin45 matched CURRENT trusted commands and all rollback guards
+  before approval, zero prior dispatches. Eight-command deployment approved and
+  RUNNING. Do not replay. Exact repeat and both rollback/probe cycles pending.
+- Debian65 original and66 repeat saved rollbacks both completed once; first
+  probe67 equals64. Final probe68 planning in43247. Formal assertion pending.
+- Full-suite regression exposed two older Jellyfin fixtures lacking an approved
+  baseline. They now provide valid fixture state while still testing preservation
+  of unrelated default data and absent nginx units. All50 focused catalog/Jellyfin
+  tests pass. Full checks rerunning in90953; prior failing run must not be called
+  green. No safety guard was removed to satisfy fixtures.
+
+- Latest owners: Debian43247 first restoration probe67 planning after original65
+  rollback completed once; repeat66 completed and its rollback is still pending.
+  Rocky22447 loads FINAL Jellyfin guards, baseline44 planning for future source45,
+  log `/tmp/intent-cli-repeat-rocky-jellyfin-guarded.log`. No Jellyfin mutation yet.
+  Earlier Rocky22594/53138/55553 closed normally; source44 was never created.
+  Final service-stop/daemon-reload/nginx-reload failure regressions also failed
+  before/pass after. All8 Jellyfin tests pass. Full suite/package checks running
+  in67996 after final source edits. Stronger live coverage remains13/87.
+
+- Debian65 and exact repeat66 completed. Original65 saved rollback approved and
+  executing in43247. Fresh first probe67, repeat66 rollback and final probe68
+  remain before formal64/65/66/67/68 can count.
+- Jellyfin fix now also preserves evidence on unavailable account lookup or
+  nginx restore failure, and all three native rollback phases reject empty or
+  symlinked baselines and skip absent state without deleting later files. Both
+  real regressions failed before/pass after;32 restore scenarios plus9 baseline
+  safety scenarios pass. Existing saved plans remain unchanged. This does NOT
+  add a verified remote-recovery profile or validate Compose live.
+- Rocky baseline43 completed but output was correctly redacted due a protected
+  credential path reference. It cannot prove restoration and MUST NOT be counted.
+  Refined probe excludes credential paths entirely. New baseline44/source45
+  are pending; no Jellyfin mutation has occurred. Owners22594 and53138 closed
+  normally so the next binary loads final rollback fixes. New owner launching
+  in `/tmp/intent-cli-repeat-rocky-jellyfin-final.log`.
+
+- Rocky22594 read-only SSH confirmed all future44 Jellyfin paths/account absent
+  and no occupied legacy44 state. Baseline43 is planning; source44 is NOT yet
+  dispatched. Its probe hashes complete static app/state/configuration trees,
+  packages/services/account and protected-root metadata, excluding credential,
+  mutable media/database contents. Exact repeat and both rollbacks remain pending.
+- Ubuntu63052 closed normally after formal67/68/69/70/71 PASS. No Ubuntu jobs.
+  Debian65 remains running in43247, do not replay. Latest suite after Jellyfin
+  fix795 total/792 pass/0 fail/3 opt-in skips, lint/typecheck PASS. Package rebuild
+  is being refreshed after the final source and documentation changes.
+
+- Ubuntu67/68/69/70/71 formal assertion PASSED, preserving the legacy66 swap
+  directory. Both fresh restoration snapshots equal67 exactly. Stronger count
+  now13/87,74 missing;21 scoped cycles overall. Ubuntu63052 is idle at final71
+  Press Enter, no job. openSUSE41230, Oracle54451 and Rocky16187 closed normally.
+- Debian new owner43247: baseline64 completed, no occupied source65 legacy paths
+  or CLI targets found through read-only binary SSH. Catalog65 matched the
+  current trusted builder and was approved, now RUNNING. Do not replay. Its
+  formal repeat and both rollback probes remain pending.
+- Additional source audit found Jellyfin restore swallowed package/user removal
+  errors and discarded baseline. Fixed its shared package-removal helpers and
+  native user cleanup to propagate failures, retaining unresolved state. Twelve
+  isolated scenarios across Debian/RHEL/Arch/SUSE cover package/account failures,
+  successful cleanup and double cleanup; the real failure case failed before
+  the fix. Existing saved plans remain immutable. New normal binary owner22594
+  is connecting to Rocky for fresh positive validation, log
+  `/tmp/intent-cli-repeat-rocky-jellyfin.log`. No Jellyfin commands dispatched yet.
+  Full checks rerunning in60212 after this additional fix.
+
+- Formal assertions now PASS for openSUSE50/51/52/53/54,
+  Oracle37/38/39/40/41 and Rocky38/39/40/41/42. Both fresh restoration hashes
+  match their original selected-tree/package/Netdata baseline; applies/rollbacks
+  dispatched once. Stronger application count12/87,75 missing;20 scoped cycles
+  overall. Owners41230/54451/16187 are idle at final Press Enter, no jobs.
+  Ubuntu68/69 complete, original68 rollback complete, first probe70 planning;
+  repeat69 rollback and final probe71 remain. New Debian CLI owner is launching
+  in `/tmp/intent-cli-repeat-webminai-debian-13.log`, not yet a test pass.
+
+- openSUSE51, Oracle38 and Rocky39 exact repeats52/39/40 completed with unchanged
+  selected snapshots. Both original and repeat saved rollbacks completed once.
+  First fresh probes53/40/41 equal original baselines50/37/38. Final fresh probes
+  54/41/42 are PLANNING in owners41230/54451/16187. Run the formal five-ID
+  assertions only after those final probes complete. Ubuntu68 completed both
+  commands; exact reviewed repeat69 is RUNNING in63052. Then original68 rollback,
+  first probe70, repeat69 rollback, second probe71 remain. Protected66 swap state
+  remains untouched. These four cases are not counted as stronger passes yet.
+
+- Current active owners: openSUSE41230, Oracle54451, Rocky16187 each completed
+  original CLI installation51/38/39 once. Exact repeat52/39/40 matched approved
+  execution fields and was explicitly approved, now running. Original rollbacks
+  and both restoration probes are still pending. Ubuntu63052: task66 failed
+  BEFORE dispatch because legacy `/var/lib/webminai/task-state/66-swap-file`
+  exists (root0700). It is preserved and must not be retried or deleted. Fresh
+  baseline67 matched the corrected source68 paths and completed; fresh catalog68
+  matched the trusted builder and is running. No new vault or direct executor.
+- Ubuntu Netdata was inactive/dead/disabled, Result=success/status0; memory2GiB,
+  available1987MiB. No OOM conclusion. Explicit binary plugin-only activation
+  preserved installed Netdata/plugin0.7.2 and restored active Stage2 before67.
+- Shared remote transport now exposes only exact allowlisted collision/busy
+  explanations and safe next actions; arbitrary stderr stays hidden. POSIX signed
+  reservation collisions now emit the fixed code text. Regression failed before
+  and passes after, including secret/prototype-name input. Native protocol unchanged.
+- Latest full check:794 total,791 passed,0 failed,3 opt-in skips; lint/typecheck,
+  package-install and5 checksums PASS. New archive SHA256
+  `5b5252ad8379a7a2f7992cae9363490d547a88728883ee54dce44cbf0ab34a7b`.
+  Strict application repeat coverage is still9/87 until complete rollback probes.
+  Arch26552/31930 both closed normally; no Arch jobs remain.
+
+- Arch38/39/40/42/43 formal repeat/restoration assertion PASSED. Both saved
+  rollbacks completed once, both fresh restoration snapshots match38 exactly.
+  Inspector31930 independently confirms system Node22.23.3, managed root/state
+  absent and Netdata active after the second rollback. Proposal41 remains
+  cancelled/unexecuted. Strict read-only audit now reports9/87 application cases
+  with complete stronger evidence,78 missing,87 completed-step no-replay checks,
+  four reviewed recovery exceptions. Seventeen scoped cycles overall.
+- Next four CLI cases: openSUSE41230 baseline50 completed, source51 pending;
+  Oracle54451 baseline37 planning, source38 pending; Rocky16187 baseline38
+  planning, source39 pending; Ubuntu63052 at initial dashboard, baseline65 and
+  source66 pending. Plans target only CLI-owned paths, packages and Netdata.
+  Connected each new owner sequentially to preserve settings CAS. Alma78135 and
+  Alpine95218 closed normally. Arch26552 is at final probe43 Press Enter, no job.
+- Latest complete checks:793 tests,790 passed,0 failed,3 opt-in skips; lint and
+  typecheck PASS. Logs `/tmp/intent-final-suite.log`. No universal acceptance
+  claim; Docker and non-Linux remain outside this live scope.
+
+- Arch39 installed successfully with private Node24.16.0 under its owned root;
+  independent normal-binary SSH confirms system Node22.23.3 unchanged, root/runtime
+  root-owned0755, state0700 and baseline/owns-root/installed0600. Bootstrap archive
+  and checksum files are absent. Exact repeat40 completed four commands once and
+  identical before/after selected-tree/package/service snapshots. Current-catalog
+  remote recovery proposal41 regenerated from nine verified source records and
+  complete private-runtime baseline. It was DECLINED, with no recovery commands
+  dispatched. Original39 saved rollback completed once and independently removed
+  root/state/private runtime while preserving system22.23.3 and active Netdata.
+  Fresh first-restoration probe42 is planning in26552. Next: approve exact42,
+  separately run repeat40's saved rollback, then identical fresh probe43 and
+  formal assertion38/39/40/42/43. Proposal41 must remain unexecuted/stale.
+  Inspector31930 is in the normal Arch SSH shell, read-only. Other earlier Debian
+  owners have closed. The current stronger count is8/87 until Arch finishes.
+
+- Alma46/47/48/49/50 and Alpine38/39/40/41/42 formal cycles PASSED. Both exact
+  applies and both separately reviewed saved rollbacks dispatched once. Repeat
+  snapshots match and both fresh restoration probes equal their original baseline.
+  Managed CLI/state trees, launchers, package versions and Netdata service state
+  were checked; no whole-host restoration claim. This brings stronger application
+  evidence to8/87,16 formal scoped cycles overall (8 supplementary system cases).
+  Owners78135/95218 are at their final probe Press Enter prompts, no remote jobs.
+- Arch fresh baseline38 completed with all managed paths absent, unchanged package
+  hash and active Netdata. Source39 was compared to the CURRENT private-runtime
+  catalog, reviewed and approved; installation is RUNNING in26552, acknowledged
+  at16:10:40 UTC. Do not replay it. System Node22 must remain intact. Log
+  `/tmp/intent-cli-repeat-webminai-arch-private-node.log`. Its exact repeat and
+  both rollbacks/probes remain pending. New read-only normal-binary inspector is
+  starting in `/tmp/intent-cli-arch-node-inspector.log`.
+- Debian owners10863/2739/97500 closed normally after all source/recovery/cache
+  checks. No Debian jobs remain. All protected original database/app quarantines
+  remain untouched. Current package-install/checksum checks PASS, archive SHA-256
+  `9756f7feac082fce168fe9be26e525b2fe609419cdec3f8206eba759e310229b`.
+
+- Arch37's exact guarded rollback revision7 was separately approved and executed
+  once through operator controls. Source37 is reverted, retaining its failed
+  installation and single completed baseline. No uncertain command was replayed.
+  Old owner72712 quit normally. A fresh binary is starting with the private-Node
+  fix; planned next cycle IDs are baseline38/source39/repeat40/probes41/42, but
+  verify before approval. New log `/tmp/intent-cli-repeat-webminai-arch-private-node.log`.
+  The previous Arch36/37 baseline/install pair is NOT a successful application
+  lifecycle. Do not count it. Temporary history audit may reject the newest
+  reverted failed source until a fresh successful catalog cycle supersedes it.
+- Alma47 and Alpine39 first saved rollbacks completed once. Their fresh first-
+  restoration probes49/41 are planning in78135/95218. Exact repeats48/40 had
+  identical before/after selected-tree/package/service hashes. Still required:
+  approve exact first-restoration probes, separately run saved repeat rollbacks,
+  then fresh identical second-restoration probes50/42 and formal assertions.
+- Current automated checks after runtime/diagnostic fixes:792 total,789 passed,
+  0 failed,3 opt-in skips, with lint/typecheck passing. Package install/checksums
+  are being refreshed. Previous release checksums in older notes are superseded.
+
+- Arch37 installation failed with recorded exit1, not an uncertain outcome:
+  system Node22.23.3 is incompatible with the released CLI's Node24.7+ minimum.
+  Its completed baseline was NOT replayed. Independent normal-binary SSH confirmed
+  empty root66311:274220391:0:0:755 and state66311:274220259:0:0:700, private empty
+  baseline/owns-root markers, no launchers or preexisting/root.existed/installed
+  flags, and unchanged `/usr/bin/node`22.23.3 with Netdata active. State contains
+  only baseline, command.before, owns-root, install.sh and verified package files.
+  A separately reviewed guarded cleanup proposal is planning through task37's
+  operator rollback controls in72712. It must use rmdir for the empty root and
+  preserve system Node. Do not run the original partial rollback blindly.
+- Root fix implemented in the common-task builder: non-Alpine Linux with an
+  incompatible Node now downloads checksum-verified private Node24.16.0 beneath
+  the task-owned install root, preserves system Node, bounds downloads, rejects
+  unsupported architectures/checksum failures and removes temporary archives.
+  Linux installer jobs set umask022 explicitly. Six isolated regressions pass
+  (including compatible-Node reuse, repeat and double cleanup); checksum/selection
+  regressions failed before the fix. Standalone public installer behavior was not
+  changed, so the wrapper also works with the currently released installer.
+  Existing plans/history remain immutable; restart the Arch binary after cleanup
+  before creating the fresh current-catalog cycle. New runtime-version failure
+  classification has an explicit own-installer-message regression; previous37
+  diagnostic history is preserved, not rewritten. Full tests are refreshing.
+
+- Temporary Debian cache54 was removed by its separately reviewed saved guarded
+  rollback, exactly once. Parent identity matched66311:274226064:0:0:700 before
+  approval; its private owner marker and no-mount guard passed. Independent binary
+  SSH inspection confirms the exact cache path absent. This was disposable npm
+  data, recoverable by downloading again; preserved older application/database
+  backups were not touched. Owner2739 is at the final cleanup Press Enter prompt.
+- Alma47 and Alpine39 installation COMPLETED. Exact-repeat proposals48 and40
+  respectively are planning in78135/95218; compare all fields before approval.
+  Arch36 baseline completed, source37 was reviewed against the current catalog
+  with initially absent managed paths, then approved and is running in72712.
+  Count remains6/87 stronger application cases until both rollbacks/probes finish.
+
+- Native n8n current-profile remote recovery PASSED: Debian60 completed all6
+  commands once, including health/SQLite/HTTP verification. Acquisition reported
+  2186 packages in43 minutes, version2.33.7, with no observed OOM kill. The normal
+  binary verified27 signed records before proposing recovery. Separately reviewed
+  recovery63, ID `3464e089-9492-4028-819d-75b392692e5f`, completed its single guarded
+  dependency-ordered cleanup job once. All33 source records verify afterwards,
+  ending rollback_completed/completed. Independent normal-binary SSH inspection
+  confirms app/data/credentials/state60/unit/vhost/link absent, account absent and
+  Netdata active. Source `5e2897287e95564a119a6bb2a488a74a` must NOT be replayed.
+  Owner10863 is at its final Press Enter prompt; owner2739 is at Debian remote
+  execution listing. No Debian jobs remain active. Temporary cache54 still exists
+  and its saved guarded rollback still needs separate review/approval.
+- New formal CLI cycles: Alma baseline46 completed, source47 install RUNNING
+  in78135; Alpine baseline38 completed, source39 install RUNNING in95218; Arch
+  baseline36 completed in72712, source37 NOT YET prepared. All probes are exact
+  v2 selected-tree/package/Netdata snapshots. Managed paths were initially absent
+  on Alma/Alpine and source plans matched current trusted catalog before approval.
+  No additional cycle counts yet. Initial Alpine/Arch sessions failed closed on
+  stale settings before tasks, closed normally and restarted individually. No
+  settings were overwritten. New log paths are `/tmp/intent-cli-repeat-webminai-almalinux-9.log`,
+  `/tmp/intent-cli-repeat-webminai-alpine-323-restart.log`, and
+  `/tmp/intent-cli-repeat-webminai-arch-restart.log`.
+
+- Fedora34 remote source `49d098004c8c2fd50dff6b0910e59212` verified all18
+  records through the normal binary after both formal rollbacks, ending
+  rollback_completed/completed. The first rollback belongs to signed source34;
+  the second is the separately reviewed exact AI repeat35, not fabricated catalog
+  history. Owner2739 is at Fedora remote-execution listing; no Fedora job active.
+  Debian60 acquisition is still active after31 minutes, cache863MiB, no observed
+  OOM kills. Keep owner10863 running and reconcile its same job if interrupted.
+
+- Fedora33/34/35/36/37 formal cycle PASSED. Both exact applies and both separately
+  reviewed saved rollbacks completed once. Repeat snapshots match and both fresh
+  rollback snapshots exactly equal baseline33, including recursively hashed
+  selected CLI/state trees, launchers, package versions and Netdata service.
+  This is the14th formal scoped cycle overall and6th application case. Strict
+  gate now reports6/87 application cases with81 missing, not universal completion.
+  Source34 exercised signed pause after completed baseline and reviewed resume
+  of only the installer. Owner2739 is inspecting its remote records; no active
+  Fedora jobs remain. Debian60 n8n acquisition continues independently.
+
+- Fedora34 install and35 exact repeat COMPLETED; both repeat probe outputs are
+  identical. Original34 saved rollback completed once. Fresh restoration probe36
+  is being planned in owner2739. Still required, in order: approve exact read-only
+  probe36; review/run saved rollback35 once; run a fresh identical probe37; then
+  `node scripts/assert-cli-lifecycle.js /home/vscode/.intentaiops webminai-fedora-44 33 34 35 36 37`.
+  If task IDs change, verify SQLite before selecting. No cycle count increase yet.
+  Source34's two forward steps each dispatched once across signed pause/resume.
+  Repeat35 preserves both original forward bodies and its one rollback exactly.
+  Probe scope is the complete selected CLI installation/state trees and both
+  launchers, package versions and Netdata service state, not the whole host.
+
+- Additional formal cycle IN PROGRESS on Fedora through owner2739, same log
+  `/tmp/intent-cli-recovery-final.log`. Baseline33 completed a reviewed v2 probe
+  of `/opt/intent-ai-ops`, both launchers, state34, packages and Netdata service.
+  Source34 captured baseline once, paused at the safe boundary, then separately
+  approved resume dispatched only install-intent-ai-ops. Installation is running.
+  Do not rerun34 or overwrite its baseline. Exact repeat/rollbacks/restoration
+  probes remain pending; do not count this case yet. No database paths involved.
+
+- Current final checks after the strict-gate changes:785 total tests,782 passed,
+  0 failed,3 opt-in skips. Lint, typecheck, package-install, all five native
+  checksums and diff-check pass. Installed Codex boundary53/53 also passes.
+  FreeBSD compatibility compilation passed with static-glibc linker warnings;
+  this is not a FreeBSD host test. Archive SHA-256 remains
+  `462adbff6d3cc6d2c2f277bc84e010d98b8119ad8afd5203e25c17cefd74de35`.
+
+- Strict repeat/restoration coverage is now reproducible:
+  `node scripts/audit-linux-cli-history.js /home/vscode/.intentaiops --require-repeat-restoration`
+  exits1 with5/87 application cases verified and82 missing. The other8 of the13
+  formal cycles are supplementary system fixtures. The gate checks unchanged
+  command definitions, ordered probes, approved single attempts or bounded
+  confirmed retries, both reviewed rollbacks and exact selected-baseline output.
+  It reads only bounded local history and never contacts hosts. New discovery
+  and end-to-end read-only gate regressions pass; missing evidence stays a failure.
+- Live signed-boundary verification PASSED on Debian61 through fresh binary
+  owner2739, log `/tmp/intent-cli-recovery-final.log`: pause before apply,
+  separately reviewed resume, one dispatch, six verified signed records. New
+  recovery62 was separately reviewed and completed once. All11 source records
+  verify afterwards, ending rollback_completed/completed. Independent binary
+  SSH inspection confirms unit/runtime/state61 absent and Netdata active.
+  Source execution `6050b86b6b80cd9f2a8b97c5973c6b59`.
+- Source60 remains running acquisition, execution
+  `5e2897287e95564a119a6bb2a488a74a`, owner10863. No replay or cache mutation.
+  Existing cache54 is still retained. Native n8n recovery is still live-pending.
+
+- Resume correction: Debian60 is RUNNING, not cancelled. Its approved
+  `capture-baseline` and `install-runtime` completed once; `install-n8n` was
+  acknowledged at 14:57:13 UTC and must not be replayed. Owner10863 is waiting
+  for that durable job with intervention disabled. Do not stop this CLI or seed
+  another cache while acquisition runs. Normal binary SSH inspection confirmed
+  state60 and its repo-backup are0700 and packages.before is0600. Observed cgroup
+  OOM counters remain0. Task61 has no legacy state, but do not start it while60
+  owns the application. Cache54 remains retained, and53/57 remain reverted.
+- Signed pause/resume boundaries now use the shared execution-event hook.
+  New execution claims reject occupied legacy task-state paths before dispatch;
+  existing claimed executions can still resume. Focused recovery/admin/journal
+  tests63/63 passed. A fresh CLI is required to test the new boundary hook live;
+  do not restart owner10863 while its remote command is still running.
+- Final full tests, lint/typecheck and package-install validation are running.
+  Native n8n regenerated remote recovery remains live-pending. Broader app/database
+  recovery families and universal live repeated-apply/exact-baseline assertions
+  remain unfinished; the13 formal scoped cycles are not universal coverage.
+
+- 14:42 UTC: formal Debian n8n cycle52/53/57/58/59 PASSED through the actual
+  binary and read-only lifecycle checker. All six exact original apply bodies
+  executed twice; repeated static-file/package/service probes were identical.
+  Both separately approved three-command rollbacks completed once each; fresh
+  probes58/59 equal baseline52 byte-for-byte. No uncertain command was replayed.
+  This adds the13th formal scoped cycle, not universal coverage or whole-host
+  restoration. Protected credentials, runtime database and dependency contents
+  were excluded from this probe scope. Source53 and repeat57 are both reverted.
+  Temporary cache54 remains retained for the fresh current-catalog recovery test.
+  Logs: `/tmp/intent-cli-n8n-catalog.log`, `/tmp/intent-cli-n8n-repeat-fixed.log`.
+- The repeat exposed a real planner-policy false positive: captured `cat` output
+  used only to write a private configuration file was classified as console
+  disclosure. Added a narrow same-directory private-file handoff exception,
+  keeping shell-tracing and disclosure checks, and preserving complete stdout/
+  stderr redaction. Regression failed before/pass after; direct/flagged/multiple-
+  input/stdin cat, echoed substitutions and later secret-variable uses remain
+  rejected. Proposal55 was cancelled before dispatch. Refusal56 has zero commands
+  and no remote execution, stored as partial. Corrected exact repeat57 passed.
+  Current source suite780 total/777 passed/0 failed/3 opt-in skips; installed
+  Codex boundary53/53 also passed. Final archive/checks are being refreshed.
+
+- LATEST: Debian53 completed all six reviewed native n8n commands, including
+  health/SQLite/HTTP verification. Acquisition completed exit0 at14:00 UTC,
+  attempt `1748d7e1-434c-4549-bbc8-28a9626c82ae`, job
+  `e18bf29d43e2968007dd446869c165ae`, once with no replay. Container OOM counters
+  remained0; memory-limit reclaim events were observed but are NOT an OOM kill.
+  The n8n fixture is currently DEPLOYED. Owner97500 is at Debian host actions.
+  Cache task54 completed its exact reviewed copy once; its marked private cache
+  exists and its guarded cleanup has NOT run. Owner18727 is at host actions.
+- Repeat proposal55 was cancelled with ZERO execution events because Codex
+  changed the credential-reading assignment. Owner23149 has requested a corrected
+  byte-identical repeat, expected task56, and is waiting for planning. Do not
+  approve until every forward/revert body, ID, risk, timeout, dependency and retry
+  field matches the supplied source53 plus exact probe52 brackets. Source53 and
+  cache54 have no active remote jobs or leases. Do not call the application cycle
+  reverted until the reviewed rollbacks and restoration probes complete.
+- New n8n baseline collection selects the package query from the reconstructed
+  trusted distro family, not whichever package binary happens to be installed.
+  All execute/reconcile/prepare/recheck/guard callers carry that family. Unknown
+  families fail closed. All source binaries must restart before the fresh
+  current-catalog recovery test. Earlier-attempt uncertainty now blocks recovery
+  even when a later distinct attempt completed; only reconciliation of that same
+  attempt clears it. Legacy ambiguous attempt IDs stay blocked.
+
+- ACTIVE follow-up: normal binary session97500, Debian n8n53. Baseline capture
+  and runtime installation completed once; n8n acquisition is running as job
+  `e18bf29d43e2968007dd446869c165ae`, attempt
+  `1748d7e1-434c-4549-bbc8-28a9626c82ae`, source execution
+  `8c8cd527897f1f5ac7871376de3b7f66`. Command
+  boundaries are interactive, so pending commands need separate continuation.
+  Log `/tmp/intent-cli-n8n-catalog.log`. Do not replay or overwrite this task.
+  Debian52 is the usable version2 selected static-file/package/service baseline
+  for53. Debian51 was read-only but its output was correctly redacted because its
+  scope included protected credentials, so51 is NOT usable restoration evidence.
+  Scope52 excludes protected credentials, runtime database and dependency tree.
+  Inspector18727 is a separate normal binary SSH shell, read-only inspections.
+  Npm cache progressed256MiB to412MiB; sampled2GiB cgroup OOM counters were0,
+  with567 fetches and0 transport-error lines. The local lease remains active.
+  Native n8n recovery profile and stricter private baseline creation are added;
+  deterministic tests pass, live recovery is NOT yet verified. Live inspection
+  exposed state53 mode0755 from implicit parent creation. A regression failed
+  before the fix and passes with explicit0700 creation of both state and backup
+  directories. Runtime repository creation now also uses an explicit022 umask.
+  Task53's approved plan is immutable and predates these last fixes. Do NOT
+  claim53 as current-profile recovery evidence or silently chmod its baseline.
+  Finish its reviewed cycle, then use a fresh current-catalog source for verified
+  n8n recovery. Current native profile hashes live repository/configuration files
+  as well as backups, packages and owned directory identities, blocks mounts and
+  customized targets, and runs the three trusted cleanup bodies as one guarded
+  job that stops at first failure. No partial/unknown replay was introduced.
+- Inspector18727 has requested a separate reviewed temporary-cache plan (task54
+  when saved), NOT approved/dispatched yet. It copies only source53's npm-cache
+  after the completed acquisition marker exists, from observed identity
+  `66311:268742036:0:0:755`, into new root0700
+  `/var/lib/webminai/lab-recovery/debian-n8n-task-53-cache`. Its guarded saved
+  rollback removes only that marked copy. Do not approve before acquisition
+  completion. Plenty of disk space was confirmed. This avoids another slow
+  download on the required fresh current-catalog rerun, without copying any
+  application/database state or changing53's baseline.
+  Suggested continuation: finish53; preserve the cache; execute an exact reviewed
+  reapply of53 bracketed by identical probe52 commands; separately review both
+  original rollbacks, with new probe52 observations after each. The repeated plan
+  must preserve53's exact command bodies/IDs/retry settings and revert bodies.
+  Exclude the cache-copy task from application counts. Then restart old binaries,
+  create a fresh current-catalog n8n task, pause after baseline, explicitly review
+  seeding only its npm-cache from the retained copy, resume pending commands,
+  verify the new signed source and reviewed remote recovery, and remove the
+  retained temporary cache using its guarded rollback. Never restore protected
+  database/n8n quarantines or copy old task baseline files into the new task.
+- Added four complete isolated-tree repeat/restoration tests for service, timer,
+  logrotate and tmpfiles, preserving unrelated files and links after both
+  rollbacks. These are fixture tests, not additional live application passes.
+  Heartbeats now stop renewal permanently on ownership loss, preserving the
+  original error rather than attempting to renew a defunct owner later.
+
+- Added audited `logrotate-rule` and `tmpfiles-rule` remote recovery profiles.
+  Actual binary with the existing vault: Debian47 logrotate apply, recovery48;
+  Debian49 tmpfiles apply, recovery50. Each forward/recovery command completed
+  once. Execution IDs `1672e54e6bd9668b3e8ba8278d68c943` and
+  `c5c1fbd630ca6099ec7e55569b43ba2c`: all nine records verified for each,
+  ending `rollback_completed`. Independent binary SSH inspection confirmed all
+  six managed paths absent and Netdata active. No source command was replayed.
+  Log: `/tmp/intent-cli-profile-expansion.log`. No fixture remains deployed.
+- New profiles hash private markers, fixed file bytes and ownership identity.
+  Tmpfiles also requires the original empty root-owned0750 runtime directory;
+  unrelated contents, replacement or missing runtime evidence block recovery.
+  Deterministic tests cover unchanged repeated apply, twice-run saved rollback,
+  changed files, unsafe permissions and unrelated runtime contents. These are
+  isolated fixtures, not universal live repetition coverage.
+- Shared execution heartbeats preserve the existing10s renewal/30s lease.
+  Future ownership failures record safe reason codes, observed monotonic delay
+  and wall-clock drift in task progress. Execute, rollback and reconciliation
+  use the same helper. Expired/replaced/missing owners remain rejected; no
+  automatic reacquisition or replay. The old Debian45 cause remains unconfirmed.
+- Scoped baseline probe version2 now hashes recursive directory entries,
+  contents, modes, owners and symlink targets without exposing their contents.
+  It does not cross filesystems or prove whole-host restoration. Selected trees
+  are limited to20000 entries and individual nested files to1GiB; caller timeout
+  still bounds collection. Existing version1 live evidence is not upgraded by
+  this code change. Universal live repeat/exact-baseline cycles and broader
+  application/database recovery profiles remain unfinished.
+- Source suite749 total/746 pass/0 fail/3 opt-in skips; updated focused
+  recovery/probe/heartbeat/journal tests52/52 pass. Lint/typecheck/package-install,
+  native checksums and diff-check passed again after documentation changes.
+  Package SHA256 `1bfc3cfa3765a7600189e3db760109aadd03185cf75a2d74efcfdc2782972b08`.
+  Binary session53084 exited normally; no new background lab job remains.
+  No non-Linux or Docker live coverage is claimed.
 
 - Latest completion supersedes all pending Debian45 notes below. Installation
   dispatched exactly once. The client lost its local lease after dispatch

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -102,6 +102,50 @@ test('Linux CLI acquisition has a bounded 30-minute job while other platforms re
     assert.equal(command.retry, undefined)
   }
 })
+
+for (const scenario of ['valid', 'compatible-system', 'corrupt-checksum', 'malformed-checksum', 'download-failed', 'unsupported-architecture']) {
+  test(`Linux common-task private runtime preserves incompatible system Node: ${scenario}`, { skip: process.platform === 'win32' }, () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-private-cli-node-'))
+    try {
+      const tools = path.join(directory, 'tools')
+      const state = path.join(directory, 'state')
+      const root = path.join(directory, 'install')
+      const bin = path.join(directory, 'bin')
+      for (const entry of [tools, bin]) mkdirSync(entry)
+      for (const name of ['install', 'mkdir', 'cp', 'chmod', 'grep', 'sh', 'awk', 'sha256sum', 'rm']) symlinkSync(`/usr/bin/${name}`, path.join(tools, name))
+      const version = /^NODE_VERSION=(.+)$/mu.exec(readFileSync(fileURLToPath(new URL('../scripts/install.sh', import.meta.url)), 'utf8'))[1]
+      const systemNode = `#!/bin/sh\nif [ "$1" = -e ]; then exit ${scenario === 'compatible-system' ? 0 : 1}; fi\nprintf '${scenario === 'compatible-system' ? version : '22.23.3'}\\n'\n`
+      writeFileSync(path.join(tools, 'node'), systemNode, { mode: 0o755 })
+      writeFileSync(path.join(tools, 'uname'), `#!/bin/sh\nprintf '%s\\n' '${scenario === 'unsupported-architecture' ? 'unsupported' : 'x86_64'}'\n`, { mode: 0o755 })
+      const payload = 'verified-node-archive-fixture'
+      const digest = scenario === 'corrupt-checksum' ? 'b'.repeat(64) : scenario === 'malformed-checksum' ? 'invalid' : createHash('sha256').update(payload).digest('hex')
+      writeFileSync(path.join(tools, 'curl'), `#!/bin/sh\n${scenario === 'download-failed' ? 'exit 28\n' : ''}url=; output=; while [ "$#" -gt 0 ]; do case "$1" in --output) shift; output=$1;; https:*) url=$1;; esac; shift; done\nprintf 'called\\n' >> '${directory}/downloads'\ncase "$url" in */SHASUMS256.txt) printf '%s  %s\\n' '${digest}' 'node-v${version}-linux-x64.tar.gz' > "$output";; *) printf '%s' '${payload}' > "$output";; esac\n`, { mode: 0o755 })
+      writeFileSync(path.join(tools, 'tar'), `#!/bin/sh\ncase " $* " in *' --no-same-owner '*) :;; *) exit 96;; esac\nwhile [ "$#" -gt 0 ]; do case "$1" in -C) shift; destination=$1;; esac; shift; done\n/bin/mkdir -p "$destination/bin"\nprintf '#!/bin/sh\\nexit 0\\n' > "$destination/bin/npm"\nprintf '#!/bin/sh\\nif [ "$1" = -e ]; then exit 0; fi\\nprintf "${version}\\\\n"\\n' > "$destination/bin/node"\n/bin/chmod 0755 "$destination/bin/node" "$destination/bin/npm"\n`, { mode: 0o755 })
+      const installer = path.join(directory, 'installer.sh')
+      writeFileSync(installer, `#!/bin/sh\n# INTENTAI_OPS_PACKAGE_URL\n[ "$(command -v node)" = "${scenario === 'compatible-system' ? tools + '/node' : '$INTENTAI_OPS_INSTALL_ROOT/runtime/bin/node'}" ] || exit 97\nmkdir -p "$INTENTAI_OPS_INSTALL_ROOT"\nprintf called > '${directory}/installed'\nprintf '#!/bin/sh\\nexec "%s" --help\\n' "$(command -v node)" > "$INTENTAI_OPS_BIN_DIR/intentaiops"\nchmod 0755 "$INTENTAI_OPS_BIN_DIR/intentaiops"\n`)
+      const plan = buildIntentAiOpsInstallTask(1, 'linux', { installerPath: installer, packageUrl: '/fixture/package.tgz' }, { identity: { id: 'arch' } }).plan
+      const rewrite = command => command.replaceAll(plan.modifiedFiles[0], state).replaceAll(plan.modifiedFiles[1], root).replaceAll('/usr/local/bin', bin)
+      const run = command => spawnSync('/bin/sh', ['-c', 'umask 002; ' + rewrite(command)], { encoding: 'utf8', env: { ...process.env, PATH: tools }, timeout: 10000 })
+      assert.equal(run(plan.commands[0].command).status, 0)
+      const result = run(plan.commands[1].command)
+      const success = ['valid', 'compatible-system'].includes(scenario)
+      assert.equal(result.status, success ? 0 : scenario === 'download-failed' ? 28 : 1, result.stderr)
+      assert.equal(readFileSync(path.join(tools, 'node'), 'utf8'), systemNode)
+      assert.equal(existsSync(path.join(directory, 'installed')), success)
+      if (success) {
+        assert.equal(statSync(root).mode & 0o777, 0o755)
+        assert.equal(run(plan.commands[1].command).status, 0)
+        if (scenario === 'valid') assert.equal(readFileSync(path.join(directory, 'downloads'), 'utf8'), 'called\ncalled\n')
+        else assert.equal(existsSync(path.join(directory, 'downloads')), false)
+        assert.equal(existsSync(path.join(state, 'node-runtime.tar.gz')), false)
+        for (let attempt = 0; attempt < 2; attempt++) assert.equal(run(plan.revertCommands[0].command).status, 0)
+        assert.equal(existsSync(root), false)
+        assert.equal(existsSync(state), false)
+        assert.equal(readFileSync(path.join(tools, 'node'), 'utf8'), systemNode)
+      } else assert.equal(existsSync(path.join(root, 'runtime/bin/node')), false)
+    } finally { rmSync(directory, { recursive: true, force: true }) }
+  })
+}
 
 for (const scenario of ['compatible-private', 'incompatible-private', 'missing-private-npm', 'incompatible-system']) {
   test(`installer runtime selection: ${scenario}`, { skip: process.platform === 'win32' }, () => {

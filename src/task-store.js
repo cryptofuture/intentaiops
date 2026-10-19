@@ -257,7 +257,12 @@ export class TaskStore {
     return this.withDatabase(serverId, database => {
       const updated = database.prepare('UPDATE execution_leases SET expires_at = ? WHERE task_id = ? AND owner = ? AND expires_at > ?')
         .run(Date.now() + 30000, taskId, owner, Date.now())
-      if (!updated.changes) throw new Error('execution ownership expired or changed')
+      if (!updated.changes) {
+        const lease = database.prepare('SELECT owner, expires_at FROM execution_leases WHERE task_id = ?').get(taskId)
+        const error = new Error('execution ownership expired or changed')
+        error.code = !lease ? 'EXECUTION_LEASE_MISSING' : lease.owner !== owner ? 'EXECUTION_LEASE_REPLACED' : 'EXECUTION_LEASE_EXPIRED'
+        throw error
+      }
     })
   }
 

@@ -3,6 +3,21 @@ import test from 'node:test'
 import { classifyFailure, isFailureCode } from '../src/failure-signature.js'
 import { executionDiagnostics } from '../src/execution-diagnostics.js'
 
+test('the explicit installer runtime rejection explains failure without changing an uncertain outcome', () => {
+  const item = { id: 'install-intent-ai-ops', phase: 'acquire' }
+  const result = { exitCode: 1, stderr: 'ERROR: Node.js 22.23.3 is installed, but Intent AI Ops requires 24.7 or newer. Upgrade it explicitly and rerun this installer.' }
+  assert.equal(classifyFailure({ item, result }).code, 'RUNTIME_VERSION_INCOMPATIBLE')
+  assert.ok(isFailureCode('RUNTIME_VERSION_INCOMPATIBLE'))
+  const diagnostics = executionDiagnostics({ item, result })
+  assert.ok(diagnostics.some(value => value.code === 'RUNTIME_VERSION_INCOMPATIBLE' && value.confidence === 'confirmed'))
+  assert.ok(!diagnostics.some(value => value.code === 'CAUSE_UNKNOWN'))
+  assert.deepEqual(executionDiagnostics({ item, result: { ...result, exitCode: 0 } }), [])
+  const uncertain = { ...result, exitCode: null, state: 'unknown' }
+  assert.ok(executionDiagnostics({ item, result: uncertain }).some(value => value.code === 'RUNTIME_VERSION_INCOMPATIBLE'))
+  assert.equal(uncertain.state, 'unknown')
+  assert.equal(classifyFailure({ item, result: { exitCode: 1, stderr: 'Node.js may be old' } }).code, 'COMMAND_FAILED')
+})
+
 test('a recorded apt lock owner explains package contention without changing execution outcome', () => {
   const item = { id: 'install-jellyfin', phase: 'acquire' }
   const result = { exitCode: 100, stderr: 'E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 18233 (unattended-upgr)' }

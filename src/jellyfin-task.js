@@ -66,15 +66,15 @@ function buildNativeTask (taskId, context, profile) {
     item('capture-baseline', 'baseline', nativeBaseline(state, paths, profile), 'Capture packages, services, users, repositories, ports, and task-owned paths exactly once'),
     item('install-foundation', 'packages', nativeFoundation(state, profile), `Install nginx and the reviewed ${profile.route} Jellyfin prerequisites`, ['capture-baseline'], 1200000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(), 'Generate the initial administrator name and password on-host without emitting them', ['capture-baseline']),
-    item('install-jellyfin', 'acquire', nativeAcquire(state, profile), `Install the pinned Jellyfin ${VERSION} ${profile.route}`, ['install-foundation'], 1800000, 'job'),
-    ...(!profile.package ? [item('install-jellyfin-ffmpeg', 'acquire', portableFfmpeg(state, profile), `Install the checksum-pinned Jellyfin FFmpeg ${FFMPEG_VERSION} portable archive`, ['install-jellyfin'], 1200000, 'job')] : []),
+    item('install-jellyfin', 'acquire', nativeAcquire(state, profile), `Install the pinned Jellyfin ${VERSION} ${profile.route}`, ['install-foundation'], profile.package ? 1800000 : 3600000, 'job'),
+    ...(!profile.package ? [item('install-jellyfin-ffmpeg', 'acquire', portableFfmpeg(state, profile), `Install the checksum-pinned Jellyfin FFmpeg ${FFMPEG_VERSION} portable archive`, ['install-jellyfin'], 3600000, 'job')] : []),
     item('configure-jellyfin', 'configure', nativeConfigure(state, paths, profile), 'Create isolated media, cache, configuration, systemd, and nginx state', [profile.package ? 'install-jellyfin' : 'install-jellyfin-ffmpeg', 'generate-credentials']),
     item('initialize-jellyfin', 'initialize', initializeJellyfin(), 'Complete the local startup wizard from protected credential files', ['configure-jellyfin']),
     item('verify-jellyfin', 'verify', nativeVerify(profile), 'Verify Jellyfin health, public system information, web UI, persistence, identity, and restart recovery', ['initialize-jellyfin'], 900000, 'job')
   ]
   const revertCommands = [
-    item('stop-jellyfin', 'cleanup', nativeStop(paths, profile), 'Stop and remove only the task-owned Jellyfin and nginx services', [], 300000, undefined, 'destructive'),
-    item('remove-jellyfin-files', 'cleanup', `set -eu; rm -rf -- ${[APP_ROOT, DATA_ROOT, CREDENTIALS, ...(profile.package ? PACKAGE_DATA_PATHS : [])].map(quote).join(' ')}`, 'Remove task-owned application, media, cache, configuration, logs, and credentials', ['stop-jellyfin'], 300000, undefined, 'destructive'),
+    item('stop-jellyfin', 'cleanup', nativeStop(state, paths, profile), 'Stop and remove only the task-owned Jellyfin and nginx services', [], 300000, undefined, 'destructive'),
+    item('remove-jellyfin-files', 'cleanup', join([...nativeRollbackGuard(state), `rm -rf -- ${[APP_ROOT, DATA_ROOT, CREDENTIALS, ...(profile.package ? PACKAGE_DATA_PATHS : [])].map(quote).join(' ')}`]), 'Remove task-owned application, media, cache, configuration, logs, and credentials', ['stop-jellyfin'], 300000, undefined, 'destructive'),
     item('restore-foundation', 'cleanup', nativeRestore(state, profile), 'Restore packages, repository, users, and nginx state from the factual baseline', ['remove-jellyfin-files'], 1200000, 'job', 'destructive')
   ]
   return envelope({
@@ -191,10 +191,12 @@ function nativeBaseline (state, paths, profile) {
 }
 
 function nativeFoundation (state, profile) {
+  const snapshotFile = `${state}/packages.foundation`
+  const snapshot = `if [ ! -s ${quote(snapshotFile)} ]; then ${packageSnapshot(profile, snapshotFile)}; fi`
   if (profile.package) {
     const source = ['Types: deb', `URIs: https://repo.jellyfin.org/${profile.os}`, `Suites: ${profile.suite}`, 'Components: main', 'Architectures: amd64', 'Signed-By: /etc/apt/keyrings/jellyfin.gpg']
     return join([
-      'set -eu', 'export DEBIAN_FRONTEND=noninteractive', 'apt-get update', 'apt-get install -y -o DPkg::Lock::Timeout=120 ca-certificates curl gnupg nginx openssl', `curl --fail --location --silent --show-error https://repo.jellyfin.org/jellyfin_team.gpg.key --output ${quote(`${state}/jellyfin.key`)}`, `fingerprint=$(gpg --show-keys --with-colons ${quote(`${state}/jellyfin.key`)} 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }'); [ "$fingerprint" = ${quote(GPG_FINGERPRINT)} ]`, `gpg --dearmor --yes --output /etc/apt/keyrings/jellyfin.gpg ${quote(`${state}/jellyfin.key`)}`, 'chmod 0644 /etc/apt/keyrings/jellyfin.gpg', `printf '%s\\n' ${source.map(quote).join(' ')} > /etc/apt/sources.list.d/jellyfin.sources`, 'chmod 0644 /etc/apt/sources.list.d/jellyfin.sources', 'apt-get update', 'systemctl enable --now nginx', packageSnapshot(profile, `${state}/packages.foundation`)
+      'set -eu', 'export DEBIAN_FRONTEND=noninteractive', 'apt-get update', 'apt-get install -y -o DPkg::Lock::Timeout=120 ca-certificates curl gnupg nginx openssl', `curl --fail --location --silent --show-error https://repo.jellyfin.org/jellyfin_team.gpg.key --output ${quote(`${state}/jellyfin.key`)}`, `fingerprint=$(gpg --show-keys --with-colons ${quote(`${state}/jellyfin.key`)} 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }'); [ "$fingerprint" = ${quote(GPG_FINGERPRINT)} ]`, `gpg --dearmor --yes --output /etc/apt/keyrings/jellyfin.gpg ${quote(`${state}/jellyfin.key`)}`, 'chmod 0644 /etc/apt/keyrings/jellyfin.gpg', `printf '%s\\n' ${source.map(quote).join(' ')} > /etc/apt/sources.list.d/jellyfin.sources`, 'chmod 0644 /etc/apt/sources.list.d/jellyfin.sources', 'apt-get update', 'systemctl enable --now nginx', snapshot
     ])
   }
   const install = profile.family === 'rhel'
@@ -202,12 +204,35 @@ function nativeFoundation (state, profile) {
     : profile.family === 'arch'
       ? 'pacman -S --needed --noconfirm ca-certificates curl tar gzip xz nginx openssl'
       : 'zypper --non-interactive install --no-recommends ca-certificates curl tar gzip xz nginx openssl'
-  return join(['set -eu', install, 'systemctl enable --now nginx', packageSnapshot(profile, `${state}/packages.foundation`)])
+  return join(['set -eu', install, 'systemctl enable --now nginx', snapshot])
 }
 
 function credentialsCommand () {
   return join([
     'set -eu', 'umask 077', `install -d -o root -g root -m 0700 ${quote(CREDENTIALS)}`, `[ -s ${quote(`${CREDENTIALS}/admin_username`)} ] || { printf 'webminai_%s\\n' "$(openssl rand -hex 8)" > ${quote(`${CREDENTIALS}/admin_username`)}; }`, `[ -s ${quote(`${CREDENTIALS}/admin_password`)} ] || openssl rand -hex 32 > ${quote(`${CREDENTIALS}/admin_password`)}`, `chmod 0600 ${quote(`${CREDENTIALS}/admin_username`)} ${quote(`${CREDENTIALS}/admin_password`)}`, `printf '%s\\n' ${quote(CREDENTIALS)}`
+  ])
+}
+
+function portableDownload (artifact, url, digest, bytes) {
+  const partial = `${artifact}.tmp`
+  const valid = file => `printf '%s  %s\\n' ${quote(digest)} ${quote(file)} | sha256sum -c - >/dev/null 2>&1`
+  return join([
+    `for artifact in ${quote(artifact)} ${quote(partial)}; do test ! -L "$artifact"; if [ -e "$artifact" ]; then test -f "$artifact"; fi; done`,
+    `if ! ${valid(artifact)}; then`,
+    `if ! ${valid(partial)}; then`,
+    `if [ -f ${quote(partial)} ] && [ "$(wc -c < ${quote(partial)})" -ge ${bytes} ]; then rm -f -- ${quote(partial)}; fi`,
+    'downloaded=',
+    'for attempt in 1 2 3 4 5 6; do :',
+    `if curl --fail --location --continue-at - --retry 0 --connect-timeout 15 --max-time 540 --max-filesize ${bytes} --silent --show-error --output ${quote(partial)} ${quote(url)}; then downloaded=yes; break; else status=$?; fi`,
+    'case "$status" in 6|7|16|18|28|35|52|55|56|92) :;; *) exit "$status";; esac',
+    '[ "$attempt" -lt 6 ] || exit "$status"',
+    'sleep 2',
+    'done',
+    'test "$downloaded" = yes',
+    'fi',
+    `${valid(partial)} || { rm -f -- ${quote(partial)}; exit 1; }`,
+    `mv -f -- ${quote(partial)} ${quote(artifact)}`,
+    'fi'
   ])
 }
 
@@ -219,14 +244,14 @@ function nativeAcquire (state, profile) {
   }
   const artifact = `${state}/${PORTABLE_ARCHIVE}`
   return join([
-    'set -eu', `if ! [ -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(PORTABLE_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error --output ${quote(`${artifact}.tmp`)} ${quote(PORTABLE_URL)}; printf '%s  %s\\n' ${quote(PORTABLE_SHA256)} ${quote(`${artifact}.tmp`)} | sha256sum -c -; mv -f -- ${quote(`${artifact}.tmp`)} ${quote(artifact)}; fi`, `install -d -o root -g root -m 0755 ${quote(APP_ROOT)}`, `tar -xzf ${quote(artifact)} -C ${quote(APP_ROOT)} --strip-components=1`, `test -x ${quote(profile.binary)}`, `test -f ${quote(`${profile.webdir}/index.html`)}`, packageSnapshot(profile, `${state}/packages.after`), packageAdded(profile, state)
+    'set -eu', portableDownload(artifact, PORTABLE_URL, PORTABLE_SHA256, 110228765), `install -d -o root -g root -m 0755 ${quote(APP_ROOT)}`, `tar -xzf ${quote(artifact)} -C ${quote(APP_ROOT)} --strip-components=1`, `test -x ${quote(profile.binary)}`, `test -f ${quote(`${profile.webdir}/index.html`)}`, packageSnapshot(profile, `${state}/packages.after`), packageAdded(profile, state)
   ])
 }
 
 function portableFfmpeg (state, profile) {
   const artifact = `${state}/${FFMPEG_ARCHIVE}`
   return join([
-    'set -eu', `if ! [ -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(FFMPEG_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then curl --fail --location --retry 5 --retry-all-errors --retry-delay 2 --silent --show-error --output ${quote(`${artifact}.tmp`)} ${quote(FFMPEG_URL)}; printf '%s  %s\\n' ${quote(FFMPEG_SHA256)} ${quote(`${artifact}.tmp`)} | sha256sum -c -; mv -f -- ${quote(`${artifact}.tmp`)} ${quote(artifact)}; fi`, `tar -xJf ${quote(artifact)} -C ${quote(APP_ROOT)}`, `test -x ${quote(profile.ffmpeg)}`
+    'set -eu', portableDownload(artifact, FFMPEG_URL, FFMPEG_SHA256, 58599712), `tar -xJf ${quote(artifact)} -C ${quote(APP_ROOT)}`, `test -x ${quote(profile.ffmpeg)}`
   ])
 }
 
@@ -249,7 +274,7 @@ function archNginxInclude (state) {
 function initializeJellyfin () {
   const base = `http://127.0.0.1:${PORT}/jellyfin`
   return join([
-    'set -eu', `if [ ! -e ${quote(`${CREDENTIALS}/initialized`)} ]; then`, waitUrl(`${base}/Startup/Configuration`, 180), `curl --fail --silent --show-error ${quote(`${base}/Startup/User`)} >/dev/null`, `username=$(cat ${quote(`${CREDENTIALS}/admin_username`)})`, `password=$(cat ${quote(`${CREDENTIALS}/admin_password`)})`, `curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data ${quote(`{"ServerName":"${MARKER}","UICulture":"en-US","MetadataCountryCode":"US","PreferredMetadataLanguage":"en"}`)} ${quote(`${base}/Startup/Configuration`)} >/dev/null`, `curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "{\\"Name\\":\\"$username\\",\\"Password\\":\\"$password\\"}" ${quote(`${base}/Startup/User`)} >/dev/null`, `curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data ${quote('{"EnableRemoteAccess":false,"EnableAutomaticPortMapping":false}')} ${quote(`${base}/Startup/RemoteAccess`)} >/dev/null`, `curl --fail --silent --show-error --request POST ${quote(`${base}/Startup/Complete`)} >/dev/null`, `: > ${quote(`${CREDENTIALS}/initialized`)}`, `chmod 0600 ${quote(`${CREDENTIALS}/initialized`)}`, 'fi', `curl --fail --silent --show-error ${quote(`${base}/System/Info/Public`)} | grep -F ${quote(MARKER)}`, 'printf \'%s\\n\' initialized'
+    'set -eu', `if [ ! -e ${quote(`${CREDENTIALS}/initialized`)} ]; then`, waitUrl(`${base}/Startup/Configuration`, 180), `curl --fail --silent --show-error ${quote(`${base}/Startup/User`)} >/dev/null`, `username=$(sed -n 1p ${quote(`${CREDENTIALS}/admin_username`)})`, `password=$(sed -n 1p ${quote(`${CREDENTIALS}/admin_password`)})`, `curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data ${quote(`{"ServerName":"${MARKER}","UICulture":"en-US","MetadataCountryCode":"US","PreferredMetadataLanguage":"en"}`)} ${quote(`${base}/Startup/Configuration`)} >/dev/null`, `curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data "{\\"Name\\":\\"$username\\",\\"Password\\":\\"$password\\"}" ${quote(`${base}/Startup/User`)} >/dev/null`, `curl --fail --silent --show-error --request POST --header 'Content-Type: application/json' --data ${quote('{"EnableRemoteAccess":false,"EnableAutomaticPortMapping":false}')} ${quote(`${base}/Startup/RemoteAccess`)} >/dev/null`, `curl --fail --silent --show-error --request POST ${quote(`${base}/Startup/Complete`)} >/dev/null`, `: > ${quote(`${CREDENTIALS}/initialized`)}`, `chmod 0600 ${quote(`${CREDENTIALS}/initialized`)}`, 'fi', `curl --fail --silent --show-error ${quote(`${base}/System/Info/Public`)} | grep -F ${quote(MARKER)}`, 'printf \'%s\\n\' initialized'
   ])
 }
 
@@ -259,19 +284,23 @@ function nativeVerify (profile) {
   ])
 }
 
-function nativeStop (paths, profile) {
+function nativeRollbackGuard (state) {
+  return ['set -eu', `if [ ! -e ${quote(state)} ] && [ ! -L ${quote(state)} ]; then printf '%s\\n' already-reverted; exit 0; fi`, `test ! -L ${quote(state)}`, `test -d ${quote(state)}`, `test ! -L ${quote(`${state}/packages.before`)}`, `test -s ${quote(`${state}/packages.before`)}`]
+}
+
+function nativeStop (state, paths, profile) {
   return join([
-    'set -eu', `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, ...(profile.package ? ['systemctl disable --now jellyfin 2>/dev/null || true'] : []), `rm -f -- ${quote(paths.serviceFile)} ${quote(paths.nginxVhost)}`, ...(paths.nginxEnableLink ? [`rm -f -- ${quote(paths.nginxEnableLink)}`] : []), 'systemctl daemon-reload', 'if command -v nginx >/dev/null 2>&1; then nginx -t', 'systemctl is-active --quiet nginx && systemctl reload nginx || true', 'fi'
+    ...nativeRollbackGuard(state), `systemctl disable --now ${quote(SERVICE)}`, ...(profile.package ? ['systemctl disable --now jellyfin'] : []), `rm -f -- ${quote(paths.serviceFile)} ${quote(paths.nginxVhost)}`, ...(paths.nginxEnableLink ? [`rm -f -- ${quote(paths.nginxEnableLink)}`] : []), 'systemctl daemon-reload', 'if command -v nginx >/dev/null 2>&1; then nginx -t', 'if systemctl is-active --quiet nginx; then systemctl reload nginx; fi', 'fi'
   ])
 }
 
 function nativeRestore (state, profile) {
-  const commands = ['set -eu', `[ -d ${quote(state)} ] || { printf '%s\\n' already-reverted; exit 0; }`]
+  const commands = nativeRollbackGuard(state)
   if (profile.family === 'arch') commands.push(`if [ -e ${quote(`${state}/nginx.include.added`)} ] && [ -s ${quote(`${state}/nginx.conf.before`)} ]; then cat ${quote(`${state}/nginx.conf.before`)} > /etc/nginx/nginx.conf; fi`)
   commands.push(removeAddedPackages(profile, `${state}/packages.added`))
-  if (profile.package) commands.push('rm -f /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg', 'apt-get update >/dev/null 2>&1 || true')
-  commands.push(`if getent passwd ${quote(profile.user)} >/dev/null; then userdel ${quote(profile.user)} 2>/dev/null || true; fi`)
-  commands.push(`if systemctl cat nginx >/dev/null 2>&1; then if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx >/dev/null 2>&1 || true; else systemctl disable nginx >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx 2>/dev/null || true; fi; fi`, `rm -rf -- ${quote(state)}`)
+  if (profile.package) commands.push('rm -f /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg', 'apt-get update >/dev/null 2>&1')
+  commands.push(`if getent passwd ${quote(profile.user)} >/dev/null; then userdel ${quote(profile.user)}; else status=$?; [ "$status" -eq 2 ] || exit "$status"; fi`)
+  commands.push(`if systemctl cat nginx >/dev/null 2>&1; then if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx; else systemctl disable nginx; fi; if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx; fi; fi`, `rm -rf -- ${quote(state)}`)
   return join(commands)
 }
 
@@ -328,10 +357,10 @@ function nginxConfig (upstream) {
 }
 
 function packageSnapshot (profile, file) {
-  if (profile.family === 'debian') return `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)} | LC_ALL=C sort -u > ${quote(file)}`
-  if (profile.family === 'arch') return `pacman -Qq | LC_ALL=C sort -u > ${quote(file)}`
-  if (profile.family === 'suse') return `rpm -qa --qf '%{NAME}\\n' | LC_ALL=C sort -u > ${quote(file)}`
-  return `rpm -qa --qf '%{NAME}\\n' | LC_ALL=C sort -u > ${quote(file)}`
+  const query = profile.family === 'debian'
+    ? `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)}`
+    : profile.family === 'arch' ? 'pacman -Qq' : "rpm -qa --qf '%{NAME}\\n'"
+  return `snapshot_packages=$(${query}) || exit $?; [ -n "$snapshot_packages" ] || { printf '%s\\n' PACKAGE_SNAPSHOT_UNAVAILABLE >&2; exit 1; }; printf '%s\\n' "$snapshot_packages" | LC_ALL=C sort -u > ${quote(file)}`
 }
 
 function packageAdded (profile, state) {
@@ -341,14 +370,14 @@ function packageAdded (profile, state) {
 
 function removeAddedPackages (profile, list) {
   if (profile.family === 'debian') return removeDebianPackages(list)
-  if (profile.family === 'arch') return `if [ -s ${quote(list)} ]; then if grep -Fxq nginx ${quote(list)}; then systemctl stop nginx; fi; packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || pacman -Rns --noconfirm $packages || true; fi`
-  if (profile.family === 'suse') return `if [ -s ${quote(list)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || zypper --non-interactive remove --clean-deps $packages || true; fi`
-  return `if [ -s ${quote(list)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || dnf remove -y $packages || true; fi`
+  if (profile.family === 'arch') return `if [ -s ${quote(list)} ]; then if grep -Fxq nginx ${quote(list)}; then systemctl stop nginx; fi; packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || pacman -Rns --noconfirm $packages; fi`
+  if (profile.family === 'suse') return `if [ -s ${quote(list)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || zypper --non-interactive remove --clean-deps $packages; fi`
+  return `if [ -s ${quote(list)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || dnf remove -y $packages; fi`
 }
 
 function removeDebianPackages (list) {
   const before = list.replace(/packages\.added$/u, 'packages.before')
-  return `if [ -s ${quote(list)} ]; then test -s ${quote(before)}; packages=$(awk 'FILENAME == ARGV[1] { before[$1]=1; next } !($1 in before) { print $1 }' ${quote(before)} ${quote(list)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages || true; fi`
+  return `if [ -s ${quote(list)} ]; then test -s ${quote(before)}; packages=$(awk 'FILENAME == ARGV[1] { before[$1]=1; next } !($1 in before) { print $1 }' ${quote(before)} ${quote(list)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages; fi`
 }
 
 function composeCommand () {

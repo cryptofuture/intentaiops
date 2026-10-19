@@ -19,6 +19,7 @@ import { RemoteRecoveryState } from './remote-recovery-state.js'
 import { RemoteRecoveryTransport } from './remote-recovery-transport.js'
 import { commonTaskRecoveryManifest, commonTaskRecoverySupported, RemoteCommonTaskJournal, retrieveRecoveryExecution, regenerateCommonTaskRecovery } from './remote-common-task-recovery.js'
 import { inspectRecoveryBaseline } from './remote-recovery-baseline.js'
+import { startExecutionHeartbeat } from './execution-heartbeat.js'
 
 const REMOTE_RECOVERY_EXECUTION = Symbol('reviewed remote common-task recovery')
 
@@ -336,11 +337,7 @@ export class AdminService {
     const recoveryState = this.remoteRecovery.get(settings.servers?.[serverId]?.hostFingerprint, taskId)
     if (recoveryState?.manifest.recoveryId && recoveryAuthorization !== REMOTE_RECOVERY_EXECUTION) throw new Error('Use remote common-task recovery to recheck the source head, baseline and ownership before execution')
     const lease = this.tasks.acquireExecution(serverId, taskId, plan)
-    let ownershipError
-    const heartbeat = setInterval(() => {
-      try { this.tasks.renewExecution(serverId, taskId, lease.owner) } catch (error) { ownershipError = error }
-    }, 10000)
-    heartbeat.unref()
+    const heartbeat = startExecutionHeartbeat(this.tasks, serverId, taskId, lease.owner)
     try {
       const saved = this.tasks.get(serverId, taskId)
       const remoteJournal = await this.remoteTaskJournal({ settings, serverId, taskId, plan, server, task: saved })
@@ -349,7 +346,24 @@ export class AdminService {
       if (this.tasks.rollbackState(serverId, taskId).some(command => command.status !== 'pending')) throw new Error('rollback has started; do not resume the original deployment')
       if (state.some(command => ['uncertain', 'failed'].includes(command.status))) throw new Error('task requires operator reconciliation before continuation; no commands were dispatched')
       const previous = this.tasks.get(serverId, taskId).results ?? []
-      if (this.tasks.executionEvents(serverId, taskId).length) this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_resumed' })
+      const recordExecutionEvent = async event => {
+        heartbeat.check()
+        if (event.type !== 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
+        if (remoteJournal) {
+          let baselineDigest = null
+          if (event.type === 'command_completed' && commonTaskRecoverySupported(saved.catalogId, recoveryState?.manifest.platform)) {
+            baselineDigest = await inspectRecoveryBaseline(this.netdata(server), saved.catalogId, taskId, plan.compatibilityManifest?.host?.family).catch(() => null)
+          }
+          await remoteJournal.append(event, { baselineDigest })
+        }
+        await executionObserver?.(event)
+        if (event.type === 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
+        if (event.type === 'execution_paused' && event.metadata?.reason === 'recovery_requires_approval') {
+          const control = this.tasks.control(serverId, taskId)
+          if (control.action === 'run') this.tasks.setControl(serverId, taskId, 'pause', control.version)
+        }
+      }
+      if (this.tasks.executionEvents(serverId, taskId).length) await recordExecutionEvent({ type: 'execution_resumed' })
       const results = await executeApprovedPlan({
         plan,
         policy: rules.policy,
@@ -363,40 +377,24 @@ export class AdminService {
         beforeCommand: async (item, { recheck = false } = {}) => {
           const control = this.tasks.control(serverId, taskId)
           if (control.action !== 'run') {
-            this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_paused', metadata: { aborted: control.action === 'abort' } })
+            await recordExecutionEvent({ type: 'execution_paused', metadata: { aborted: control.action === 'abort' } })
             return false
           }
           if (!recheck && beforeCommand && await beforeCommand(item) === false) {
-            this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'execution_paused' })
+            await recordExecutionEvent({ type: 'execution_paused' })
             return false
           }
           return true
         },
         completedCommandIds: state.filter(command => command.status === 'completed').map(command => command.commandId),
-        onExecutionEvent: async event => {
-          if (ownershipError) throw ownershipError
-          if (event.type !== 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
-          if (remoteJournal) {
-            let baselineDigest = null
-            if (event.type === 'command_completed' && commonTaskRecoverySupported(saved.catalogId, recoveryState?.manifest.platform)) {
-              baselineDigest = await inspectRecoveryBaseline(this.netdata(server), saved.catalogId, taskId).catch(() => null)
-            }
-            await remoteJournal.append(event, { baselineDigest })
-          }
-          await executionObserver?.(event)
-          if (event.type === 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
-          if (event.type === 'execution_paused' && event.metadata?.reason === 'recovery_requires_approval') {
-            const control = this.tasks.control(serverId, taskId)
-            if (control.action === 'run') this.tasks.setControl(serverId, taskId, 'pause', control.version)
-          }
-        },
+        onExecutionEvent: recordExecutionEvent,
         requireRevert
       })
       const confirmed = state.filter(command => command.status === 'completed').map(command => previous.find(result => result.id === command.commandId && result.status === 'completed') ?? { id: command.commandId, status: 'completed', result: { exitCode: 0, stdout: '[completion confirmed by execution journal]', stderr: '' } })
       if (remoteJournal && !this.tasks.executionState(serverId, taskId).some(command => command.status === 'uncertain')) await remoteJournal.release()
       return [...confirmed, ...results]
     } finally {
-      clearInterval(heartbeat)
+      heartbeat.stop()
       this.tasks.releaseExecution(serverId, taskId, lease.owner)
     }
   }
@@ -411,10 +409,7 @@ export class AdminService {
     const revertPlan = reviewedPlan ?? savedRevertPlan(task)
     const remoteJournal = await this.remoteTaskJournal({ settings, serverId, taskId, plan: reviewedPlan ? { ...task.plan, revertCommands: reviewedPlan.commands } : task.plan, server, task })
     const lease = this.tasks.acquireExecution(serverId, taskId, task.plan)
-    const heartbeat = setInterval(() => {
-      try { this.tasks.renewExecution(serverId, taskId, lease.owner) } catch {}
-    }, 10000)
-    heartbeat.unref()
+    const heartbeat = startExecutionHeartbeat(this.tasks, serverId, taskId, lease.owner)
     try {
       if (reviewedPlan) {
         const executed = new Set(this.tasks.executionState(serverId, taskId).filter(command => command.status !== 'pending').map(command => command.commandId))
@@ -438,6 +433,7 @@ export class AdminService {
         onProgress: event => { this.tasks.appendProgress(serverId, taskId, event); return onProgress?.(event) },
         completedCommandIds: [...last.values()].filter(event => event.type === 'command_completed').map(event => event.commandId),
         onExecutionEvent: async event => {
+          heartbeat.check()
           if (event.type !== 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { ...event, metadata: { ...event.metadata, operation: 'rollback', rollbackRevision } })
           await remoteJournal?.append(event, { operation: 'rollback' })
           if (event.type === 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { ...event, metadata: { ...event.metadata, operation: 'rollback', rollbackRevision } })
@@ -452,7 +448,7 @@ export class AdminService {
       if (remoteJournal && !this.tasks.rollbackState(serverId, taskId).some(command => command.status === 'uncertain')) await remoteJournal.release()
       return combined
     } finally {
-      clearInterval(heartbeat)
+      heartbeat.stop()
       this.tasks.releaseExecution(serverId, taskId, lease.owner)
     }
   }
@@ -464,16 +460,14 @@ export class AdminService {
   async reconcileTask ({ settings, passphrase, serverId, taskId, onProgress }) {
     const task = this.tasks.get(serverId, taskId)
     const lease = this.tasks.acquireExecution(serverId, taskId, task.plan)
-    const heartbeat = setInterval(() => {
-      try { this.tasks.renewExecution(serverId, taskId, lease.owner) } catch {}
-    }, 10000)
-    heartbeat.unref()
+    const heartbeat = startExecutionHeartbeat(this.tasks, serverId, taskId, lease.owner)
     try {
       const server = await this.serverSecrets({ settings, passphrase, serverId })
       const netdata = this.netdata(server)
       const rollbackPlans = [savedRevertPlan(task), ...this.tasks.revisions(serverId, taskId).filter(revision => revision.approved && revision.plan.operatorRollback).map(revision => revision.plan)]
       let remoteJournal
       for (const command of [...this.tasks.executionState(serverId, taskId), ...this.tasks.rollbackState(serverId, taskId)]) {
+        heartbeat.check()
         if (command.status !== 'uncertain') continue
         this.tasks.renewExecution(serverId, taskId, lease.owner)
         const report = progress => {
@@ -517,7 +511,7 @@ export class AdminService {
         remoteJournal = await this.remoteTaskJournal({ settings, serverId, taskId, server, task, plan: command.rollbackRevision ? { ...task.plan, revertCommands: commands } : task.plan })
         if (remoteJournal) {
           const baselineDigest = completed && !command.rollbackRevision && commonTaskRecoverySupported(task.catalogId, 'linux')
-            ? await inspectRecoveryBaseline(netdata, task.catalogId, taskId).catch(() => null)
+            ? await inspectRecoveryBaseline(netdata, task.catalogId, taskId, task.plan.compatibilityManifest?.host?.family).catch(() => null)
             : null
           await remoteJournal.append(completion, { operation: command.rollbackRevision ? 'rollback' : 'deployment', baselineDigest })
         }
@@ -525,7 +519,7 @@ export class AdminService {
       if (remoteJournal && ![...this.tasks.executionState(serverId, taskId), ...this.tasks.rollbackState(serverId, taskId)].some(command => command.status === 'uncertain')) await remoteJournal.release()
       return this.tasks.executionState(serverId, taskId)
     } finally {
-      clearInterval(heartbeat)
+      heartbeat.stop()
       this.tasks.releaseExecution(serverId, taskId, lease.owner)
     }
   }
@@ -624,7 +618,7 @@ export class AdminService {
     const original = verified.records[0]
     if (!commonTaskRecoverySupported(original.catalogId, original.platform) || original.platform !== options.platform) throw new Error('Common-task baseline validation is not registered for this target and task family')
     if (verified.records.some(record => record.operation !== 'deployment')) throw new Error('Recovery or rollback has already started; inspect that operation instead of generating another cleanup')
-    const baselineDigest = await inspectRecoveryBaseline(client, original.catalogId, original.taskId)
+    const baselineDigest = await inspectRecoveryBaseline(client, original.catalogId, original.taskId, options.linuxContext?.management?.family)
     const proposal = regenerateCommonTaskRecovery({ ...verified, options, baselineDigest })
     const task = this.createTask(serverId, `Reviewed remote common-task recovery: ${original.catalogId}, execution ${executionId}`)
     this.saveTaskPlan(serverId, task.id, proposal.plan)
@@ -643,7 +637,7 @@ export class AdminService {
     if (saved.sequence !== meta.sourceSequence || saved.head !== meta.sourceHead) throw new Error('Recovery already started; inspect and reconcile before further changes')
     const verified = await retrieveRecoveryExecution({ transport, state: this.remoteRecovery, target, executionId: meta.executionId })
     if (verified.head !== meta.sourceHead) throw new Error('Remote recovery approval is stale')
-    const baselineDigest = await inspectRecoveryBaseline(client, meta.catalogId, meta.taskId)
+    const baselineDigest = await inspectRecoveryBaseline(client, meta.catalogId, meta.taskId, options.linuxContext?.management?.family)
     const proposal = regenerateCommonTaskRecovery({ ...verified, options, baselineDigest, recoveryId: meta.recoveryId })
     const task = this.tasks.get(serverId, taskId)
     if (planFingerprint(proposal.plan) !== meta.recoveryPlanDigest || planFingerprint(task.plan) !== meta.recoveryPlanDigest) throw new Error('Recovery plan changed; fresh review is required')

@@ -65,7 +65,7 @@ pkg-config --modversion openssl
 
 The cross-platform bootstrap installs a private Node.js 24 runtime only when Node is absent, then installs the committed package tarball:
 
-On repeat POSIX installs, a compatible private runtime under the same install root is reused when no system Node exists. An incompatible system Node still requires an explicit upgrade; an incomplete or incompatible private runtime is not reused. The Intent AI Ops Linux installation task has a 30-minute signed-job limit, without automatic retry of the installation command after interruption. Public Node downloads have three bounded retries and retain SHA-256 verification.
+On repeat POSIX bootstrap installs, a compatible private runtime under the same install root is reused when no system Node exists. That standalone installer still refuses incompatible system Node. The verified non-Alpine Linux common task instead provisions checksum-verified private Node24.16.0 beneath its owned install root when system Node is incompatible, leaving system Node unchanged. Linux task jobs set umask022, remove bootstrap downloads after verification, and retain the 30-minute signed-job limit without command replay. An Arch lab run confirmed private24.16.0 alongside system22.23.3 and removal of only the private runtime during reviewed cleanup. Public Node downloads have three bounded retries and retain SHA-256 verification.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.sh | sh
@@ -1092,9 +1092,13 @@ The script never uses the current kubectl context implicitly; every kubectl and 
 See [remote recovery implementation and limits](docs/remote-common-task-recovery.md)
 before changing its contracts. The host CLI records new unchanged catalog runs
 through the existing signed Stage2 path. Recovery regenerates trusted code;
-remote records never supply executable rollback. Linux systemd service/timer
-fixtures and native non-Alpine CLI installation have registered baseline profiles;
-the CLI-install profile has a reviewed Debian live recovery. Key rotation is explicitly
+remote records never supply executable rollback. Linux systemd service/timer,
+logrotate and tmpfiles fixtures and native non-Alpine CLI installation have
+registered baseline profiles with reviewed Debian live recovery. Native n8n
+adds guarded package/repository/ownership checks and one dependency-ordered
+cleanup job; fixture tests and current-profile Debian60/recovery63 pass.
+Its old baselines do not inherit approval or compatibility after template changes.
+Key rotation is explicitly
 reviewed, archives public verification keys and never silently changes a pin.
 Shared-controller browser actions require separate proposal and execution approval.
 Reviewed owner takeover is limited to confirmed untouched sources; partial or

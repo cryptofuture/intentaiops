@@ -243,8 +243,10 @@ choose **Remote common-task recovery**. Select an execution to verify its
 signature and host identity, then request a newly generated recovery plan.
 Review and approve that plan before anything changes.
 
-The audited recovery profiles cover the Linux systemd service and timer
-fixtures, plus native Intent AI Ops CLI installation on non-Alpine Linux.
+The audited recovery profiles cover the Linux systemd service, timer, logrotate
+and tmpfiles fixtures, plus native Intent AI Ops CLI installation on non-Alpine Linux.
+Native n8n has an additional guarded recovery profile with fixture coverage
+and a reviewed Debian lab recovery.
 The CLI-install profile has fixture coverage and a reviewed Debian lab recovery.
 Other task families can be recorded but cannot yet use verified remote
 rollback. Changed catalogs, missing or modified baseline files, partial execution

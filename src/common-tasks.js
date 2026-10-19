@@ -604,7 +604,7 @@ const DEFINITIONS = [
   ...['linux', 'freebsd', 'macos', 'windows'].map(platform => ({
     id: `intent-ai-ops-${platform}`,
     label: `Install Intent AI Ops on ${platform}`,
-    description: 'Install the reviewed GitHub CLI package and bootstrap Node.js 24 only when Node is absent.',
+    description: platform === 'linux' ? 'Install the reviewed CLI with Node.js 24; use a private runtime for incompatible system Node on non-Alpine Linux.' : 'Install the reviewed GitHub CLI package and bootstrap Node.js 24 only when Node is absent.',
     category: 'application',
     platform,
     build: (taskId, definition, options) => ({ ...buildIntentAiOpsInstallTask(taskId, platform, options.intentAiOpsInstallSource, options.linuxContext), definition })

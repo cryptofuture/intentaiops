@@ -228,7 +228,7 @@ function credentialsCommand () {
 function ubuntuDatabase (state) {
   return join([
     'set -eu', 'ready=', 'for attempt in $(seq 1 60); do mysqladmin ping --silent >/dev/null 2>&1 && ready=yes && break; sleep 2; done', '[ "$ready" = yes ]',
-    `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
+    `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`,
     applicationDatabaseCommand({ state, database: DATABASE, user: DATABASE_USER, host: '127.0.0.1', credentials: CREDENTIALS, client: 'mysql', passwordFile: 'database_password', collation: 'utf8mb4_0900_ai_ci' }),
     `MYSQL_PWD="$password" mysql --protocol=TCP -h 127.0.0.1 -u ${DATABASE_USER} ${DATABASE} -e 'SELECT 1' >/dev/null`, 'printf \'%s\\n\' database-ready'
   ])
@@ -255,7 +255,7 @@ function ubuntuConfigure (paths) {
     'set -eu', `id webminai-ghost >/dev/null 2>&1 || useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-ghost`,
     `install -d -o webminai-ghost -g webminai-ghost -m 0750 ${quote(DATA_ROOT)} ${quote(`${DATA_ROOT}/content`)}`,
     `if [ ! -d ${quote(`${DATA_ROOT}/content/themes/source`)} ]; then cp -a ${quote(`${APP_ROOT}/content/`)}. ${quote(`${DATA_ROOT}/content/`)}; fi`, `chown -R webminai-ghost:webminai-ghost ${quote(`${DATA_ROOT}/content`)}`,
-    `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`, `chgrp webminai-ghost ${quote(CREDENTIALS)}`, `chmod 0710 ${quote(CREDENTIALS)}`,
+    `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`, `chgrp webminai-ghost ${quote(CREDENTIALS)}`, `chmod 0710 ${quote(CREDENTIALS)}`,
     `umask 077; printf 'database__connection__password=%s\\n' "$password" > ${quote(`${CREDENTIALS}/service.env`)}`, `chown root:webminai-ghost ${quote(`${CREDENTIALS}/service.env`)}`, `chmod 0640 ${quote(`${CREDENTIALS}/service.env`)}`,
     "primary=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (field=1; field<=NF; field++) if ($field == \"src\") { print $(field+1); exit }}' || true)", "[ -n \"$primary\" ] || primary=$(hostname -I 2>/dev/null | awk '{print $1}')", "case \"$primary\" in ''|*[!0-9a-fA-F:.]*) printf 'could not resolve a safe primary address\\n' >&2; exit 1;; esac",
     `printf '%s\\n' ${config.split('\n').map(quote).join(' ')} | sed "s/__PRIMARY__/$primary/" > ${quote(`${APP_ROOT}/config.production.json`)}`, `chown webminai-ghost:webminai-ghost ${quote(`${APP_ROOT}/config.production.json`)}`, `chmod 0640 ${quote(`${APP_ROOT}/config.production.json`)}`,
@@ -268,7 +268,7 @@ function ubuntuConfigure (paths) {
 function ubuntuVerify () {
   return join([
     'set -eu', waitUrl(`http://127.0.0.1:${GHOST_PORT}/blog/`, 180),
-    `test -d ${quote(`${DATA_ROOT}/content`)}`, `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
+    `test -d ${quote(`${DATA_ROOT}/content`)}`, `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`,
     `MYSQL_PWD="$password" mysql --protocol=TCP -h 127.0.0.1 -u ${DATABASE_USER} ${DATABASE} --batch --skip-column-names -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${DATABASE}'" | awk '$1 > 0 { ok=1 } END { exit !ok }'`,
     `curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${PORT}/ | grep -Fx ${quote(MARKER)}`,
     `curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/blog/ >/dev/null`,
@@ -333,7 +333,7 @@ function writeCompose () {
   return join([
     'set -eu', `install -d -o root -g root -m 0755 ${quote(SERVICE_ROOT)}`,
     "primary=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (field=1; field<=NF; field++) if ($field == \"src\") { print $(field+1); exit }}' || true)", "[ -n \"$primary\" ] || primary=$(hostname -I 2>/dev/null | awk '{print $1}')", "case \"$primary\" in ''|*[!0-9a-fA-F:.]*) printf 'could not resolve a safe primary address\\n' >&2; exit 1;; esac",
-    `password=$(cat ${quote(`${CREDENTIALS}/database_password`)}); root_password=$(cat ${quote(`${CREDENTIALS}/database_root_password`)})`,
+    `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)}); root_password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_root_password`)})`,
     `umask 077; printf 'MYSQL_PASSWORD=%s\\nMYSQL_ROOT_PASSWORD=%s\\ndatabase__connection__password=%s\\nurl=http://%s:${PORT}/blog/\\nprivacy__useUpdateCheck=false\\n' "$password" "$root_password" "$password" "$primary" > ${quote(`${CREDENTIALS}/credentials.env`)}`, `chmod 0600 ${quote(`${CREDENTIALS}/credentials.env`)}`,
     `printf '%s\\n' ${compose.split('\n').map(quote).join(' ')} > ${quote(`${SERVICE_ROOT}/compose.yaml`)}`, `chmod 0644 ${quote(`${SERVICE_ROOT}/compose.yaml`)}`,
     `printf '%s\\n' ${nginx.split('\n').map(quote).join(' ')} > ${quote(`${SERVICE_ROOT}/nginx.conf`)}`, `chmod 0644 ${quote(`${SERVICE_ROOT}/nginx.conf`)}`,

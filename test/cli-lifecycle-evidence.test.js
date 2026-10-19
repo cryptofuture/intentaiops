@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
-import { assertCliLifecycleEvidence, assertCliReviewedRollbackEvidence } from '../scripts/assert-cli-lifecycle.js'
+import { assertCliLifecycleEvidence, assertCliReviewedRollbackEvidence, findCliLifecycleEvidence } from '../scripts/assert-cli-lifecycle.js'
 import { assertCompletedExecutionIsNotReplayed } from '../scripts/audit-linux-cli-history.js'
 import { buildCommonTask } from '../src/common-tasks.js'
 import { planFingerprint } from '../src/execution-journal.js'
@@ -47,6 +47,29 @@ function ordered (value) {
 
 test('CLI lifecycle evidence proves unchanged repeat state, both rollbacks and no duplicate dispatch', () => {
   assert.deepEqual(assertCliLifecycleEvidence(fixture()), { firstTask: 2, repeatTask: 3, commands: 1, rollbackCommands: 1, scope: 'reviewed state probe and single-dispatch journal evidence' })
+})
+
+test('lifecycle discovery requires the complete ordered two-apply two-rollback evidence', () => {
+  const value = fixture()
+  assert.deepEqual(findCliLifecycleEvidence(Object.values(value), value.first), { baseline: 1, first: 2, repeat: 3, afterFirstRevert: 4, afterSecondRevert: 5 })
+  for (const key of ['baseline', 'repeat', 'afterFirstRevert', 'afterSecondRevert']) {
+    assert.equal(findCliLifecycleEvidence(Object.entries(value).filter(([name]) => name !== key).map(([, task]) => task), value.first), null)
+  }
+  value.repeat.results.at(-1).result.stdout = 'changed state'
+  assert.equal(findCliLifecycleEvidence(Object.values(value), value.first), null)
+})
+
+test('lifecycle discovery refuses unknown attempts, changed definitions and excessive history', () => {
+  for (const change of [
+    value => { value.repeat.events.find(event => event.type === 'command_completed').type = 'command_outcome_unknown' },
+    value => { value.repeat.plan.commands[1].command = 'different apply' },
+    value => { value.afterSecondRevert.results[0].result.stdout = '[remote output withheld]' }
+  ]) {
+    const value = fixture()
+    change(value)
+    assert.equal(findCliLifecycleEvidence(Object.values(value), value.first), null)
+  }
+  assert.throws(() => findCliLifecycleEvidence(Array(1025), fixture().first), /inspection limit/u)
 })
 
 test('completed common-task evidence can be replay-checked without contacting any target', async () => {
@@ -160,6 +183,7 @@ for (const [name, change] of [
   ['orphan completion', value => { const done = value.first.events.find(event => event.type === 'command_completed'); value.first.events.splice(value.first.events.indexOf(done) + 1, 0, { ...done, attemptId: 'unrecorded-attempt' }); ordered(value) }],
   ['unresolved observation', value => value.first.events.push({ ...value.first.events.at(-5), type: 'command_outcome_unknown', metadata: {} })],
   ['changed apply', value => { value.repeat.plan.commands[1].command = 'different-action' }],
+  ['changed diagnostic', value => { value.repeat.plan.commands[1].diagnostic = { kind: 'service', target: 'unrelated.service' } }],
   ['changed rollback', value => { value.repeat.plan.revertCommands = [{ ...value.repeat.plan.revertCommands[0], command: 'different-rollback' }] }],
   ['changed applied state', value => { value.repeat.results.at(-1).result.stdout = 'different-applied-state' }],
   ['baseline not restored', value => { value.afterFirstRevert.results[0].result.stdout = 'different-baseline' }],
@@ -175,7 +199,7 @@ for (const [name, change] of [
   test(`CLI lifecycle evidence rejects ${name}`, () => {
     const value = fixture()
     change(value)
-    if (['changed apply', 'changed rollback'].includes(name)) for (const event of value.repeat.events) event.revision = planFingerprint(value.repeat.plan)
+    if (['changed apply', 'changed rollback', 'changed diagnostic'].includes(name)) for (const event of value.repeat.events) event.revision = planFingerprint(value.repeat.plan)
     assert.throws(() => assertCliLifecycleEvidence(value))
   })
 }
@@ -201,4 +225,38 @@ test('CLI lifecycle checker reads history without a vault key, remote calls or w
   assert.equal(JSON.parse(result.stdout).passed, true)
   assert.deepEqual(await readFile(databasePath), bytes)
   assert.deepEqual(await readFile(settingsPath), settings)
+})
+
+test('strict application history audit fails missing restoration evidence without remote calls or writes', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-strict-history-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(path.join(root, 'history'))
+  await writeFile(path.join(root, 'settings.json'), JSON.stringify({ servers: { 'webminai-fixture': { historyId: 'history' } } }))
+  const filename = path.join(root, 'history/tasks.sqlite3')
+  const database = new Database(filename)
+  database.exec('CREATE TABLE tasks(id INTEGER PRIMARY KEY,status TEXT,kind TEXT,catalog_id TEXT,plan_json TEXT,results_json TEXT,revert_results_json TEXT); CREATE TABLE execution_events(id INTEGER PRIMARY KEY,task_id INTEGER,command_id TEXT,attempt_id TEXT,revision TEXT,type TEXT,metadata_json TEXT); CREATE TABLE plan_revisions(id INTEGER PRIMARY KEY,task_id INTEGER,approved INTEGER,plan_json TEXT)')
+  for (const task of Object.values(fixture())) {
+    Object.assign(task.plan, { summary: 'Fixture', changeOverview: 'Fixture only', modifiedFiles: [] })
+    database.prepare('INSERT INTO tasks VALUES(?,?,?,?,?,?,?)').run(task.id, task.status, task.kind, task.kind === 'catalog' ? 'n8n-linux' : null, JSON.stringify(task.plan), JSON.stringify(task.results), JSON.stringify(task.revertResults))
+    for (const event of task.events) database.prepare('INSERT INTO execution_events VALUES(?,?,?,?,?,?,?)').run(event.id, task.id, event.commandId, event.attemptId, planFingerprint(task.plan), event.type, JSON.stringify(event.metadata))
+  }
+  database.close()
+  const run = mode => spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/audit-linux-cli-history.js', import.meta.url)), root, ...(mode ? ['--require-repeat-restoration'] : [])], { encoding: 'utf8', env: { PATH: process.env.PATH } })
+  let bytes = await readFile(filename)
+  const complete = run(true)
+  assert.equal(complete.status, 0, complete.stderr)
+  assert.equal(JSON.parse(complete.stdout.trim().split('\n').at(-1)).repeatRestorationCycles, 1)
+  assert.deepEqual(await readFile(filename), bytes)
+  const changed = new Database(filename)
+  changed.prepare('UPDATE tasks SET results_json = ? WHERE id = 5').run(JSON.stringify([{ id: 'probe', status: 'completed', result: { exitCode: 0, stdout: 'not restored' } }]))
+  changed.close()
+  bytes = await readFile(filename)
+  assert.equal(run(false).status, 0)
+  const incomplete = run(true)
+  assert.equal(incomplete.status, 1, incomplete.stderr)
+  const summary = JSON.parse(incomplete.stdout.trim().split('\n').at(-1))
+  assert.equal(summary.passed, false)
+  assert.equal(summary.missingRepeatRestoration, 1)
+  assert.equal(summary.hostConnections, 0)
+  assert.deepEqual(await readFile(filename), bytes)
 })

@@ -245,7 +245,7 @@ function nativeConfigure (taskId, state, paths, profile) {
   const nginx = ['server {', `    listen ${PORT};`, '    server_name _;', '    location = / { default_type text/plain; return 200 "' + MARKER + '\\n"; }', '    location /web/ {', `        proxy_pass http://127.0.0.1:${APP_PORT};`, '        proxy_set_header Host $host;', '        proxy_set_header X-Real-IP $remote_addr;', '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;', '        proxy_set_header X-Forwarded-Proto $scheme;', '    }', '}'].join('\n')
   return join([
     'set -eu', 'id odoo >/dev/null 2>&1', `install -d -o odoo -g odoo -m 0750 ${quote(DATA_ROOT)} ${quote(`${DATA_ROOT}/data`)} ${quote(`${DATA_ROOT}/addons`)}`,
-    `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`, `admin=$(cat ${quote(`${CREDENTIALS}/admin_password`)})`, `chgrp odoo ${quote(CREDENTIALS)}`, `chmod 0710 ${quote(CREDENTIALS)}`,
+    `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`, `admin=$(sed -n 1p ${quote(`${CREDENTIALS}/admin_password`)})`, `chgrp odoo ${quote(CREDENTIALS)}`, `chmod 0710 ${quote(CREDENTIALS)}`,
     `umask 077; printf '%s\\n' '[options]' "admin_passwd = $admin" 'db_host = 127.0.0.1' 'db_port = 5432' 'db_user = ${DATABASE_USER}' "db_password = $password" 'db_name = ${DATABASE}' 'dbfilter = ^${DATABASE}$' 'list_db = False' 'proxy_mode = True' 'http_interface = 127.0.0.1' 'http_port = ${APP_PORT}' 'data_dir = ${DATA_ROOT}/data' > ${quote(`${CREDENTIALS}/odoo.conf`)}`,
     `chown root:odoo ${quote(`${CREDENTIALS}/odoo.conf`)}`, `chmod 0640 ${quote(`${CREDENTIALS}/odoo.conf`)}`,
     `printf '%s\\n' ${unit.split('\n').map(quote).join(' ')} > ${quote(paths.serviceFile)}`, `chmod 0644 ${quote(paths.serviceFile)}`, `printf '%s\\n' ${bootstrap.split('\n').map(quote).join(' ')} > ${quote(paths.bootstrapFile)}`, `chmod 0644 ${quote(paths.bootstrapFile)}`, `printf '%s\\n' ${nginx.split('\n').map(quote).join(' ')} > ${quote(paths.nginxVhost)}`, `chmod 0644 ${quote(paths.nginxVhost)}`,
@@ -256,7 +256,7 @@ function nativeConfigure (taskId, state, paths, profile) {
 
 function nativeVerify (profile) {
   return join([
-    'set -eu', waitUrl(`http://127.0.0.1:${APP_PORT}/web/login?db=${DATABASE}`, 180), `odoo --version | grep -F ${quote(SERIES)}`, `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
+    'set -eu', waitUrl(`http://127.0.0.1:${APP_PORT}/web/login?db=${DATABASE}`, 180), `odoo --version | grep -F ${quote(SERIES)}`, `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`,
     `PGPASSWORD="$password" psql -h 127.0.0.1 -U ${quote(DATABASE_USER)} -d ${quote(DATABASE)} -Atqc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" | awk '$1 > 0 { ok=1 } END { exit !ok }'`, `test -d ${quote(`${DATA_ROOT}/data`)}`,
     `curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${PORT}/ | grep -Fx ${quote(MARKER)}`, `curl --fail --silent --show-error --max-time 5 'http://127.0.0.1:${PORT}/web/login?db=${DATABASE}' | grep -F 'Odoo'`,
     `systemctl restart ${quote(SERVICE)}`, waitUrl(`http://127.0.0.1:${APP_PORT}/web/login?db=${DATABASE}`, 180), `systemctl is-active --quiet ${quote(profile.service)}`, 'printf \'%s\\n\' odoo-verified'

@@ -148,8 +148,8 @@ function nativeProfile (context) {
 function nativeBaseline (state, profile) {
   const paths = [APP_ROOT, DATA_ROOT, CREDENTIALS, profile.serviceFile, profile.nginxVhost, ...(profile.nginxEnableLink ? [profile.nginxEnableLink] : [])]
   return join([
-    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...paths.map(path => `if [ -e ${quote(path)} ] || [ -L ${quote(path)} ]; then printf '%s\\n' ${quote(`BASELINE_DRIFT: managed path already exists: ${path}`)} >&2; exit 1; fi`),
-    `install -d -o root -g root -m 0700 ${quote(`${state}/repo-backup`)}`,
+    'set -eu', 'umask 077', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...paths.map(path => `if [ -e ${quote(path)} ] || [ -L ${quote(path)} ]; then printf '%s\\n' ${quote(`BASELINE_DRIFT: managed path already exists: ${path}`)} >&2; exit 1; fi`),
+    `install -d -o root -g root -m 0700 ${quote(state)} ${quote(`${state}/repo-backup`)}`,
     `${packageList(profile.family)} > ${quote(`${state}/packages.before`)}`,
     serviceActive(profile.nginxService, profile.systemd, `${state}/nginx.active`),
     serviceEnabled(profile.nginxService, profile.systemd, `${state}/nginx.enabled`),
@@ -170,7 +170,7 @@ function nativePackages (state, context, profile) {
           ? 'pacman -Sy --noconfirm --needed ca-certificates curl openssl nginx nodejs-lts-jod npm base-devel python'
           : 'zypper --non-interactive refresh; zypper --non-interactive install -y ca-certificates curl openssl nginx nodejs24 npm24 shadow gcc gcc-c++ make python3'
   return join([
-    'set -eu', install,
+    'set -eu', 'umask 022', install,
     `node -e ${quote("const [major,minor]=process.versions.node.split('.').map(Number); if (!((major===22&&minor>=22)||major===24)) process.exit(1)")}`,
     'npm --version >/dev/null', 'nginx -v',
     `${packageList(family)} > ${quote(`${state}/packages.after`)}`,
@@ -232,10 +232,10 @@ function nativeConfigure (profile, state) {
     '#!/sbin/openrc-run', `name="${SERVICE}"`, `command="${APP_ROOT}/start-openrc.sh"`, 'command_background=true', `pidfile="/run/${SERVICE}.pid"`, 'output_log="/var/log/webminai-n8n.log"', 'error_log="/var/log/webminai-n8n.log"', 'depend() { need net; }'
   ].join('\n')
   const alpineWrapper = [
-    '#!/bin/sh', 'set -eu', `export N8N_ENCRYPTION_KEY="$(cat ${CREDENTIALS}/encryption_key)"`, `export HOME=${DATA_ROOT}`, `export N8N_USER_FOLDER=${DATA_ROOT}`, `export N8N_PORT=${N8N_PORT}`, 'export N8N_LISTEN_ADDRESS=127.0.0.1', 'export N8N_DIAGNOSTICS_ENABLED=false', 'export N8N_VERSION_NOTIFICATIONS_ENABLED=false', 'export N8N_SECURE_COOKIE=false', `exec su-exec webminai-n8n:webminai-n8n ${APP_ROOT}/node_modules/.bin/n8n start`
+    '#!/bin/sh', 'set -eu', `export N8N_ENCRYPTION_KEY="$(sed -n 1p ${CREDENTIALS}/encryption_key)"`, `export HOME=${DATA_ROOT}`, `export N8N_USER_FOLDER=${DATA_ROOT}`, `export N8N_PORT=${N8N_PORT}`, 'export N8N_LISTEN_ADDRESS=127.0.0.1', 'export N8N_DIAGNOSTICS_ENABLED=false', 'export N8N_VERSION_NOTIFICATIONS_ENABLED=false', 'export N8N_SECURE_COOKIE=false', `exec su-exec webminai-n8n:webminai-n8n ${APP_ROOT}/node_modules/.bin/n8n start`
   ].join('\n')
   const pieces = [
-    'set -eu', `if ! id webminai-n8n >/dev/null 2>&1; then useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-n8n 2>/dev/null || adduser -S -D -H -h ${quote(DATA_ROOT)} -s /sbin/nologin webminai-n8n; : > ${quote(`${state}/user-created`)}; fi`,
+    'set -eu', 'umask 077', `if ! id webminai-n8n >/dev/null 2>&1; then useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-n8n 2>/dev/null || adduser -S -D -H -h ${quote(DATA_ROOT)} -s /sbin/nologin webminai-n8n; : > ${quote(`${state}/user-created`)}; fi`,
     `install -d -o webminai-n8n -g webminai-n8n -m 0700 ${quote(DATA_ROOT)}`,
     `key=$(cat ${quote(`${CREDENTIALS}/encryption_key`)}); umask 077; printf 'N8N_ENCRYPTION_KEY=%s\\n' "$key" > ${quote(`${CREDENTIALS}/service.env`)}`,
     `printf '%s\\n' ${nginx.split('\n').map(quote).join(' ')} > ${quote(profile.nginxVhost)}`, `chmod 0644 ${quote(profile.nginxVhost)}`

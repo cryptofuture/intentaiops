@@ -207,7 +207,7 @@ test('task record rendering retains consultation, retry, progress, result, and r
   for (const value of [
     'Status', 'Kind', 'Common task', 'Multi-host run', 'Retry of task', 'Retry correction',
     'Consultation context', 'Request', 'Consultation answer', 'Saved compact context',
-    'Used by task', 'Overview', 'Modified files and paths', 'Codex progress',
+    'Used by task', 'Overview', 'Modified files and paths', 'Task progress',
     'Execution results', 'Revert results', 'apply warning', 'rollback warning'
   ]) assert.match(output.text, new RegExp(escapeRegex(value)))
   assert.match(output.text, /\[execution-diagnostics\] Connection failure evidence/u)

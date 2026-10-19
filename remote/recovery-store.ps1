@@ -209,6 +209,13 @@ try {
         $slot = Join-Path $root ('task-'+$task)
         Assert-NoReparse $slot
         if ([IO.File]::Exists($slot)) { throw 'Remote task identity is already occupied' }
+        $stateRoot = 'C:\ProgramData\WebminAI\Tasks'
+        Assert-NoReparse $stateRoot
+        if ([IO.Directory]::Exists($stateRoot)) {
+            foreach ($occupied in [IO.Directory]::EnumerateFileSystemEntries($stateRoot, ([string]$task+'-*'))) {
+                throw 'Legacy remote task state is already occupied'
+            }
+        }
         Create-PrivateDirectory $directory
         Publish-Durable $slot ($utf8.GetBytes($execution))
     }

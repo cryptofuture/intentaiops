@@ -56,6 +56,25 @@ test('journal is durable, redacted, lease protected, and blocks plan replacement
   assert.throws(() => write({ type: 'execution_resumed' }), /ownership/u)
 })
 
+test('lease diagnostics distinguish expiry, replacement and removal without renewing expired ownership', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-lease-diagnostics-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  let now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  const store = new TaskStore(root)
+  const task = store.create('host', 'Inspect lease')
+  store.savePlan('host', task.id, plan())
+  const original = store.acquireExecution('host', task.id, plan())
+  now += 30001
+  assert.throws(() => store.renewExecution('host', task.id, original.owner), { code: 'EXECUTION_LEASE_EXPIRED' })
+  const next = store.acquireExecution('host', task.id, plan())
+  assert.throws(() => store.renewExecution('host', task.id, original.owner), { code: 'EXECUTION_LEASE_REPLACED' })
+  store.renewExecution('host', task.id, next.owner)
+  store.releaseExecution('host', task.id, next.owner)
+  assert.throws(() => store.renewExecution('host', task.id, original.owner), { code: 'EXECUTION_LEASE_MISSING' })
+  assert.equal(store.executionEvents('host', task.id).length, 0)
+})
+
 test('retry descendants cannot acquire execution while an ancestor outcome is uncertain', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'intent-retry-uncertain-'))
   t.after(() => rm(root, { recursive: true, force: true }))

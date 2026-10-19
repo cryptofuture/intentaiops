@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { buildN8nTask, n8nRelease } from '../src/n8n-task.js'
 import { validateCommandPlan } from '../src/plan-validator.js'
 
@@ -64,6 +67,31 @@ test('Alpine creates nginx runtime state before validation and cleans only its o
   assert.ok(configure.indexOf('created-runtime-directory') < configure.indexOf('nginx -t'))
   assert.match(restore, /if \[ -e '[^']+created-runtime-directory' \] && \[ ! -e '[^']+nginx\.active' \] && \[ -d \/run\/nginx \]; then rmdir \/run\/nginx; fi/u)
   assert.doesNotMatch(restore, /rm -rf[^;]*\/run\/nginx/u)
+})
+
+test('native baseline creates private parents and preserves the first package and repository snapshot', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-n8n-baseline-'))
+  try {
+    const built = buildN8nTask(91, contexts.debian, { preferred: false })
+    const mappings = new Map(built.plan.modifiedFiles.map((entry, index) => [entry, `${root}/path-${index}`]))
+    const state = mappings.get('/var/lib/webminai/task-state/91-n8n-linux')
+    const repository = mappings.get('/usr/share/keyrings/nodesource.gpg')
+    writeFileSync(repository, 'original repository', { mode: 0o600 })
+    const command = [...mappings].sort((a, b) => b[0].length - a[0].length).reduce((text, [original, replacement]) => text.replaceAll(original, replacement), built.plan.commands[0].command)
+      .replaceAll('install -d -o root -g root', 'install -d').replaceAll('dpkg-query', 'fixture_packages')
+    const run = packages => {
+      const result = spawnSync('/bin/sh', ['-c', `umask 0007; fixture_packages () { printf '${packages}\\n'; }; systemctl () { return 1; }; ` + command], { encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+    }
+    run('nginx')
+    assert.equal(statSync(state).mode & 0o777, 0o700)
+    assert.equal(statSync(state + '/repo-backup').mode & 0o777, 0o700)
+    assert.equal(statSync(state + '/packages.before').mode & 0o777, 0o600)
+    writeFileSync(repository, 'later repository')
+    run('different-package')
+    assert.equal(readFileSync(state + '/packages.before', 'utf8'), 'nginx\n')
+    assert.equal(readFileSync(state + '/repo-backup/0', 'utf8'), 'original repository')
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('native package routes avoid incompatible Node versions', () => {

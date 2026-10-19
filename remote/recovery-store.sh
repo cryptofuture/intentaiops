@@ -208,7 +208,16 @@ if [ "$operation" = claim ] && [ ! -e "$directory" ]; then
   task=$7
   case "$task" in ''|*[!0-9]*) exit 1 ;; esac
   [ "$task" -gt 0 ]; [ "$task" -le 2147483647 ]; [ "$sequence" -eq 0 ]
-  test ! -e "$root/task-$task"; test ! -L "$root/task-$task"
+  if [ -e "$root/task-$task" ] || [ -L "$root/task-$task" ]; then
+    printf '%s\n' 'Remote task identity is already occupied' >&2
+    exit 1
+  fi
+  for occupied in /var/lib/webminai/task-state/"$task"-* /var/db/webminai/task-state/"$task"-* /var/lib/webminai/tasks/"$task" /var/db/webminai/tasks/"$task"; do
+    if [ -e "$occupied" ] || [ -L "$occupied" ]; then
+      printf '%s\n' 'Legacy remote task state is already occupied' >&2
+      exit 1
+    fi
+  done
   mkdir -m 0700 "$directory"
   printf '%s' "$execution" > "$root/task-$task"
 fi

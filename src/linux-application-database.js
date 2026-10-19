@@ -41,7 +41,7 @@ export function postgresApplicationDatabaseCommand ({ state, database, user, cre
       `runuser -u postgres -- dropuser --if-exists ${quote(user)} >/dev/null 2>&1 || { ${blocked}; }`, `rm -f -- ${marker}`, "printf '%s\\n' database-removed")
   } else {
     commands.push(`if [ "$owned" = no ]; then case "$observed" in *'|0|0|0') :;; *) ${blocked};; esac`,
-      `password=$(cat ${quote(`${credentials}/database_password`)})`, `case "$password" in ''|*[!0-9a-fA-F]*) ${blocked};; esac; [ "${'$'}{#password}" -eq 64 ] || { ${blocked}; }`,
+      `password=$(sed -n p ${quote(`${credentials}/database_password`)})`, `case "$password" in ''|*[!0-9a-fA-F]*) ${blocked};; esac; [ "${'$'}{#password}" -eq 64 ] || { ${blocked}; }`,
       `printf "CREATE ROLE ${user} LOGIN ${createdb ? 'CREATEDB ' : ''}PASSWORD '%s';\\nCREATE DATABASE ${database} OWNER ${user};\\n" "$password" | runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 postgres >/dev/null 2>&1 || { ${blocked}; }`, read,
       `printf '%s\\n' "$observed" | awk -F '|' 'NF == 4 && $2 != 0 && $3 != 0 && $2 == $4 {ok=1} END {exit !ok}' || { ${blocked}; }`,
       `(set -C; printf '%s\\n' "$observed" > ${marker})`, 'fi', "printf '%s\\n' database-ready")
