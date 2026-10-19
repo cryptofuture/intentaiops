@@ -1,14 +1,14 @@
 import { access, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { buildCandidatePlanningContext, buildCommonTask, listEligibleCommonTasks } from './common-tasks.js'
+import { buildCandidatePlanningContext, buildCommonTask, listCommonTasks, listEligibleCommonTasks } from './common-tasks.js'
 import { isSystemUpdateTask, systemUpdateProfile } from './system-update-task.js'
 import { parseSshConnection } from './connection.js'
 import { VaultAuthenticationError } from './crypto-vault.js'
 import { resolveDockerPolicy } from './docker-policy.js'
 import { formatDiagnosticError, redactDiagnosticText } from './error-details.js'
 import { HostSessionFactory } from './host-session-factory.js'
-import { CODEX_MODELS, CODEX_REASONING_EFFORTS, normalizeCodexSettings } from './codex-planner.js'
+import { CodexPlanner, normalizeCodexSettings } from './codex-planner.js'
 import { KubernetesClient } from './kubernetes-client.js'
 import { KubernetesNetdataClient } from './kubernetes-netdata-client.js'
 import { KubernetesStage2Service } from './kubernetes-stage2-service.js'
@@ -256,27 +256,37 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
   }
 }
 
-async function setCodexSettings ({ context }) {
+export async function setCodexSettings ({ context, planner = new CodexPlanner() }) {
   const { ui, settingsStore, settings } = context
   const current = normalizeCodexSettings(settings.codex)
   ui.clear()
   ui.banner('Codex model')
+  ui.info('Loading models and supported reasoning levels from your Codex CLI...')
+  let models
+  try { models = await planner.listModels() } catch (error) {
+    ui.warning(formatDiagnosticError(error))
+    await ui.pause()
+    return
+  }
   const model = await ui.choose('Model', [
-    ...CODEX_MODELS.map(value => ({
-      value,
-      label: `${value}${value === current.model ? ' (current)' : ''}`
+    ...models.map(({ model }) => ({
+      value: model,
+      label: `${model}${model === current.model ? ' (current)' : ''}`
     })),
     { value: null, label: 'Back without changes' }
   ])
   if (!model) return
+  const selected = models.find(item => item.model === model)
+  if (!selected) throw new Error('Selected model is absent from the Codex catalog')
   const reasoningEffort = await ui.choose('Reasoning effort', [
-    ...CODEX_REASONING_EFFORTS.map(value => ({
+    ...selected.reasoningEfforts.map(value => ({
       value,
       label: `${value}${value === current.reasoningEffort ? ' (current)' : ''}`
     })),
     { value: null, label: 'Back without changes' }
   ])
   if (!reasoningEffort) return
+  if (!selected.reasoningEfforts.includes(reasoningEffort)) throw new Error('Selected reasoning effort is unsupported by this model')
   await settingsStore.setCodexSettings({ settings, model, reasoningEffort })
   ui.success(`Codex set to ${model} with ${reasoningEffort} reasoning.`)
   await ui.pause()
@@ -712,6 +722,7 @@ async function runConnectedKubernetesCluster ({ context, clusterId }) {
     const actions = [
       { label: 'Refresh status', value: 'refresh' },
       { label: 'Activate/update Stage 2 gateway', value: 'activate' },
+      { label: 'Remote common-task recovery availability', value: 'remote-recovery' },
       { label: 'Deactivate Stage 2 gateway', value: 'deactivate', style: 'warning' }
     ]
     if (status.stage2 === 'inactive') actions.push({ label: 'Remove saved cluster', value: 'remove', style: 'danger' })
@@ -732,6 +743,11 @@ async function runConnectedKubernetesCluster ({ context, clusterId }) {
       footerHints: [['Up/Down', 'select'], ['Enter', 'open'], ['Esc', 'back']]
     })
     if (!action || action === 'back') return
+    if (action === 'remote-recovery') {
+      ui.warn(stage2.remoteRecoveryCapabilities().reason)
+      await ui.pause()
+      continue
+    }
     if (action === 'refresh') {
       ui.info('Refreshing Kubernetes API and Stage 2 status...')
       status = await readKubernetesStatus({ kubernetes, cluster })
@@ -1556,6 +1572,12 @@ async function runConnectedHostSession ({
         }
       }
       if (selected === 'history') await browseTaskHistory({ ui, admin, settings, passphrase, serverId, status, applicationDefaults })
+      if (selected === 'remote-recovery') {
+        try { await browseRemoteCommonTasks({ ui, admin, settings, passphrase, serverId, status, applicationDefaults }) } catch (error) {
+          ui.error(redactDiagnosticText(error.message))
+          await ui.pause()
+        }
+      }
       if (selected === 'forget-host') {
         ui.warn('This removes the local connection and encrypted host secret only. It does not change the remote host, and fingerprint-associated task history is retained.')
         if (await ui.confirm(`Remove ${server.temporary ? 'temporary host' : 'saved host connection'} ${serverId}?`, false)) {
@@ -1965,6 +1987,7 @@ async function runTask ({
     : 'Collecting Netdata inventory and asking Codex for a command plan...')
   try {
     let plan
+    let recoveryOptions
     if (kind === 'catalog') {
       const refreshed = inventory ?? ((isHostHealthTask(effectiveCatalogId) || isSystemUpdateTask(effectiveCatalogId))
         ? await admin.refreshInventory({ settings, passphrase, serverId })
@@ -1972,7 +1995,7 @@ async function runTask ({
           ? null
           : await admin.refreshInventory({ settings, passphrase, serverId }))
       if (isHostHealthTask(effectiveCatalogId) || isSystemUpdateTask(effectiveCatalogId)) inventory = refreshed
-      plan = buildCommonTask(effectiveCatalogId, task.id, {
+      recoveryOptions = {
         platform: status.capabilities.platform?.os,
         linuxContext: refreshed?.webminaiLinuxContext ?? status.linuxContext,
         windowsExecution: refreshed?.webminaiExecution ?? status.windowsExecution,
@@ -1980,7 +2003,8 @@ async function runTask ({
         macosExecution: refreshed?.webminaiExecution ?? status.macosExecution,
         docker: refreshed?.webminaiDocker ?? status.docker,
         applicationDefaults
-      }).plan
+      }
+      plan = buildCommonTask(effectiveCatalogId, task.id, recoveryOptions).plan
     } else {
       const candidateContext = buildCandidatePlanningContext(routing.relevantCatalogIds, task.id, {
         platform: status.capabilities.platform?.os,
@@ -2011,7 +2035,7 @@ async function runTask ({
         }
       })
     }
-    admin.saveTaskPlan(serverId, task.id, plan)
+    admin.saveTaskPlan(serverId, task.id, plan, recoveryOptions && settings.servers?.[serverId]?.hostFingerprint && ['linux', 'freebsd', 'macos', 'windows'].includes(recoveryOptions.platform) ? { catalogId: effectiveCatalogId, options: recoveryOptions, target: settings.servers[serverId].hostFingerprint } : undefined)
     renderPlan(ui, plan)
     const approvalMode = await chooseApprovalMode(ui, plan.commands)
     if (!approvalMode) {
@@ -2198,9 +2222,11 @@ async function browseTaskHistory ({ ui, admin, settings, passphrase, serverId, s
   }
 }
 
-async function manageExecution ({ ui, controller, serverId, taskId }) {
+export async function manageExecution ({ ui, controller, serverId, taskId }) {
   for (;;) {
     const view = controller.inspect(serverId, taskId)
+    const localTask = controller.tasks.get(serverId, taskId)
+    const localRevisions = controller.tasks.revisions(serverId, taskId)
     ui.clear()
     ui.banner(`Operator / ${serverId} / task #${taskId}`)
     ui.line('Task status', view.task.status)
@@ -2210,6 +2236,7 @@ async function manageExecution ({ ui, controller, serverId, taskId }) {
       { label: 'Pause at next command boundary', value: 'pause' },
       { label: 'Ask Codex a read-only question', value: 'analyze' },
       { label: 'Revise remaining steps', value: 'propose' },
+      ...(localTask.kind === 'catalog' && listCommonTasks({ platform: 'linux', category: 'application' }).some(definition => definition.id === localTask.catalogId && !definition.prerequisite) ? [{ label: 'Refresh remaining native Linux catalog steps', value: 'refresh-catalog' }] : []),
       { label: 'Propose rollback of confirmed changes', value: 'propose-rollback' },
       { label: 'Reconcile durable remote outcomes', value: 'reconcile' },
       { label: 'Record independently verified uncertain outcome', value: 'resolve' },
@@ -2222,8 +2249,8 @@ async function manageExecution ({ ui, controller, serverId, taskId }) {
     if (!action) return
     try {
       if (action === 'inspect') {
-        renderPlan(ui, view.task.plan)
-        renderResults(ui, view.task.results ?? [])
+        renderPlan(ui, localTask.plan)
+        renderResults(ui, localTask.results ?? [])
         ui.output.write(`${JSON.stringify(view.revisions.map(item => ({ id: item.id, parentId: item.parentId, approved: item.approved })), null, 2)}\n`)
       } else if (action === 'pause' || action === 'abort') controller.control(serverId, taskId, action, view.stateVersion)
       else if (action === 'analyze') {
@@ -2238,25 +2265,32 @@ async function manageExecution ({ ui, controller, serverId, taskId }) {
         const status = await ui.choose('Verified remote outcome', [{ label: 'Completed', value: 'completed' }, { label: 'Failed or partially applied', value: 'failed' }])
         const evidence = await ui.editor('Authoritative remote evidence, without credentials')
         if (await ui.confirm('Attest this outcome without repeating the command?', false)) controller.resolve(serverId, taskId, view.stateVersion, command.commandId, status, evidence, command.rollbackRevision)
+      } else if (action === 'refresh-catalog') {
+        ui.info('Refreshing inventory and rebuilding trusted catalog steps. No AI call or command execution is performed.')
+        const proposal = await controller.proposeCatalogRefresh(serverId, taskId, view.stateVersion)
+        ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
+        renderPlan(ui, controller.tasks.revisions(serverId, taskId).find(revision => revision.id === proposal.revisionId).plan)
+        if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
       } else if (action === 'propose' || action === 'propose-rollback') {
         const instructions = await ui.editor('Changes to remaining work')
         if (!instructions) continue
+        ui.info('Asking Codex for a replacement plan. No commands execute until separate approval and resume.')
         const proposal = await controller.propose(serverId, taskId, instructions, view.stateVersion, action === 'propose-rollback')
         ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
-        renderPlan(ui, proposal.proposed)
+        renderPlan(ui, controller.tasks.revisions(serverId, taskId).find(revision => revision.id === proposal.revisionId).plan)
         if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
       } else if (action === 'review-revision') {
         const revision = await ui.choose('Pending plan revision', view.revisions.filter(revision => !revision.approved).map(revision => ({ label: `#${revision.id} / ${revision.plan.operatorRollback ? 'rollback' : 'remaining work'} / parent #${revision.parentId}`, value: revision })))
         if (!revision) continue
         ui.output.write(`${JSON.stringify(revision.differences, null, 2)}\n`)
-        renderPlan(ui, revision.plan)
+        renderPlan(ui, localRevisions.find(item => item.id === revision.id).plan)
         if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, revision.id, view.stateVersion, revision.fingerprint)
       } else if (action === 'resume') {
-        renderPlan(ui, view.task.plan)
+        renderPlan(ui, localTask.plan)
         if (await ui.confirm('Execute remaining steps of this reviewed plan?', false)) await controller.resume(serverId, taskId, view.stateVersion, view.fingerprint, event => renderTaskProgress(ui, event))
       } else if (action === 'rollback') {
-        const revision = [...view.revisions].reverse().find(item => item.approved && item.plan.operatorRollback)
-        renderCommandList(ui, revision?.plan.commands ?? view.task.plan.revertCommands, 'Reviewed rollback')
+        const revision = [...localRevisions].reverse().find(item => item.approved && item.plan.operatorRollback)
+        renderCommandList(ui, revision?.plan.commands ?? localTask.plan.revertCommands, 'Reviewed rollback')
         if (await ui.confirm('Execute these reviewed rollback commands?', false)) await controller.rollback(serverId, taskId, view.stateVersion, revision ? view.reviewedRollbackFingerprint : view.rollbackFingerprint, revision?.id)
       }
     } catch (error) { ui.error(error.message) }
@@ -2307,6 +2341,99 @@ async function approveCommand (ui, item, prefix = 'Approve') {
   writeRaw(ui, item.command)
   ui.separator()
   return ui.confirm('Execute this command?', false)
+}
+
+async function browseRemoteCommonTasks ({ ui, admin, settings, passphrase, serverId, status, applicationDefaults }) {
+  const connection = { settings, passphrase, serverId }
+  const action = await ui.choose('Remote common-task recovery', [
+    { label: 'Browse and verify recorded tasks', value: 'browse' },
+    { label: 'Review signing-key rotation', value: 'rotate' },
+    { label: 'Review a published signing-key change', value: 'accept-key' },
+    { label: 'Back', value: null }
+  ])
+  if (!action) return
+  if (action !== 'browse') {
+    const key = await admin.inspectRemoteRecoveryKey(connection)
+    ui.line('Target identity', key.target)
+    ui.line('Trusted key', key.pinnedFingerprint)
+    ui.line('Published key', key.publishedFingerprint)
+    ui.warn('Rotation retains historical public keys. An old-key-signed transition does not prove safety if that key or remote administrator was compromised.')
+    if (action === 'rotate' && key.changed) throw new Error('Investigate the changed signing key before requesting another rotation')
+    if (action === 'accept-key' && !key.changed) {
+      ui.info('The published signing key already matches the trusted pin.')
+      await ui.pause()
+      return
+    }
+    if (!await ui.confirm(action === 'rotate' ? 'Rotate this host recovery key now? Active ledger owners will block rotation.' : 'Accept this published key only if its signed transition matches the trusted key?', false)) return
+    const result = action === 'rotate'
+      ? await admin.rotateRemoteRecoveryKey({ ...connection, expectedFingerprint: key.pinnedFingerprint, approved: true })
+      : await admin.acceptRemoteRecoveryKeyRotation({ ...connection, expectedFingerprint: key.pinnedFingerprint, publishedFingerprint: key.publishedFingerprint, approved: true })
+    ui.line('Trusted replacement key', result.fingerprint)
+    ui.success('Recovery key transition verified and recorded. No task was replayed.')
+    await ui.pause()
+    return
+  }
+  let after = ''
+  while (true) {
+    const listing = await admin.listRemoteCommonTasks({ ...connection, after })
+    if (listing.available === false || !listing.executions?.length) {
+      ui.info('No signed remote common-task records are available on this host.')
+      await ui.pause()
+      return
+    }
+    const selected = await ui.choose('Remote common-task executions (verify before recovery)', [
+      ...listing.executions.map(item => ({ label: `${item.executionId} (${item.sequence} records)`, value: item.executionId })),
+      ...(listing.executions.length === 10 ? [{ label: 'Next page', value: 'next' }] : []),
+      { label: 'Back', value: 'back' }
+    ])
+    if (!selected || selected === 'back') return
+    if (selected === 'next') { after = listing.executions.at(-1).executionId; continue }
+    const verified = await admin.inspectRemoteCommonTask({ ...connection, executionId: selected })
+    const original = verified.records[0]
+    ui.line('Common task', original.catalogId)
+    ui.line('Original task ID', original.taskId)
+    ui.line('Signed records', verified.sequence)
+    ui.line('Last observed event', verified.records.at(-1).event)
+    ui.info('Signature and host identity verified. This is remote evidence, not local execution history or approval.')
+    if (!await ui.confirm('Inspect the baseline and generate a new recovery plan?', false)) continue
+    const inventory = await admin.refreshInventory(connection)
+    const options = {
+      platform: status.capabilities.platform?.os,
+      linuxContext: inventory.webminaiLinuxContext,
+      windowsExecution: inventory.webminaiExecution,
+      freebsdExecution: inventory.webminaiExecution,
+      macosExecution: inventory.webminaiExecution,
+      docker: inventory.webminaiDocker,
+      applicationDefaults
+    }
+    const proposal = await admin.prepareRemoteCommonTaskRecovery({ ...connection, executionId: selected, options })
+    renderPlan(ui, proposal.plan)
+    let takeoverApproved = false
+    if (proposal.ownership?.owned) {
+      ui.warn('This completed source still has a remote owner. Taking ownership will fence that session. Unknown or partial source work cannot use this recovery path.')
+      takeoverApproved = await ui.confirm('Take ownership of this confirmed source for the reviewed recovery?', false)
+      if (!takeoverApproved) { admin.cancelTask(serverId, proposal.taskId); continue }
+    }
+    const approvalMode = await chooseApprovalMode(ui, proposal.plan.commands, 'recovery commands')
+    if (!approvalMode) { admin.cancelTask(serverId, proposal.taskId); continue }
+    try {
+      const results = await admin.executeRemoteCommonTaskRecovery({
+        ...connection,
+        taskId: proposal.taskId,
+        options,
+        ...(takeoverApproved ? { takeoverApproved: true, takeoverFingerprint: proposal.ownership.ownerFingerprint } : {}),
+        approve: approvalMode === 'all' ? async () => true : item => approveCommand(ui, item),
+        onProgress: event => renderTaskProgress(ui, event),
+        onResult: result => admin.appendTaskResult(serverId, proposal.taskId, result)
+      })
+      admin.saveTaskResults(serverId, proposal.taskId, results)
+      renderResults(ui, results)
+    } catch (error) {
+      admin.saveTaskError(serverId, proposal.taskId, error)
+      throw error
+    }
+    await ui.pause()
+  }
 }
 
 export async function chooseApprovalMode (ui, commands, label = 'commands') {

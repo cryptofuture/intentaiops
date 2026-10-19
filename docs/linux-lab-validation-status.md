@@ -1,8 +1,439 @@
 # Linux lab validation checkpoint
 
-Updated 2026-10-19 00:48 UTC. This file supersedes all earlier checkpoint instructions. Full prior evidence remains in [the history](linux-lab-validation-history.md); current coverage is in [the matrix](linux-lab-current-matrix.md).
+Updated 2026-10-19 08:43 UTC. This file supersedes all earlier checkpoint instructions. Full prior evidence remains in [the history](linux-lab-validation-history.md); current coverage is in [the matrix](linux-lab-current-matrix.md).
 
 ## Current continuation, supersedes the chronological notes below
+
+- Latest completion supersedes all pending Debian45 notes below. Installation
+  dispatched exactly once. The client lost its local lease after dispatch
+  (underlying cause unconfirmed); durable job `cd8bc7f2dacb9a2ebdc95991859d586a`
+  confirmed exit0. Actual-binary reconciliation confirmed the original attempt
+  without replay. Fixed a discovered gap: reconciliation now also signs remote
+  completion and current baseline, preserving locally confirmed results first.
+  Its deterministic regression passes. The nine signed source records verified.
+- Explicitly approved regenerated recovery46 completed once, and all15 signed
+  records verify ending `rollback_completed`. Independent binary SSH inspection
+  confirms `/opt/intent-ai-ops`, both launchers and task45 state absent, Netdata
+  active, ledger root0700 and signing key root0600. Task45 retains its historical
+  client-failure status; both command outcomes are now confirmed complete.
+  Recovery46 is completed. No remote job remains running. Never rerun task45.
+- Current full source suite741 total/738 pass/0 fail/3 opt-in skips; lint,
+  typecheck, package-install, five native checksums and diff-check pass after
+  reconciliation fix. Installed-Codex boundary53/53 passes. Final package includes
+  the updated recovery documentation, SHA256
+  `57256e5b34b66fd88b73407273dcfe9f9a55a26472f504ddd28bfb156523fde0`.
+  All actual-binary sessions exited normally; no background lab work remains.
+  Broader application/database-family
+  recovery, partial/unknown-source recovery and universal repeat/exact-baseline
+  cycles remain unfinished; no non-Linux/Docker live coverage is claimed.
+
+- Latest continuation supersedes the pending Ghost notes below: Ubuntu62 is
+  reverted. Its original restore-stack failed safely with `DATABASE_DATA_REMAINS`.
+  Task63's identity guard failed before mutation; corrected, explicitly reviewed
+  task64 quarantined the intact new datadir. Approved rollback revision15 then
+  ran only the remaining trusted cleanup as `finish-ghost62-baseline`, once.
+  No original failed command was replayed and no outcome is unknown. Independent
+  binary SSH inspection confirms Ghost paths/account and `/var/lib/mysql` absent,
+  package baseline SHA256 unchanged, Netdata active, dpkg audit clean, and all
+  protected original backup identities unchanged. Task64's saved restoration
+  was NOT executed. Quarantine identity: `66311:276302500:110:112:700`.
+- Debian recovery-key rotation passed through the actual binary and existing
+  vault. Old fingerprint `2f6751bfdbce4b4a91ec8ebe6f1bdab68e23d1bc5d4f5327d8466a3610372d30`;
+  replacement `be5497b5cdecf10bd94d8f85badca11fda5ede2e6a15684c4704f2d9173426d5`.
+  Afterwards all nine old signed timer records for execution
+  `dad4075cb7dad52118d52220810137ff` verified, ending `rollback_completed`.
+  No deployment/recovery command was replayed. Old CLI sessions closed normally.
+- Current read-only history audit:87 application cycles,4 reviewed-recovery
+  exceptions,87 completed-replay checks,0 host connections. Full suite740 total,
+  737 passed,0 failed,3 opt-in skips. Package-install, native checksums and
+  diff-check passed before the latest installer-marker fix. Browser race and
+  authenticated recovery-action fixtures pass; live browser mutations not tested.
+- Native CLI-install recovery profile added with strict ownership/tree/launcher
+  integrity checks; Alpine remains excluded. Before live dispatch, review caught
+  installation markers inheriting plugin umask0007. Debian44 was rejected before
+  execution. Marker creation now explicitly applies0600 without changing installer
+  umask. Focused tests and a new live cycle are being run; do not yet claim a live
+  verified recovery for this profile. Partial/unknown sources still fail closed.
+- Follow-up live cycle: Debian45's capture completed once; installation is running
+  as durable job `cd8bc7f2dacb9a2ebdc95991859d586a`, attempt
+  `9ecf7bac-d661-4b65-992d-3696af00e3b5`. Actual-binary owner88944,
+  read-only inspector4632; logs `/tmp/intent-cli-native-recovery.log` and
+  `/tmp/intent-cli-native-inspector.log`. GitHub archive download is progressing
+  slowly; new cgroup OOM counters remain zero. Do not resubmit the running command.
+  Source checks after marker fix:740 total/737 pass/0 fail/3 opt-in skips;
+  lint/typecheck/package-install/checksums/diff-check pass. Archive SHA256
+  `e195bf14a1ad2d9037e2473cef2ac56133091bb9aa5f2a81c9d204b07c8bfaf6`.
+  Standalone opt-in SSH test was not configured with vault transport credentials
+  and failed before a host connection (first missing URL, then alias DNS). This
+  is not a live transport regression; normal binary SSH remains connected.
+- Actual-binary read-only console follow-up passed with the normal vault:
+  Ubuntu62/64 history, run25 export, new Debian remote-task listing and all nine
+  post-rotation timer records, token/origin enforcement, authenticated SSE,
+  known-secret/private-key exclusion and unchanged Ubuntu execution journal.
+  Console exited normally. This verifies new recovery reads, not browser mutations.
+
+- Active continuation, 2026-10-19: new Ubuntu Ghost62 completed all seven
+  reviewed current catalog commands without a revision or unknown outcome.
+  Its original four-command rollback completed the first three and correctly
+  FAILED restore-stack with `DATABASE_DATA_REMAINS`, retaining the baseline
+  and new MySQL datadir identity `66311:276302500:110:112:700`. Package baseline
+  SHA256 is still `8eda8ad0b3fc87963fe733927525716d7e2cf5b8324d6312d9d0a3a69cb45305`.
+  Prior Ghost57 quarantine identity276302480 remains unchanged. Owner44739 is
+  idle at Ubuntu host actions; inspector79822 has generated a one-command exact
+  JSON-supplied quarantine proposal for `/var/lib/webminai/lab-recovery/ubuntu-ghost-task-62/mysql-after`.
+  It is NOT yet approved/dispatched. Compare both stored bodies with the supplied
+  originals, approve only the quarantine, then propose a NEW reviewed rollback
+  revision for62 containing only the remaining trusted restore-stack body with
+  a new ID. Never rerun the original failed rollback or restore quarantines.
+- New implementation pending final live checks/documentation: explicit recovery
+  key rotation, old-key-signed domain-separated transitions, archived public keys,
+  explicit local pin adoption after lost acknowledgement, and fresh-install
+  historical verification. POSIX and Windows helper implementations; real OpenSSL
+  fixtures pass, Windows source only. Rotation refuses active ledger owners.
+  Reviewed ownership takeover is limited to fully confirmed, unchanged supported
+  sources with fresh baseline and expected head/owner checks, after explicit
+  takeover and execution approval. Partial/unknown sources remain blocked.
+- Shared-controller/browser recovery discovery, proposal and separately approved
+  execution are implemented with token/origin/CSRF/read-only/version checks.
+  New endpoint/controller tests pass. Additional UI race checks and live validation
+  remain. Public recovery plans come from trusted local regeneration, never remote
+  executable text. No browser signing-key management endpoint was added.
+- `scripts/audit-linux-cli-history.js` is a committed-source read-only audit;
+  it passed87 actual historical application cycles, including three fingerprint-
+  checked recovery exceptions, and87 completed-replay checks with forbidden remote
+  stubs. It proves journal ordering and completed-step skipping, not87 complete
+  filesystem reinstallation/restoration cycles. New regression tests pass.
+- Latest full suite before the latest diagnostic addition:736total/733pass/0fail/
+  3skips (`/tmp/intent-recovery-followup-tests.log`). Lint/typecheck pass. The new
+  baseline-refusal classifier test passes and fixes future generic unknown-cause
+  labels without rewriting Ghost62's stored failure. Package is NOT yet rebuilt
+  for these latest changes. Default remains GPT-6.1 Sol/low.
+
+- Model-selection follow-up supersedes earlier MiMo-default notes: the code
+  default and this normal vault's selected setting are now `gpt-6.1-sol/low`,
+  saved through the actual binary. Existing saved selections are not forcibly
+  migrated. The picker reads the installed Codex CLI catalog, including hidden
+  entries, and only offers each model's advertised reasoning levels. MiMo retains
+  its existing profile and low/medium/high selection. Live structured-routing
+  checks passed for both GPT-6.1 Sol/low and MiMo/high, without host commands.
+  Source suite723total/720pass/0fail/3 opt-in skips, lint/typecheck/package-install,
+  native checksums and diff-check PASS. Log `/tmp/intent-model-settings-tests.log`.
+  Updated archive SHA256:
+  `75ef99bce7b87e6efb73ac65380b08db131f3b3ce1d9386b5ae7aad1b63dcf14`.
+  CLI25706 closed normally; nine existing hosts and vault are preserved.
+
+- Final local handoff checks: owner9789 closed normally after restoring MiMo/high.
+  A separate actual-binary read-only console probe (existing vault, no new vault)
+  passed token/origin/read-only enforcement, Ghost57/cleanup61 history, run25
+  export and authenticated SSE. No known vault secret or private-key block was
+  returned; execution journals were unchanged; console exited normally. Fresh
+  read-only audit confirms84 ordinary application lifecycles plus three exact
+  approved recovery lifecycles (Alma18/openSUSE39/Ubuntu42), total87. New archive
+  SHA256 `ca5dacc0476d663cea63e5f297d4874bc419e85523380eab84dd7eb34f44ee74`
+  includes the current source and packaged recovery documentation; Linux/x64
+  package-install and all5 native checksums passed. Latest audit/checkpoint edits
+  are not packaged source. No background remote job or CLI execution owner remains.
+
+- COMPLETED Ghost cycle: task57 seven forward/four original separately approved
+  rollback commands pass lifecycle assertions; task61 exact reviewed residue
+  quarantine dispatched/completed once, no unknown. Independent final CLI-shell
+  probes confirm `/var/lib/mysql` absent and its original directory preserved
+  intact at `/var/lib/webminai/lab-recovery/ubuntu-ghost-task-57/mysql-after`,
+  identity `66311:276302480:110:112:700`, parent root:root0700. Installed package
+  name/version baseline hash matches; all Ghost managed paths/account/listener
+  absent, old protected backups unchanged, Netdata active, dpkg audit clean.
+  Saved task61 restoration was NOT executed and must not be run casually.
+  Task60 was also rejected before dispatch because the generated final assertion
+  included erroneous punctuation; neither59 nor60 mutated the host. Application
+  coverage is now87/87 reviewed cycles, including reviewed recovery/cleanup,
+  not unattended rollback or universal repeat/restoration proof. Aggregate182/183
+  includes supplementary fixtures/maintenance; Ubuntu update is outside requested
+  application scope. Normal binary9789 restored original MiMo/high. No remote
+  work is running. Full branch release audit and universal repeat assertions,
+  broad signed recovery profiles/key rotation remain explicitly unfinished.
+
+- Latest continuation checks: full source suite720total/717pass/0fail/3 opt-in
+  skips, lint/typecheck/package-install/native-checksums/diff-check PASS. Log:
+  `/tmp/intent-linux-native-final-tests.log`. New Ghost baseline marker and
+  rollback guard refuse success with newly created MySQL residue, preserving
+  data and baseline; seven Ghost unit tests pass. Source changes do not rewrite
+  task57's already approved/executed rollback. Inspector61092 and owner90700
+  closed normally. Current owner9789 uses the same binary/vault and temporarily
+  selected gpt-5.6-luna/low because MiMo cleanup planning timed out before dispatch.
+  Task58 has zero dispatches; task59 was explicitly rejected (zero dispatches)
+  after review caught decimal-versus-octal permission arithmetic. Corrected
+  cleanup planning is pending. Restore original MiMo/high through the binary
+  before final handoff. Do not infer cleanup completion from task57's reverted
+  projection. Keep the exact residue identity and protected backups below.
+
+- 2026-10-19 continuation: Ubuntu57 is now reverted after separate explicit
+  approval of its four original rollback commands. Read-only journal audit
+  confirms each rollback dispatched/completed once, no unknown outcomes; the
+  original failed install and completed baseline remain immutable. Installed
+  package name/version baseline SHA256 matches exactly before/after:
+  `8eda8ad0b3fc87963fe733927525716d7e2cf5b8324d6312d9d0a3a69cb45305`.
+  All Ghost app/runtime/content/credentials/unit/site/task-state paths are absent,
+  port18110 has no listener, Ghost account is absent, nginx/mysql inactive,
+  Netdata active. All four NodeSource repository/key/preference hashes and modes
+  match; protected database directory identities are unchanged. HOWEVER the
+  new MySQL data directory remains at /var/lib/mysql, identity
+  `66311:276302480:110:112:700`. Do not count exact baseline restoration yet.
+  Inspector61092 has submitted a normal-binary AI task for a guarded move to
+  `/var/lib/webminai/lab-recovery/ubuntu-ghost-task-57/mysql-after`, never deletion.
+  Planning is pending, not approved or dispatched. Review every generated guard
+  before approval; do not execute its restoration rollback afterward. Owner90700
+  remains idle at task57 operator controls. Application coverage remains86/87
+  until residue handling and final assertions, not a silent87/87 claim.
+
+- 2026-10-19 08:19: Ubuntu57 revision13 FORWARD WORK COMPLETED, all7 active
+  commands completed exit0, zero unknown outcomes. Ghost acquisition
+  cd92d3e53f5bcca74590f9ab45337311 finished; final verify job
+  c158fb1aafe9dee5efe081c457990613, attempt
+  a6282466-bc64-41de-ad8e-018142173848, completed once. Approved recipe verifies
+  MySQL tables, HTTP marker/blog and service restart. Independent external GETs
+  from the workspace returned WEBMINAI_GHOST_OK and HTTP200 for /blog/ on
+  10.201.49.200:18110. Original baseline completed once; original install-stack
+  exit100 still immutable in the journal. Owner90700 is at operator controls,
+  no running remote job. Do NOT rerun the deployment. Next: inspector61092 is
+  connecting via normal binary for read-only baseline/repository/package hashes
+  and protected-data checks BEFORE the separately reviewed rollback. Ghost is
+  still not counted until that rollback and cleanup probes complete. Original
+  MiMo/high remains restored. Latest unfiltered tests719total/716pass/0fail/3skips;
+  lint/typecheck/checksums/package-install pass, archive32f4c932 is current for
+  packaged implementation (checkpoint edits do not affect it).
+
+- 2026-10-19 08:09 live progress: revision13 package/runtime job
+  884ff44230f120092cc1fb05bdeb1ab7 completed exit0 once, confirming missing-conffile
+  repair, checksum-verified private Node22.23.1, MySQL8 and service startup.
+  New credential generation and guarded database initialization also completed
+  once. No baseline replay, no unknown outcome. Ghost acquisition now observed
+  through durable job `cd92d3e53f5bcca74590f9ab45337311`, attempt
+  `38a76804-140b-4955-919f-a2da59ea702d`. Owner90700 is still the only mutation
+  owner. Do not duplicate that job or rollback while it runs. The source's old
+  install-stack exit100 remains recorded. Ghost is still NOT counted as a pass.
+
+- 2026-10-19 08:04: Ubuntu57 revision13 is explicitly APPROVED and separately
+  RESUMED through the normal binary (owner90700). New local-catalog refresh was
+  added to the shared controller and CLI after providers timed out or produced
+  unsafe transcription. It performs no AI call, validates fresh inventory and
+  local policy, preserves completed definitions/dependency closure and the EXACT
+  original rollback, rejects unknown outcomes/route/version/host/rollback drift,
+  and assigns pending work fresh IDs.55 controller/helper/UI tests passed; raw
+  local CLI review now shows actual stored commands instead of public redacted
+  browser projections, covered for all5 review paths. Browser output remains
+  sanitized. Original MiMo/high settings restored through the binary; no temporary
+  model setting remains. Owner3931 closed normally. The rejected AI proposal12
+  stays unapproved; original approved snapshot is11, revision13 parent11. Readonly
+  comparison proved ALL6 replacement definitions/dependencies exactly match the
+  current catalog, baseline unchanged, original4 rollback definitions unchanged,
+  ZERO new dispatch before approval, and approval alone remained paused. Resume
+  was separately confirmed at08:04. New command IDs:
+  install-stack-catalog-9d155fa959f7,
+  generate-credentials-catalog-bcb8d4150196,
+  initialize-database-catalog-1e9c2d1f81b6,
+  install-ghost-catalog-b2631377652c,
+  configure-ghost-catalog-e9bb4d230683,
+  verify-ghost-catalog-60cb7967b057.
+  Observe exact durable jobs; never replay an uncertain command. Ghost is NOT a
+  pass until apply/health/restart and separately reviewed rollback complete. Source
+  checks718total/715pass/0fail/3skips passed before the last added local-review
+  regression (that test14/14PASS); latest npm test passed, lint/typecheck and
+  package-install pass. Package32f4c932 includes current implementation; rebuild
+  after any further packaged source/doc changes.
+  Active package/runtime job884ff44230f120092cc1fb05bdeb1ab7, attempt
+  118361da-80cd-4ec7-a5a9-abd30c32ad93, acknowledged once. Baseline was not replayed.
+
+- 2026-10-19 07:30: MiMo/low remaining-work planning also timed out after300s;
+  ZERO revisions created/approved and ZERO new task57 commands dispatched. Owner
+  37961 is switching through the normal binary to gpt-5.6-luna/low for another
+  reviewed planning attempt, then must restart to load the latest Ghost builder.
+  Static regression also caught the non-root Ghost process being pointed into
+  root-only task-state for npm cache: root installs now use root0700 state cache,
+  Ghost gets its own0700 cache under its already owned data directory.6 Ghost
+  tests pass. Source tests713total/710pass/0fail/3skips passed before that literal
+  path fix and are refreshing in89865. Lint/typecheck pass. The new post-dispatch
+  ledger failure test confirms local completed evidence survives, incomplete
+  remote history blocks fresh recovery, and local continuation never redispatches
+  the completed command. Native package-install checksum9ceee119 is now obsolete
+  after the Ghost cache-path fix; rebuild before handoff. Intended final runtime
+  settings remain original MiMo/high. Ubuntu MySQL is still inactive/partly
+  configured; keep all quarantined/frozen data and the original failure history.
+
+- 2026-10-19 07:17: remaining-work planning in71789 created ZERO revisions and
+  dispatched ZERO new commands: the selected gpt-5.6-sol provider returned
+  "Selected model is at capacity. Please try a different model." This was recorded
+  in operator-events4551 but CLI showed a blank failure because stderr was empty.
+  New regression reproduced it; planner now exposes the bounded redacted JSONL
+  error (or exit code), without accepting partial output or automatic retry.
+  Installed-Codex isolation/planner suite51/51 PASS. CLI now explicitly announces
+  replacement planning and its separate approval/resume boundary. Current owner
+  is changing to MiMo/low through the binary, then restart to load these fixes
+  before resubmitting task57's six remaining catalog commands. Completed baseline
+  and original confirmed failed job must remain immutable. No Ghost recovery
+  revision is approved yet. Final intended model restoration is MiMo/high.
+
+- 2026-10-19 07:12: Ubuntu57 install-stack job
+  `9d5da3a1871c60fa8e399a16c65b248c`, attempt
+  `47942e3c-0468-4048-8117-b141288a49cd`, CONFIRMED failed during dpkg
+  configuration after package unpacking. Baseline completed once, no later Ghost
+  command dispatched. CLI SSH read-only inspection identifies the explicit cause:
+  missing `/etc/mysql/debian-start`, dpkg EOF at conffile prompt. mysql-server and
+  mysql-server-8.0 are iU8.0.46; core ii8.0.46. MySQL inactive; new data directory
+  identity66311:276302480:110:112:755. The quarantined test data and frozen original
+  retain identities274219390 and261628643 respectively, no original was opened
+  with MySQL. Adequate disk/inodes; no OOM conclusion. Do NOT replay the old job or
+  call57 a pass. New catalog install preserves existing conffiles, restores missing
+  ones, logs privately0600 and emits at most4000 final error bytes, keeping exit
+  status. Regression failed before/passes after. Explicit dpkg conffile EOF now
+  yields PACKAGE_CONFIGURATION_CONFLICT instead of CAUSE_UNKNOWN; successful
+  warning output stays successful.55 focused tests pass. owner14818 closed
+  normally; fresh71789 will propose reviewed remaining-work revision for57,
+  preserving completed baseline and original failure history. Temporary sol/low
+  remains. Full checks/package require refresh after these latest fixes.
+
+- 2026-10-19 07:04 continuation: owner14818 (normal binary, existing vault) is
+  executing Ubuntu57, selected directly from ghost-linux. Full7 forward and4
+  rollback definitions matched the current native catalog byte-for-byte before
+  explicit approval. Intervention is enabled. capture-baseline completed once;
+  install-stack was just released at its normal safe boundary. Observe its
+  durable job, never replay an uncertain command. Ghost is NOT counted yet.
+  Source fixes also now accept signed execution_recovery events and retain the
+  latest completed command's baseline through later non-mutating pause records.
+  Reproducing integration regression failed on both defects before fixes; all22
+  signed recovery tests pass afterward, including fresh-client proposal and zero
+  replay. Current unfiltered suite709total/706pass/0fail/3opt-in skips; npm test
+  rerun in34128. Temporary sol/low remains; restore original MiMo/high at handoff.
+  Prior60854 and26724 owners closed normally, no other lab mutation is running.
+
+- 2026-10-19 Ubuntu56 cleanup COMPLETED: all3 exact reviewed commands dispatched
+  once with normal explicit approval and intervention boundaries. Data directory
+  identity66311:274219390:110:112:755 moved intact to
+  `/var/lib/webminai/lab-recovery/ubuntu-test-cleanup-20261019/mysql-test-remains`;
+  original config and package baseline retained privately beside it. Explicitly
+  listed MariaDB packages removed without purge/autoremove, mysql-common restored,
+  owned start-policy/masks removed. Final dpkg audit/absence/process probes exit0.
+  Older frozen originals were not touched. Saved guarded restoration was NOT run
+  and requires fresh review, especially after Ghost; it is not full dependency
+  version restoration.55 stays empty partial,54 planning timeout, neither passed.
+  Ghost package tracking now distinguishes installed ii packages from residual
+  rc entries as well as upgrades, with a failing-before/passing-after regression.
+  Restart CLI before Ghost so it loads the updated builder. Temporary sol/low
+  still needs restoration to original MiMo/high after all owners finish.
+
+- 2026-10-19 native-only continuation: acceptance scope corrected to the README
+  Linux-without-Docker application column:86/87 reviewed application/host cycles;
+  Ubuntu Ghost alone remains pending. Platform/maintenance counts are separate.
+  Debian42 applied the timer fixture once and43 completed its newly generated,
+  explicitly approved signed recovery once. Both journals have one dispatch,
+  one completion and zero unknowns. Remote execution
+  `dad4075cb7dad52118d52220810137ff` verifies all9 signed records, ending
+  rollback_completed. Independent CLI SSH probe confirmed both units, enablement
+  link, runtime marker and task42 state absent; Netdata active; ledger/key root
+  0700/0600 retained. Debian owner68369 closed normally.
+  Ubuntu54 timed out during LOCAL planning, ZERO dispatch.55 is an empty partial
+  proposal after the validator refused destructive cleanup without rollback,
+  ZERO dispatch; neither is a test pass. Ubuntu owner21761 then safely rejected a
+  stale settings save and exited1 without overwriting anything. Fresh60854 set
+  temporary gpt-5.6-sol/low through the binary and is planning revised cleanup
+  with a separately guarded restoration command. Original MiMo/high must be
+  restored through a fresh binary after all owners finish. No Ubuntu cleanup or
+  Ghost command has dispatched at this checkpoint. All four protected backup
+  identities match the preceding checkpoint; MariaDB inactive, Netdata active.
+  New regression reproduced Ghost rollback claiming upgraded pre-existing
+  packages; package-name delta fixes both shared callers.47 focused tests pass.
+  Baseline hashing now fails closed on per-file hash errors, with regression.
+  Current full checks708total/705pass/0fail/3opt-in skips, installed-Codex boundary
+  50/50, lint/typecheck/package-install/checksums pass. Package5f102869 is already
+  superseded by subsequent packaged documentation; rebuild before final handoff.
+
+- 2026-10-19 signed remote recovery continuation: the user superseded Ubuntu
+  cleanup with the signed common-task-record feature. The exact cleanup proposal
+  remains local task50 in planning with ZERO dispatch; no MariaDB cleanup/switch
+  occurred. Ubuntu51 applied the service fixture, correctly refused unsafe
+  recovery-baseline permissions, and completed separately reviewed ordinary
+  rollback. New52 applied the fixed private marker; new53 completed its newly
+  generated, explicitly reviewed signed-record recovery. Each forward/recovery
+  command dispatched once, no unknown outcome. Signature chains verified before
+  and after recovery; both fixtures' unit/runtime/state paths are absent.
+  Persistent remote ledger/key remain intentionally, root0700/0600. The four
+  protected database/config identities are unchanged, MariaDB inactive and
+  Netdata active. Original MiMo/high settings were not changed. See
+  remote-common-task-recovery.md for implementation scope and outstanding work.
+  All CLI owners from this continuation exited normally; readonly audit shows
+  ZERO running/reverting tasks and ZERO live execution leases. Full checks now
+  707 total /704 passed /0 failed /3 opt-in skips, lint/typecheck pass. The new
+  archive includes signed-recovery work and supersedes the older03:27 hash below.
+  Final package/install/checksum checks PASS; archive SHA256
+  `393adf4d271d4c06e62ee416ca0771f9cd83ec847268d2a475ff8d78f86bfbc2`.
+  Coverage remains181/183; Ghost and Ubuntu update are not newly passed.
+
+- Final cleanup:63706 also exited normally after restoring MiMo/high. All binary terminal sessions started in this continuation are closed; no background validation owner remains. Final archive checksum and git diff --check PASS.
+
+- 03:27 handoff: **181/183** checked execution cases; remaining Ubuntu Ghost and its final update. **12 formal scoped repeat/restoration cases**, now across all9 hosts, pass; this is NOT universal restoration/repeat proof for all183 combinations. Current full source checks683total/680passed/0failed/3opt-in skips plus lint/typecheck/package-install/checksums pass. Application archive0d1c031c8734a3084fbde4a5c2cc0b6153765e679b53b5ba92c5327a25180f9c is current. All prior owners closed normally; fresh63706 restored original **mimo-v2.6-pro/high** through the binary and is quitting. Read-only audit:9 configured hosts, ZERO running/reverting tasks, ZERO live execution leases. No command from this continuation remains pending. Preserve historical unknowns and original backups.
+- Next authority needed: safe Ghost environment. Async question offered a separate disposable Ubuntu host (preferred) or explicitly reviewed temporary MariaDB/MySQL switch with restoration. No answer received; DO NOT switch database engines, migrate or delete originals, change host isolation, or treat MariaDB as supported Ghost storage. Existing Ghost runtime code unchanged; its Node compatibility also needs actual safe-route testing. All other eligible applications and8non-Ubuntu updates passed. Do not repeat completed updates to refresh metadata; run27 already corrected Alma/Rocky release discovery read-only. See docs/linux-lab-branch-audit.md for tested branch boundaries and remaining release-signoff limits. No commits.
+
+- 03:23 both formal apt cases COMPLETE: `node scripts/assert-cli-lifecycle.js /home/vscode/.intentaiops webminai-debian-13 37 38 39 40 41` and Ubuntu45/46/47/48/49 PASS. Each unchanged repeat is bracketed by equal probes; both separately reviewed rollbacks have fresh restoration probes equal to baseline. All approved/prepared/dispatched/completed attempts exactly once. Debian removed task-added htop3.4.1-5; Ubuntu preserved pre-existing htop. **12 formal scoped cases now pass across all9 lab hosts**, not all183 combinations or arbitrary whole-host state. No formal fixture remains deployed; no remote package/update job active.
+- Read-only correction run27 COMPLETE: Alma45/Rocky37 exact reviewed shell, one dispatch each, both report current9.8 and published10.2. Original run26 install-current-release-updates dispatch remains exactly1 each, verified read-only. Original inaccurate reports/history remain immutable; correction is separate evidence. Owner54659 closed normally. All8 update cases now have package/report evidence, with corrections explicitly linked here. Coverage181/183 still; only Ubuntu Ghost and Ubuntu update remain, plus universal repeat/restoration and final release sign-off.
+- Owners73569/41884 are closing normally after their final probes; then restore original mimo-v2.6-pro/high through a fresh binary before handoff. Never save settings from an older snapshot over this restoration. Ghost safe-route question remains unanswered; no database engine switch or new host/isolation change has been authorized. Current source checks683/680/0fail/3skips and archive0d1c031c8734a3084fbde4a5c2cc0b6153765e679b53b5ba92c5327a25180f9c remain current; only audit/checkpoint/matrix edits followed.
+
+- 03:18 current full checks683total/680pass/0fail/3opt-in skips; lint/typecheck/package-install/5native checksums PASS. Current archive SHA2560d1c031c8734a3084fbde4a5c2cc0b6153765e679b53b5ba92c5327a25180f9c includes release-index version sorting and milestone docs. No source changes afterward. Native platform limitations unchanged.
+- Read-only release correction owner54659 selected ONLY Alma/Rocky. Both routing decisions informed_planning/context-only for system-update-linux, not executable update foundations. Canary disabled because requests are strictly read-only. Run27 plans are being generated; compare each against releaseReportCorrectionCommand before approval, verify no writes/install/restarts/rollback and zero dispatch. Expected new tasks Alma45/Rocky37, confirm actual IDs. Original run26 package jobs must never be repeated.
+- Formal apt cases: first-restoration probes Debian40 and Ubuntu48 completed once and match baseline37/45 byte-for-byte. Both original/repeated applies match exact public commands and before/after repeat digests. Debian39 second rollback completed once/no-op; Ubuntu47 second rollback at normal reviewed approval/execution in41884. Debian owner73569 opening AI editor for final probe41; Ubuntu final probe49 next. Only final probes/combined lifecycle assertions remain, do not count prematurely. Helpers debianAptFinalRestorationRequest/ubuntuAptFinalRestorationRequest preserve exact probe shells.
+
+- 03:14 report-content audit caught an additional real bug despite exit0 updates: Alma/Rocky official version lists used lexical sort before tail10, hiding10.x behind9.x and causing incorrect AI statements that no newer major release exists. Regression with real shell/index fixtures failed before/pass after; only those2 Linux case arms now use sort -Vu. All24 common-task tests PASS. Original run26 plans/results remain immutable; do NOT rerun package updates. Need separately reviewed read-only official-release follow-up on Alma/Rocky and record corrections referencing run26 before calling their release reports correct. Native execution coverage remains181/183, but2 report-content checks are now explicitly pending. Full checks/package must rerun, archive6dafe is obsolete after this source change.
+- Apt cases: Debian39 and Ubuntu47 reapply completed3/3 once, exact apply/rollback/probe policy comparisons passed and before/after digests identical. First reviewed rollbacks Debian38 and Ubuntu46 completed once; Debian purged only newly introduced htop3.4.1-5, Ubuntu preserved its pre-existing htop. Debian40 first-restoration probe matched exact source and is at approval/execution in73569; Ubuntu48 probe planning in41884. Keep second rollback39/47 pending until first-restoration probes finish, then review separately and run final probes41/49. Both formal cases remain uncounted until final assertions.
+
+- 03:10 formal apt continuation: Debian37 baseline/38 original htop apply completed, each once; catalog38 matched source before approval. Debian39 proposed reapply matched EXACT original capture-install body/policies and rollback, bracketed by exact probe-before/probe-after; approved normally, now executing (owner73569). Ubuntu45 baseline/46 original apply completed once, exact plans verified; Ubuntu47 reapply planning in owner41884. Htop was already present on Ubuntu, so this case must preserve it; Debian38 actually installed htop3.4.1-5. Do not run first rollback until its repeated apply/probes complete. No formal case counted yet. All8 update owners/jobs finished,11603 closed. Ghost choice remains unanswered, no MySQL switch authorized.
+
+- 03:05 run26 completed all8 updates AND all8 read-only AI summaries, owner11603 closed normally. No update job active. Existing coverage181/183. Extra formal apt cases: Debian baseline37 completed once, exact probe comparison and forward journal assertion PASS; original catalog38 matched current source before approval and is now executing htop (owner73569). Ubuntu baseline45 completed once, exact probe comparison and forward assertion PASS; owner41884 opening catalog to prepare expected46 install-htop. Both compare full dpkg name/version/architecture/status-set hash and exact selected htop/state-file hashes/modes/owners. They are not finished formal cases yet. Keep first apply deployed until its separately reviewed repeated apply/probes completes; then review each rollback independently with a restoration probe between them. Helpers debianAptRepeatFixture/ubuntuAptRepeatFixture and verifyAptProbePlanCode hold exact source/probe comparisons. Task36 on Debian remains harmless undispatched empty partial, never count it.
+
+- 03:01 authoritative coverage **181/183**, Rocky21 added. All8 run26 hosts completed3/3 once/no unknown, forward assertions PASS. Fresh binary41884 independently confirmed Rocky SSH identity/active Stage2; final health gate approved. Run26 completed. Owner11603 is generating read-only AI summaries for all8 existing update tasks; no remote mutations remain. Owner41884 disconnecting Rocky, close from dashboard. Ubuntu Ghost and update are the2 remaining eligible combinations; full repeat/restoration assertions are separate unfinished work.
+- Debian formal apt case input correction: task36 is PARTIAL with zero commands/results/journal/dispatch, NOT a test pass. The raw PTY submitted at an unintended newline before the probe shell; no host mutation occurred. Owner73569 resubmitted one-line exact probe as baseline37, predicting subsequent catalog38. Helper debianAptRepeatFixture now uses /var/lib/webminai/task-state/38-install-htop and source38 plan. Verify actual IDs/one-command plan before approval. No formal case mutation is approved yet. This was driver input, not evidence of a product shell-execution defect.
+
+- 03:00 all8 run26 update hosts have now completed3/3 once/no unknown; Rocky36 forward assertion PASS with3 package updates. Owner11603 waits at FINAL batch4 health gate, do not approve until fresh Rocky SSH/Stage2 inspection. No remote update job active. Inspector73569 is now generating Debian36 ONE read-only baseline probe for an added apt repeat/restoration case, not executing package changes. Expected subsequent catalog task37 install-htop. Helper debianAptRepeatFixture holds exact probe and source37 plan; state is /var/lib/webminai/task-state/37-install-htop. Compare actual plan before approval and verify actual task IDs; do not assume prediction. Nothing for this formal case dispatched yet. Existing10 formal cases are still the only completed repeat/restoration assertions. Debian update35 is already finished, so no package overlap.
+
+- 02:56 coverage **180/183**, Suse20/Oracle21 added, others unchanged. Suse49/Oracle36 completed3/3 once/no unknown; journal assertions PASS. Inspector73569 confirmed fresh SSH identity/active Stage2 on both before explicit batch3 gate approval. Owner11603 now executes final Rocky36 stage. No Ubuntu task active. Remaining3: Rocky update running, Ubuntu Ghost and Ubuntu update last. Universal repeat/restoration assertions and full release sign-off remain unfinished.
+- Post44 read-only binary inspection PASS: all4 protected Ubuntu directory device/inode/owner/group/mode identities unchanged; MariaDB server AND core remain1:10.11.14-0ubuntu0.24.04.1; MariaDB inactive, Netdata active. Mattermost44 state/app/temp-app/data/credentials/unit/links/vhosts/account absent, task-created PostgreSQL root absent. Previous Odoo/Moodle/Presta cleanup still passes. The frozen original was not started or modified. Inspector73569 now on Oracle menu after health verification.
+- All current checks PASS after Kubernetes identity fix: npm test682total/679pass/0fail/3opt-in skips; lint/typecheck/package-install/5 native checksums/diff whitespace PASS. Current SHA2566dafe02c1fbb2781061098f99f3bae55795a061eba798dda98b2912ea32ca1cd. Installed-Codex opt-in explicitly rerun50/50 PASS, SSH31pass/1real-host skip, FreeBSD compatibility compile PASS (existing static-glibc linker warnings). New audit/checkpoint/matrix are not packaged files. Async user choice requested for safe Ghost lab route; no response yet and no database switch authorized.
+
+- 02:49 coverage **178/183**, Debian21/Fedora20 added, other counts unchanged. Debian35/Fedora32 update3/3 once/no unknown; journal assertions PASS. Debian2 package updates, Fedora9. Inspector73569 verified fresh SSH identity/active Stage2 on each before explicit batch2 health approval. Run26 owner11603 now executes Suse49/Oracle36; Rocky36 remains gated. Inspector73569 disconnecting Fedora, available for next read-only inspections. No Ubuntu task active; original model restoration pending until owners finish.
+- Branch evidence ledger added at docs/linux-lab-branch-audit.md, explicitly not full release sign-off. Continued audit reproduced Kubernetes previous OOM termination being labeled with the current replacement container ID. Verified official ContainerStateTerminated.containerID contract; fixed shared projection to use termination's own ID and omit absent identity, leaving current waiting-state identity separate. Regression failed before/pass after; diagnostic tests13/13 PASS, real Kubernetes remains unavailable. Source/doc changes make cd730252 archive obsolete, rerun full checks/package before handoff. No gateway permission or native protocol/build change for this JavaScript fix.
+
+- 02:45 coverage **176/183**, Alpine16/Arch20 added; other counts unchanged. Run26 Alpine37 and Arch35 completed3/3 once/no unknown, forward journal assertions PASS. Alpine libexpat updated2.8.5→2.9.0; Arch8 package updates including OpenSSH/systemd. Arch udev hook emitted container sysfs permission warnings, pacman exit0; no isolation change. Inspector73569 connected both normally after updates, independently confirming SSH identity and active Stage2 before explicit batch1 gate approval. Run26 owner11603 now releases Debian35/Fedora32 batch2,5hosts pending overall. Owner46377 closed normally after Ubuntu44 cleanup. Inspector73569 currently on Arch host menu; next close normally or use read-only inspection. No Ubuntu task active. Remaining7: Ubuntu Ghost plus Debian/Fedora/Suse/Oracle/Rocky/Ubuntu updates. Protected Ubuntu baseline still needs post44 inspection; never run its update before Ghost/baseline resolution.
+
+- 02:42 authoritative coverage **174/183**: Alma21, Alpine15, Arch19, Debian20, Fedora19, Suse19, Oracle20, Rocky20, Ubuntu21. Ubuntu44 revision10 completed7 forward and4 separately reviewed original cleanup commands, each once/no unknown. Declared-retry/approved-revision lifecycle checker PASS. Owner46377 now leaving controls, close normally before any new proposals so it loads the latest rollback-evidence fix next time. Empty9 remains unapproved.
+- Alma44 update canary completed3/3, once/no unknown; forward journal checker PASS. Report records exactly libbson and mongo-c-driver-libs upgraded1.30.12→1.30.13, no reboot/release upgrade. Inspector73569 reconnected through normal binary AFTER completion and verified host identity/active Stage2. Explicit health gate approved; run26 batch1 now executes Alpine37 and Arch35. Remaining Debian35/Fedora32/Suse49/Oracle36/Rocky36 still gated. Ubuntu44 acquisition reached exact411962109bytes, no OOM kills; final native checksum/application health/restart verification and cleanup then passed. Remaining9: Ubuntu Ghost and8updates, including7 selected pending in26 plus Ubuntu last.
+
+- 02:40 full current-source checks PASS: npm test681total/678pass/0fail/3opt-in skips, lint, typecheck, package-install,5 native checksums, git diff --check. Current application SHA256cd730252b224482208b3a72d2e69686cf7c2a5b594e45ac4d5275233e12e5829. Two revised-rollback evidence tests PASS, including rejection of an unapproved diagnostic template. Existing owners do not load this later reconciliation fix until restarted; no uncertain job currently needs reconciliation.
+- Fresh bulk read-only journal audit verified160 ordinary reverted catalog cases. All3 exceptions then passed explicit reviewed-cleanup assertions: Alma PrestaShop18/revision3 (original unknown retained, failed operator attestation, original dispatch once), openSUSE Drupal39/revision6 (original confirmed exit1 retained, original dispatch once), Ubuntu Odoo42/revision7 (original unknown retained/failed attestation). All9 health task forward assertions also PASS: Alma8, Alpine7, Arch13, Debian8, Fedora6, Suse18, Oracle8, Rocky8, Ubuntu11. This independently confirms172/183 execution lifecycle cases, NOT universal repeated/baseline guarantees.
+- Inspector73569 performed read-only Alma SSH inspection through the binary: update log640bytes, latest metadata refresh02:28:24; cgroup oom/oom_kill0, disk42%used. No evidence of OOM and no reason to replay. It disconnected Alma and now connects Ubuntu for read-only acquisition inspection. Owner11603 still has canary update44 running; owner46377 Ubuntu44 acquisition running after4 confirmed commands. Later update stages remain undispatched.
+
+- 02:36 branch audit found and fixed revised-rollback reconciliation losing its diagnostic command: lookup previously searched only original revertCommands. A deterministic interrupted-job fixture failed before/pass after. Collectors now resolve the exact approved rollback-plan fingerprint; an unapproved proposal is ignored. Existing original revert-plan construction is shared with execution to preserve its fingerprint. Two new cases PASS; focused execution/admin/controller66/66 PASS before adding the unapproved case. No replay or approval change. Owners11603/46377 remain running older code, finish their owned jobs before restart. Archive5c41a150 is now OBSOLETE after this source/doc change; full checks/repackage rerunning. Alma44 update and Ubuntu44 acquisition are acknowledged running, no unknown; no later update stages dispatched yet.
+
+- 02:30 run26 staged system-update-linux approved after exact current-catalog comparison of all24 commands on8 hosts, ZERO prior dispatch: Alma44 canary, Alpine37, Arch35, Debian35, Fedora32, openSUSE49, Oracle36, Rocky36. Owner11603. Ubuntu excluded because its app work remains. Same-release updates only, no reboot/release upgrade, explicitly one-way with no invented rollback. Canary running; later batches require explicit health gates. Do not duplicate or replay interrupted update commands.
+- Ubuntu44 proposal10 reviewed against current7 templates and original4 rollback bodies. Only additional shell differences: non-printing `IFS= read -r password` in3 commands instead of cat substitution, and credentials-ready message instead of printing its path; generated password is newline-terminated. Explicitly reviewed these equivalent changes; all other bodies, dependencies, risks, modes, retry policies and timeouts match. Original rollback unchanged; source correctly AI-planned, fixed allowlisted diagnostic annotations, no failure handlers. Approval submitted in46377, separate resume still required. Historical empty9 remains unapproved. No44dispatch at comparison.
+- Latest checks679total/676pass/0fail/3opt-in skips; lint/typecheck/package-install and all5 native checksums PASS. Current archive SHA2565c41a15006c121355973ae3ff7de85e801cdfbaa02db88b7e2beba62cd54c66c. Installed-Codex opt-in50/50 previously passed after fixes. Checkpoint/matrix are not packaged files.
+
+- 02:22 continuation: authoritative coverage **172/183**, Rocky20 and all other host counts unchanged from171. Rocky WordPress35 passed10 forward/3 separately reviewed cleanup commands, each once with no unknown; lifecycle assertion PASS. Owner72650 closed normally. Fresh owner46377 loads planner fixes and submitted ubuntu44RevisionInstructionsV2 through normal task44 revision controls. Task44 remains undispatched; compare every proposed body/policy/dependency and original rollback before approval, then separately resume. Empty historical proposal remains unapproved. Full unfiltered tests93721 and lint/typecheck/package-install17481 are running after the latest source/docs changes. Remaining11: Ubuntu Mattermost44, Ubuntu Ghost and9updates last. Universal repeat/baseline assertions and full branch audit remain unfinished.
+
+- 02:11 new live finding: Ubuntu44 AI revision correctly refused because generic redaction removed the public Mattermost digest and symbolic credential-reader fragments. Empty proposal was explicitly REJECTED, original plan unchanged, ZERO44dispatch. It remains an unapproved historical revision, never approve it. Fixed planner context by passing saved task catalogId through controller/AdminService, then rebuilding public command templates inside CodexPlanner from current application code and sanitized host inventory. Historical outputs, passwords and arbitrary64hex remain redacted. No raw historical payload is unredacted. Added guards rejecting new empty replacement proposals AND fresh approval of older empty proposals. Three boundary-forwarding regressions and two empty-proposal cases failed before/pass after as applicable; focused/full final reruns are in progress. Last9d4f52archive is now OBSOLETE and needs rebuilding after these source changes.
+- Rocky WordPress35 completed10/10, forward approval/attempt checker PASS. Owner72650 is reviewing separate3-command cleanup; not yet counted. Ubuntu owner21988 still loads OLD planner and must close/restart before any further proposal. Revised instructions should reference Current verified catalog templates, not insist on copying redacted old shell bodies. Helpers ubuntu44ExpectedRevisedCommands still define exact desired7bodies/dependencies and original rollback. All3 run25 Mattermost lifecycle passes already counted171/183; no remote job currently active.
+
+- 01:53 authoritative coverage **171/183**: Alma20, Alpine15, Arch19, Debian20, Fedora19, openSUSE19, Oracle20, Rocky19, Ubuntu20. Run25 Debian34/Oracle35/Rocky34 all reverted through normal consolidated review of12 cleanup commands, Ubuntu44 explicitly excluded. Each7 forward/4 rollback once, approved/prepared/dispatched/completed; lifecycle assertions PASS, no unknown. PostgreSQL identity guards passed creation and removal on all3. Oracle pause/resume preserved5 completed commands and dispatched only2 pending. No active remote jobs. Remaining12: Ubuntu Mattermost44, Rocky WordPress, Ubuntu Ghost,9updates last; stronger universal repeat/baseline assertions and full branch audit remain unfinished.
+- Only21988 remains open, returned to dashboard after cleanup. Next: connect Ubuntu, history44, normal operator proposal with ubuntu44RevisionInstructions; compare all7 pending bodies/policies/dependencies and original rollback with ubuntu44ExpectedRevisedCommands before approving, then separately resume. Task44 currently has ZERO dispatch. Ghost runtime remains unchanged pending actual compatibility testing and a safe MySQL lab route; no assumption authorizes modifying protected MariaDB originals.
+
+- 01:44 Oracle35 reviewed resume COMPLETED: configure/verify succeeded, all7 forward commands approved/prepared/dispatched/completed exactly ONCE, no unknown. Forward journal checker PASS. Pause preserved first5 results without replay. Run25 now has Debian34/Oracle35/Rocky34 completed and deployed; Ubuntu44 planned/undispatched. Fresh21988 is returning to dashboard to review cleanup of ONLY those3 completed hosts, then revise pending Ubuntu44 with fixed acquisition. Coverage remains168 until cleanup is confirmed. No active remote jobs now; all earlier owners closed.
+
+- 01:40 update: old run25 finished PARTIAL safely. Rocky34 COMPLETED7/7, original download ultimately verified despite recorded curl18/56 warnings; forward journal checker PASS. Oracle35 completed acquisition successfully, then honored the reviewed pause BEFORE configure/verify: exactly5 completed/once, no unknown, no extra retry. Ubuntu44 remained planned with ZERO dispatch; no later stage ran. Owners26776/84026/2946 closed normally. Fresh binary21988 (loads download fix) is on Oracle to review/resume ONLY its2pending commands, then will revise Ubuntu44 before dispatch. Debian34/Rocky34 still deployed pending reviewed cleanup; no run25 case counted yet.
+- Ubuntu44 fixed proposal helpers prepared from current source and readonly normal-vault data: ubuntu44OriginalPlan, ubuntu44FixedCatalogPlan, ubuntu44ExpectedRevisedCommands, ubuntu44RevisionInstructions. Instructions2932characters preserve all7pending bodies except fixed acquisition, use reviewed-ORIGINAL_ID-44 IDs/remapped dependencies, preserve original rollback and all risk/timeouts/modes/retry. Compare every body/policy before fresh approval; do not assume AI reproduced it. No Ubuntu revision approved yet.
+
+- 01:36 current continuation: fixed a reproduced Mattermost acquisition bug rather than removing support. Rocky job progress for ce2da57206781f679b44a29649c0d508 contained allowlisted curl18/56 and connection-reset evidence, not OOM. A local real-HTTP truncation fixture proved curl internal retries repeated offset131072 instead of retained offsets196608/262144. New native acquisition uses up to6 fresh curl processes, recomputes resume offset, bounds connection15s/transfer600s/size, retries only enumerated transient codes, and still verifies pinned SHA256 before extraction. Tests cover retained partial progress,6-attempt cap, corrupt checksum rejection and non-retried HTTP404. No native protocol change or new dependency.
+- Current full checks PASS after the download fix: npm test, independent node --test675total/672pass/0fail/3opt-in skips, lint, typecheck and package-install. Current archive SHA2569d4f52de0d2ffc4d94398d9b3b57e3b2ae3a4a4fb1f77937451168ea95c8f89c includes milestone documentation. Existing approved run25 plans remain OLD and unchanged. New code cannot silently change their live commands.
+- Owner26776 still runs run25; Oracle35/Rocky34 acquisitions remain active. New owner84026 used normal operator controls to pause Oracle35 at a safe boundary at01:35. This does not terminate its running download. It prevents another old-plan declared attempt after a confirmed timeout. Next pause Rocky34 similarly, wait for authoritative outcomes and lease release, then propose/review only remaining work with fixed acquisition and NEW IDs. Preserve4 completed commands and PostgreSQL identity markers. Do not resolve an active acknowledged job by attestation, cancel it via arbitrary shell, replay uncertain work or approve old pending Ubuntu44 before reviewing the fixed acquisition. Current84026 loads pre-fix builders; restart before generating replacement plans.
+
+- 2026-10-19 01:19 continuation: user requires retaining all main-supported software/routes and fixing setup rather than dropping support. HEAD is now983ff09 (user commit), prior work preserved. Added common-tasks regression covering all87 promoted native Linux application routes, validated plans and refusal to substitute no-change compatibility reports. Focused23/23PASS; npm test PASS; independent node --test670total/667pass/0fail/3opt-in skips; lint/typecheck/diff whitespace PASS. No production source changes in this continuation yet, archive unchanged.
+- Run25 still active in26776: Oracle35 and Rocky34 both completed4 commands and are acquiring Mattermost, no uncertain outcome. Inspector75340 observed Oracle archive121839616bytes at01:13:35 and Rocky228114432bytes at01:16:07 with current modification timestamps, disk42%used, oom/oom_kill0. Both downloads were progressing; do not restart them. Inspector is closing normally. Its host refresh makes a fresh owner advisable for later settings-sensitive actions. Debian34 remains deployed, Ubuntu44 still gated.
+- Ghost investigation: its current setup requires exact Node22 and attempts a global NodeSource install, which can fail with existing newer Node. A private Node22 runtime was proposed, but NO Ghost runtime source changes implemented yet. User challenged necessity; verified actual npm metadata: ghost6.57.0 engines.node='^22.23.1' (excludes24), while ghost-cli1.29.1 accepts20/22/24. Official https://docs.ghost.org/faq/node-versions/ also marks23+ unsupported. Official Node22.23.1 archive checksums retrieved successfully; linux-x64 tar.gz7a8cb04b4a1df4eaf432125324b81b29a088e73570a23259a8de1c65d07fc129, linux-arm64 tar.gz543fa39e57d4c07855939459a323f4deb9a79dd1bb45e6e99458b0f2de10db8d. Do not silently downgrade system Node or assume24 works. Async user choice for disposable Ghost host versus reviewed temporary MariaDB/MySQL lab switch remains unanswered. Existing protected data unchanged.
 
 - Active run25: binary26776 owns approved staged Mattermost deployment on Debian34 (canary), Oracle35, Rocky34 and Ubuntu44, batchSize2/failureThreshold1. All4 plans exactly matched current catalog commands/rollback/files before approval, zero dispatch. Normal consolidated approval granted28 commands. Wait for canary and stages; do not start duplicate tasks. Each still needs observed completion, separately reviewed rollback and journal/cleanup assertions before counting. Source archive/checks unchanged since last full verification; subsequent edits are checkpoint/matrix only.
 - Latest00:48: Oracle35 acknowledged install-stack running, only baseline completed; Rocky34 completed first4 commands and acknowledged install-mattermost running; Ubuntu44 planned with ZERO dispatch. No unknown outcome on any run25 task. Debian34 remains deployed and completed. Poll26776; next stage needs explicit health-gate confirmation. After all stages, close26776 normally and reopen a fresh binary before settings-sensitive actions (inspector refreshed settings), then separately review rollback for every completed host. Partial failure requires its own reviewed recovery, not blind saved rollback. Do not count any run25 host until cleanup assertions pass.

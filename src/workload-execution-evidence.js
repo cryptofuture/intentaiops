@@ -19,8 +19,11 @@ export function kubernetesWorkloadDiagnostics (object, { uid, startedAt, observe
       const evidence = { container: container.name, ...(/^[a-z][a-z0-9+.-]*:\/\/[a-f0-9]{12,128}$/u.test(container.containerID ?? '') ? { runtimeIdentity: digest(container.containerID) } : {}), ...(Number.isSafeInteger(container.restartCount) ? { restartCount: container.restartCount } : {}) }
       for (const terminated of [container.state?.terminated, container.lastState?.terminated]) {
         if (!terminated || !inWindow(terminated.finishedAt, startedAt, observedAt)) continue
-        if (terminated.reason === 'OOMKilled') add('WORKLOAD_OOM_KILLED', 'Kubernetes recorded an OOM-killed container in this pod during the observation window.', evidence)
-        else if (Number.isInteger(terminated.exitCode) && terminated.exitCode !== 0) add('CONTAINER_EXIT', 'Kubernetes recorded a nonzero container termination.', { ...evidence, exitCode: terminated.exitCode })
+        const terminationEvidence = { ...evidence }
+        delete terminationEvidence.runtimeIdentity
+        if (/^[a-z][a-z0-9+.-]*:\/\/[a-f0-9]{12,128}$/u.test(terminated.containerID ?? '')) terminationEvidence.runtimeIdentity = digest(terminated.containerID)
+        if (terminated.reason === 'OOMKilled') add('WORKLOAD_OOM_KILLED', 'Kubernetes recorded an OOM-killed container in this pod during the observation window.', terminationEvidence)
+        else if (Number.isInteger(terminated.exitCode) && terminated.exitCode !== 0) add('CONTAINER_EXIT', 'Kubernetes recorded a nonzero container termination.', { ...terminationEvidence, exitCode: terminated.exitCode })
       }
       const waiting = container.state?.waiting?.reason
       if (['ErrImagePull', 'ImagePullBackOff', 'InvalidImageName'].includes(waiting)) add('IMAGE_PULL_FAILED', 'The container cannot obtain its image.', evidence)

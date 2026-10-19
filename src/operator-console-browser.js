@@ -5,6 +5,9 @@ let selected
 let proposal
 let replay = []
 let stream
+let actionsEnabled = false
+let remoteSelected
+let remoteProposal
 const show = (id, value) => { byId(id).textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2) }
 async function api (url, body) {
   const response = await fetch(url, body ? { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Intent-CSRF': csrf ?? '' }, body: JSON.stringify(body) } : {})
@@ -30,6 +33,10 @@ async function refresh () {
     const title = document.createElement('h3')
     title.textContent = host.id
     byId('hosts').append(title)
+    const records = document.createElement('button')
+    records.textContent = `Inspect remote records: ${host.id}`
+    records.onclick = handle(() => remoteRecords(host.id))
+    byId('hosts').append(records)
     for (const task of host.tasks) {
       const button = document.createElement('button')
       button.textContent = `#${task.id} ${task.status}: ${task.request}`
@@ -85,6 +92,7 @@ byId('connect').onclick = handle(async () => {
   byId('login').hidden = true
   byId('main').hidden = false
   byId('actions').hidden = !session.actions
+  actionsEnabled = session.actions
   show('mode', session.actions ? 'Operator actions enabled. Changed commands require explicit review and approval.' : 'Read-only console')
   await refresh()
   stream?.close()
@@ -93,6 +101,66 @@ byId('connect').onclick = handle(async () => {
   stream.onmessage = message => { events.push(JSON.parse(message.data)); if (events.length > 500) events.shift(); show('events', events) }
 })
 byId('refresh').onclick = handle(refresh)
+async function remoteRecords (hostId, after = '') {
+  const request = { hostId }
+  remoteSelected = request
+  const listing = await api(`/remote-tasks?host=${encodeURIComponent(hostId)}&after=${encodeURIComponent(after)}`)
+  if (remoteSelected !== request) return
+  remoteSelected = null
+  remoteProposal = null
+  byId('prepare-remote').hidden = true
+  byId('execute-remote').hidden = true
+  show('remote-plan', '')
+  byId('remote-records').replaceChildren()
+  show('remote-history', listing.executions?.length ? 'Select a record to verify its signatures and target identity.' : 'No signed records available.')
+  for (const entry of listing.executions ?? []) {
+    const button = document.createElement('button')
+    button.textContent = `${entry.executionId} (${entry.sequence} records)`
+    button.onclick = handle(async () => {
+      const request = { hostId, executionId: entry.executionId }
+      remoteSelected = request
+      const history = await api(`/remote-task?host=${encodeURIComponent(hostId)}&execution=${encodeURIComponent(entry.executionId)}`)
+      if (remoteSelected !== request) return
+      remoteProposal = null
+      byId('execute-remote').hidden = true
+      show('remote-plan', '')
+      show('remote-history', history)
+      byId('prepare-remote').hidden = !actionsEnabled
+    })
+    byId('remote-records').append(button)
+  }
+  if (listing.executions?.length === 10) {
+    const next = document.createElement('button')
+    next.textContent = 'Next remote-record page'
+    next.onclick = handle(() => remoteRecords(hostId, listing.executions.at(-1).executionId))
+    byId('remote-records').append(next)
+  }
+}
+byId('prepare-remote').onclick = handle(async () => {
+  if (!remoteSelected?.executionId) throw new Error('select verified remote history first')
+  const source = remoteSelected
+  const proposal = await api('/action', { action: 'prepare-remote-recovery', ...source })
+  if (remoteSelected !== source) return
+  remoteProposal = { ...proposal, hostId: source.hostId }
+  show('remote-plan', remoteProposal)
+  byId('execute-remote').hidden = false
+})
+byId('execute-remote').onclick = handle(async () => {
+  if (!remoteProposal || !remoteSelected) throw new Error('prepare and review a recovery plan first')
+  const proposal = remoteProposal
+  let takeoverApproved = false
+  if (proposal.ownership?.owned) {
+    takeoverApproved = globalThis.confirm('The confirmed source still has a remote owner. Fence that session and take ownership for this reviewed recovery?')
+    if (!takeoverApproved) return
+  }
+  if (!globalThis.confirm('Approve and execute exactly the displayed recovery plan? Source history and baseline will be checked again.')) return
+  await api('/action', { action: 'execute-remote-recovery', hostId: proposal.hostId, taskId: proposal.taskId, expectedVersion: proposal.stateVersion, fingerprint: proposal.fingerprint, approved: true, ...(takeoverApproved ? { takeoverApproved: true, takeoverFingerprint: proposal.ownership.ownerFingerprint } : {}) })
+  if (remoteProposal !== proposal) return
+  byId('execute-remote').hidden = true
+  await inspect(proposal.hostId, proposal.taskId)
+  remoteProposal = null
+  await refresh()
+})
 for (const button of document.querySelectorAll('[data-action]')) button.onclick = handle(async () => { await action(button.dataset.action); await inspect(selected.hostId, selected.task.id) })
 byId('analyze').onclick = handle(async () => show('proposal', await action('analyze', { question: byId('instructions').value })))
 byId('propose').onclick = handle(async () => {

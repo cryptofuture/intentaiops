@@ -37,16 +37,40 @@ passwords or dropping an unowned database. Its native file cleanup also requires
 a valid baseline; dangling application paths are rejected before capture. These
 guards do not make MariaDB a supported Ghost database or authorize migration.
 These guards do not rewrite older approved plans. AlmaLinux Mattermost passed a
-live creation, identity check and reviewed cleanup. Other PostgreSQL routes remain
-live-unverified; shell fixtures cover refusal, reuse, identity changes and cleanup.
+live creation, identity check and reviewed cleanup. Ubuntu Odoo also completed
+reviewed cleanup recovery, retaining its original uncertain rollback history.
+Other PostgreSQL routes still need complete live lifecycle verification; shell
+fixtures cover refusal, reuse, identity changes and cleanup.
 Package-manager and created-cluster removal failures retain recovery state rather
 than reporting successful restoration. A failed cleanup still needs review.
+
+Mattermost archive downloads use at most six fresh curl invocations for transient
+transport failures. Each invocation resumes from the bytes actually retained,
+with connection, duration and size limits; curl's internal retry no longer
+rewinds progress to the initial offset. The pinned checksum still gates
+extraction. These are artifact-transfer retries inside the reviewed command,
+not permission to replay an uncertain administration command. Existing approved
+plans are unchanged and need reviewed revision to use this fix.
 
 Planner references explicitly include the existing direct-command and durable-job
 timeout limits, including their defaults. This does not increase execution policy.
 Executable commands containing redacted checksum, SSH URL or private-key markers
 are rejected, including rollback commands. Ordinary log-redaction filters remain
 valid. Redacted history is not a source of replacement secrets or artifact hashes.
+
+Catalog revisions also receive templates rebuilt from the application's current
+public catalog code and sanitized host inventory. The saved task determines the
+catalog identity; operator text cannot supply replacement template payloads.
+Public checksums and symbolic credential readers remain usable without
+unredacting historical commands, outputs or credentials. Templates grant no
+execution approval. Empty replacement proposals, including older stored empty
+proposals, cannot erase pending work through fresh revision approval.
+
+Rollback reconciliation selects diagnostic collectors from the exact approved
+rollback fingerprint, including reviewed replacement cleanup plans. A matching
+command name in an unapproved proposal cannot supply diagnostic instructions.
+Reconciliation still retrieves the existing job result and never dispatches the
+cleanup command again.
 
 New POSIX CLI-install plans preserve occupied launchers and dangling installation
 roots before claiming ownership; rollback rejects symlinked ownership state.
@@ -184,6 +208,11 @@ Enable explicitly with `intentaiops console --console-actions`. Exact Host/Origi
 Actions include run/host pause, abort, analysis, forward/rollback proposals, approval, remote reconciliation, outcome attestation, selected continuation, and reviewed rollback. Suggestions do not execute automatically. Rollback has separate display and execution-confirmation steps. SSH authentication remains in the terminal. Existing validation, signed execution, identity checks, and leases remain authoritative.
 
 An operator rollback also updates its linked multi-host outcome and aggregate run status, without changing other hosts or historical execution events.
+
+Linux current-release update reports version-sort AlmaLinux and Rocky release
+indexes before limiting output. Lexical sorting could hide newer two-digit major
+versions. This only fixes release discovery; it never starts a release upgrade
+or rewrites an older approved update plan.
 
 ## 7. Replay and diagnostics
 

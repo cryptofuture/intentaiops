@@ -143,6 +143,21 @@ test('maintenance catalog installs current-release updates without reboot or rel
   assert.match(windows.find(item => item.id === 'report-system-update').command, /AvailableFeatureUpgrades/u)
 })
 
+test('release indexes retain newer two-digit major versions before limiting output', () => {
+  const report = buildCommonTask('system-update-linux', 230, { platform: 'linux' }).plan.commands.find(item => item.id === 'report-system-update').command
+  const versions = ['10', '10.0', '10.1', '10.2', '8', ...Array.from({ length: 11 }, (_, i) => `8.${i}`), '9', ...Array.from({ length: 9 }, (_, i) => `9.${i}`), '9.8']
+  const index = versions.map(version => `<a href="${version}/">${version}/</a>`).join('\n')
+  for (const [id, label] of [['almalinux', 'AlmaLinux'], ['rocky', 'Rocky Linux']]) {
+    const command = report.split(`${id}) `)[1].split(' ;; ')[0]
+    const result = spawnSync('/bin/sh', ['-c', `curl () { printf '%s\\n' '${index}'; }; ${command}`], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    const lines = result.stdout.trim().split('\n')
+    assert.equal(lines.length, 10)
+    assert.ok(lines.includes(`published-release: ${label} 10.2`), result.stdout)
+    assert.ok(lines.indexOf(`published-release: ${label} 10.2`) > lines.indexOf(`published-release: ${label} 9.8`))
+  }
+})
+
 test('common task catalog exposes every promoted Linux application candidate', () => {
   assert.deepEqual(
     listCommonTasks({ category: 'application', platform: 'linux' }).map(task => task.id),
@@ -175,10 +190,44 @@ test('Intent AI Ops installer is the last application task on every host platfor
     assert.match(built.plan.commands.find(command => command.id === 'install-intent-ai-ops').command, /raw\.githubusercontent\.com/u)
     assert.equal(built.plan.revertCommands.length, 1)
     if (platform !== 'windows') {
+      const install = built.plan.commands.find(command => command.id === 'install-intent-ai-ops').command
+      for (const marker of ['owns-root', 'installed']) {
+        assert.ok(install.includes(`: > "$state/${marker}"; chmod 0600 "$state/${marker}"`))
+      }
       for (const command of [...built.plan.commands, ...built.plan.revertCommands]) {
         const syntax = spawnSync('/bin/sh', ['-n', '-c', command.command], { encoding: 'utf8' })
         assert.equal(syntax.status, 0, `${platform}/${command.id}: ${syntax.stderr}`)
       }
+    }
+  }
+})
+
+test('promoted native Linux applications remain eligible across the lab distributions', async () => {
+  const service = new LinuxHostContextService({ fetchImpl: async () => new Response('official release', { status: 200 }) })
+  const common = ['wordpress', 'woocommerce', 'joomla', 'drupal', 'prestashop', 'moodle', 'n8n', 'intent-ai-ops']
+  const hosts = [
+    ['almalinux', '9.8', 'dnf', ['jellyfin', 'mattermost']],
+    ['alpine', '3.23', 'apk', []],
+    ['arch', '', 'pacman', ['jellyfin']],
+    ['debian', '13', 'apt', ['jellyfin', 'mattermost']],
+    ['fedora', '44', 'dnf', ['jellyfin']],
+    ['opensuse-leap', '16.0', 'zypper', ['jellyfin']],
+    ['ol', '9.8', 'dnf', ['jellyfin', 'mattermost']],
+    ['rocky', '9.8', 'dnf', ['jellyfin', 'mattermost']],
+    ['ubuntu', '24.04', 'apt', ['jellyfin', 'mattermost', 'ghost', 'odoo']]
+  ]
+  for (const [id, versionId, manager, extra] of hosts) {
+    const linuxContext = await service.build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: id === 'alpine' ? 'openrc' : 'systemd', osRelease: { ID: id, VERSION_ID: versionId }, commands: { [manager]: true } }
+    })
+    const options = { platform: 'linux', category: 'application', linuxContext, docker: { preferred: false, ready: false, hostIsContainer: true } }
+    const expected = [...common, ...extra].map(name => `${name}-linux`).sort()
+    assert.deepEqual(listEligibleCommonTasks(options).map(task => task.id).sort(), expected, id)
+    for (const catalogId of expected) {
+      const built = buildCommonTask(catalogId, 901, options)
+      assert.equal(validateCommandPlan(built.plan, rootExecutionPolicy({})), built.plan, `${id}/${catalogId}`)
+      assert.ok(!built.plan.commands.some(command => command.id === 'record-compatibility'), `${id}/${catalogId} must deploy, not substitute a no-change report`)
     }
   }
 })

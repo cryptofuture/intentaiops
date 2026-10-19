@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 
 const before = { availability: 'available', platform: 'linux', bootId: 'boot-a', scopeId: 'group-a', oomKills: 0, memoryLimitBytes: 805306368, observedAt: '2026-10-16T01:00:00Z' }
 const codes = observations => observations.map(value => value.code)
@@ -115,6 +116,22 @@ test('Kubernetes scopes reasons by UID, generation and termination window', () =
   assert.ok(codes(kubernetesWorkloadDiagnostics({ ...pending, status: { reason: 'Evicted' } }, window)).includes('POD_EVICTED'))
   assert.ok(codes(kubernetesWorkloadDiagnostics({ ...pending, kind: 'Job', status: { conditions: [{ type: 'Failed', status: 'True', reason: 'DeadlineExceeded' }] } }, window)).includes('KUBERNETES_JOB_DEADLINE'))
   for (const status of [401, 403, 404, 409, 429, 500, 502, 503, 504]) assert.equal(kubernetesApiDiagnostics(status).length, 1)
+})
+
+test('Kubernetes previous termination identity never falls back to the replacement container', () => {
+  const current = 'containerd://' + 'a'.repeat(64)
+  const previous = 'containerd://' + 'b'.repeat(64)
+  const terminated = { reason: 'OOMKilled', exitCode: 137, containerID: previous, finishedAt: '2026-10-16T01:30:00Z' }
+  const pod = { kind: 'Pod', metadata: { uid: 'pod-a' }, status: { containerStatuses: [{ name: 'app', containerID: current, state: { waiting: { reason: 'CrashLoopBackOff' } }, lastState: { terminated } }] } }
+  const digest = value => createHash('sha256').update(value).digest('hex').slice(0, 40)
+  let diagnostics = kubernetesWorkloadDiagnostics(pod, window)
+  assert.equal(diagnostics.find(value => value.code === 'WORKLOAD_OOM_KILLED').evidence.runtimeIdentity, digest(previous))
+  assert.equal(diagnostics.find(value => value.code === 'CONTAINER_RESTART_BACKOFF').evidence.runtimeIdentity, digest(current))
+  delete terminated.containerID
+  diagnostics = kubernetesWorkloadDiagnostics(pod, window)
+  assert.equal(diagnostics.find(value => value.code === 'WORKLOAD_OOM_KILLED').evidence.runtimeIdentity, undefined)
+  assert.equal(diagnostics.find(value => value.code === 'CONTAINER_RESTART_BACKOFF').evidence.runtimeIdentity, digest(current))
+  assert.ok(!JSON.stringify(diagnostics).includes(current))
 })
 
 test('Docker and Podman require exact identities, not exit 137 or stale terminations', async () => {

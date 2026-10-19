@@ -9,6 +9,7 @@ import { TaskStore } from '../src/task-store.js'
 import { executeApprovedPlan } from '../src/plan-validator.js'
 import { detectOperationLoop } from '../src/operation-loop-detector.js'
 import { AdminService } from '../src/admin-service.js'
+import { planFingerprint } from '../src/execution-journal.js'
 
 test('Linux crash worker requires explicit lab opt-in and rejects unrelated hosts', () => {
   const worker = fileURLToPath(new URL('../scripts/linux-reliability-worker.js', import.meta.url))
@@ -290,6 +291,38 @@ test('Admin recovery skips completed commands and refuses ambiguous dispatch', a
   await assert.rejects(admin.execute({ settings: {}, serverId: 'host', taskId: task.id, plan: plan(), approve: async () => true }), /reconciliation/u)
   assert.deepEqual(calls, ['date'])
 })
+
+for (const approved of [true, false]) {
+  test(`rollback reconciliation uses only fingerprint-matched approved diagnostic commands: ${approved}`, async t => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'intent-rollback-evidence-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const tasks = new TaskStore(root)
+    const task = tasks.savePlan('host', tasks.create('host', 'Inspect').id, plan())
+    const command = { id: 'reviewed-cleanup', command: 'true', risk: 'read', timeoutMs: 1000, diagnostic: { kind: 'filesystem', target: '/opt/task' } }
+    const rollback = { ...plan(), commands: [command], operatorRollback: true }
+    const version = tasks.stateVersion('host', task.id)
+    const revisionId = tasks.proposeRevision('host', task.id, rollback, version)
+    if (approved) tasks.approveRevision('host', task.id, revisionId, version, planFingerprint(rollback))
+    const lease = tasks.acquireExecution('host', task.id, task.plan)
+    const metadata = { operation: 'rollback', rollbackRevision: planFingerprint(rollback) }
+    const before = { availability: 'available', platform: 'linux', observedAt: '2026-10-19T00:00:00Z' }
+    for (const type of ['command_prepared', 'command_dispatched', 'command_acknowledged', 'command_outcome_unknown']) {
+      tasks.appendExecutionEvent('host', task.id, lease.owner, { type, commandId: command.id, attemptId: 'interrupted-cleanup', metadata: { ...metadata, ...(type === 'command_prepared' ? { evidenceBefore: before } : {}), ...(type === 'command_acknowledged' ? { jobId: '12'.repeat(16) } : {}) } })
+    }
+    tasks.releaseExecution('host', task.id, lease.owner)
+    const collected = []
+    const admin = new AdminService({ dataRoot: root, tasks })
+    admin.serverSecrets = async () => ({})
+    admin.netdata = () => ({
+      jobStatus: async id => { assert.equal(id, '12'.repeat(16)); return { state: 'succeeded', exitCode: 0 } },
+      collectExecutionEvidence: async options => { collected.push(options); return { ...before, observedAt: '2026-10-19T00:00:01Z' } }
+    })
+    await admin.reconcileTask({ settings: {}, serverId: 'host', taskId: task.id })
+    assert.deepEqual(collected, [{ item: approved ? command : undefined, before }])
+    assert.equal(tasks.rollbackState('host', task.id)[0].status, 'completed')
+    assert.equal(tasks.allExecutionEvents('host', task.id).filter(event => event.type === 'command_dispatched').length, 1)
+  })
+}
 
 test('recovered jobs pause remaining work until renewed operator approval', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'intent-recovered-job-'))

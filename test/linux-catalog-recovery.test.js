@@ -959,6 +959,38 @@ test('Ghost rejects existing MariaDB data before any MySQL package changes', asy
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('Ghost keeps package recovery state after failed removal and never runs global autoremove', async () => {
+  const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('release') }).build({
+    execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'ubuntu', VERSION_ID: '24.04' }, commands: { apt: true } }
+  })
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-ghost-packages-'))
+  try {
+    const plan = buildCommonTask('ghost-linux', 310, { linuxContext: context }).plan
+    const state = '/var/lib/webminai/task-state/310-ghost-linux'
+    mkdirSync(root + state, { recursive: true })
+    writeFileSync(root + state + '/packages.added', 'mysql-server 8.0\n')
+    let command = plan.revertCommands.find(item => item.id === 'restore-stack').command
+    assert.doesNotMatch(command, /apt-get autoremove/u)
+    for (const value of [...plan.modifiedFiles].sort((a, b) => b.length - a.length)) command = command.replaceAll(value, root + value)
+    const result = spawnSync('/bin/bash', ['-c', 'apt-get () { return 42; }; systemctl () { return 0; }; ' + command], { encoding: 'utf8' })
+    assert.equal(result.status, 42, result.stderr)
+    assert.equal(existsSync(root + state + '/packages.added'), true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Ghost uses a private supported Node runtime without replacing system Node', async () => {
+  const context = await new LinuxHostContextService({ fetchImpl: async () => new Response('release') }).build({
+    execution: { platform: 'linux', architecture: 'x86_64', init: 'systemd', osRelease: { ID: 'ubuntu', VERSION_ID: '24.04' }, commands: { apt: true } }
+  })
+  const plan = buildCommonTask('ghost-linux', 311, { linuxContext: context }).plan
+  const stack = plan.commands.find(item => item.id === 'install-stack').command
+  assert.doesNotMatch(stack, /apt-get install -y nodejs|deb.nodesource.com/u)
+  assert.match(stack, /sha256sum -c/u)
+  assert.match(stack, /node-v22\.23\.1-linux/u)
+  assert.match(plan.commands.find(item => item.id === 'configure-ghost').command, /ExecStart=\/opt\/webminai-ghost-cli\/bin\/node/u)
+  assert.match(plan.commands.find(item => item.id === 'install-ghost').command, /export PATH='\/opt\/webminai-ghost-cli\/bin'/u)
+})
+
 test('Alpine CLI installation owns only packages absent from its captured baseline', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'intent-alpine-install-'))
   try {

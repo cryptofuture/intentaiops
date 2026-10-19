@@ -49,6 +49,8 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
       const cookie = request.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith('intent_session='))?.slice('intent_session='.length)
       if (!equal(cookie, token)) return json(401, { error: 'authentication required' })
       if (request.method === 'GET' && url.pathname === '/snapshot') return json(200, controller.snapshot())
+      if (request.method === 'GET' && url.pathname === '/remote-tasks') return json(200, await controller.remoteCommonTasks(url.searchParams.get('host'), url.searchParams.get('after') ?? ''))
+      if (request.method === 'GET' && url.pathname === '/remote-task') return json(200, await controller.inspectRemoteCommonTask(url.searchParams.get('host'), url.searchParams.get('execution')))
       if (request.method === 'GET' && url.pathname === '/task') {
         response.writeHead(200, { 'Content-Type': 'application/json' })
         return response.end(JSON.stringify(controller.inspect(url.searchParams.get('host'), Number(url.searchParams.get('task')))))
@@ -86,7 +88,7 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
       if (!actions) return json(403, { error: 'console is read-only' })
       if (!equal(request.headers['x-intent-csrf'], csrf)) return json(403, { error: 'CSRF check failed' })
       const { action, hostId, taskId, expectedVersion, fingerprint } = body
-      if (['resume', 'approve', 'rollback', 'resume-run', 'resolve'].includes(action) && body.approved !== true) throw new Error('explicit operator approval required')
+      if (['resume', 'approve', 'rollback', 'resume-run', 'resolve', 'execute-remote-recovery'].includes(action) && body.approved !== true) throw new Error('explicit operator approval required')
       let result
       if (action === 'pause' || action === 'abort') result = controller.control(hostId, taskId, action, expectedVersion)
       else if (action === 'pause-run') result = controller.pauseRun(body.runId, body.serverIds)
@@ -95,7 +97,13 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
       else if (action === 'resolve') result = controller.resolve(hostId, taskId, expectedVersion, body.commandId, body.status, body.evidence, body.rollbackRevision)
       else if (action === 'propose') result = await controller.propose(hostId, taskId, body.instructions, expectedVersion, body.rollback === true)
       else if (action === 'approve') result = controller.approve(hostId, taskId, body.revisionId, expectedVersion, fingerprint)
-      else if (['resume', 'rollback', 'resume-run'].includes(action)) {
+      else if (action === 'prepare-remote-recovery') result = await controller.prepareRemoteRecovery(hostId, body.executionId)
+      else if (action === 'execute-remote-recovery') {
+        controller.checkVersion(hostId, taskId, expectedVersion)
+        const operation = controller.executeRemoteRecovery(hostId, taskId, expectedVersion, fingerprint, { approved: body.approved, takeoverApproved: body.takeoverApproved, takeoverFingerprint: body.takeoverFingerprint })
+        operation.catch(error => controller.record({ type: 'operator_action_failed', hostId, taskId, message: String(error.message) }))
+        result = { accepted: true, action }
+      } else if (['resume', 'rollback', 'resume-run'].includes(action)) {
         if (action !== 'resume-run') controller.checkVersion(hostId, taskId, expectedVersion)
         else {
           if (!Array.isArray(body.decisions) || !body.decisions.length) throw new Error('select participating hosts')
@@ -109,7 +117,7 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
         operation.catch(error => controller.record({ type: 'operator_action_failed', hostId, taskId, message: String(error.message) }))
         result = { accepted: true, action }
       } else throw new Error('unsupported operator action')
-      if (action === 'propose') {
+      if (action === 'propose' || action === 'prepare-remote-recovery') {
         response.writeHead(200, { 'Content-Type': 'application/json' })
         return response.end(JSON.stringify(result))
       }

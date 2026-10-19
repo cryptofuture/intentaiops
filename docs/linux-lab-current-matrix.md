@@ -1,8 +1,21 @@
 # Current Linux lab coverage
 
-Updated 2026-10-19 00:48 UTC. Source: the existing normal vault's task journals and cached host inventories, checked through the current checkout. Remote execution uses the binary CLI, not a separate service runner. Exact active owners and recovery obligations are in [the checkpoint](linux-lab-validation-status.md).
+Updated 2026-10-19 08:43 UTC. Source: the existing normal vault's task journals and cached host inventories, checked through the current checkout. Remote execution uses the binary CLI, not a separate service runner. Exact active owners and recovery obligations are in [the checkpoint](linux-lab-validation-status.md).
 
 ## Scope
+
+The current acceptance target is the README's **Linux without Docker**
+application column, including its stated distribution restrictions. It contains
+87 eligible application/host cases, of which **87 passed reviewed apply/rollback
+cycles**, including reviewed recovery/cleanup where required. Ubuntu Ghost57
+passed deployment, HTTP/database/restart checks and its original reviewed rollback;
+separately approved cleanup61 preserved its leftover MySQL datadir in quarantine.
+Package name/version hashes, repository files and scoped host state match the
+pre-install baseline. This was not an unattended clean rollback. Platform fixtures,
+health reports and system updates below are separate supplementary coverage and
+must not inflate application coverage. Docker/Podman is excluded from live tests.
+These cycle passes do not prove universal repeated-execution restoration or
+completion of the branch-feature audit.
 
 Current catalog eligibility resolves to **183 host/task combinations**: 87 application, 78 system, and 18 diagnostic/maintenance combinations. These are eligibility counts, not passes. Eligibility must be refreshed before execution; unsupported routes are not successes. The default picker exposes application, diagnostic and maintenance categories. Explicit `--lab-tasks` also exposes eligible Linux system fixtures, with normal review and approval.
 
@@ -20,19 +33,72 @@ Current catalog eligibility resolves to **183 host/task combinations**: 87 appli
 
 ## Fresh application lifecycle evidence
 
-Current authoritative total: **168/183**. Alma20, Alpine15, Arch19, Debian19,
-Fedora19, openSUSE19, Oracle19, Rocky18, Ubuntu20. All78 system fixtures, all9
-health, all9 Drupal, all9 PrestaShop and all9 Moodle cases pass. Ten formal
+Current authoritative total: **182/183**. Alma21, Alpine16, Arch20, Debian21,
+Fedora20, openSUSE20, Oracle21, Rocky21, Ubuntu22. All78 system fixtures, all9
+health, all9 Drupal, all9 PrestaShop and all9 Moodle cases pass. Twelve formal
 repeat/scoped restoration cases pass, including Arch29/30/31/32/33. Older totals
 below are historical, not current counts.
 
-Run25 Mattermost is active: Debian34 canary completed and its health gate was
-explicitly approved; Oracle35/Rocky34 are executing, Ubuntu44 remains gated.
-These deployments are not counted until separately reviewed cleanup passes.
+Ghost57 lifecycle assertion passes seven active forward commands and four
+original rollback commands, each once with zero unknown outcomes. Its original
+failed package attempt remains recorded, completed baseline was not repeated,
+and unapproved AI proposal12 was never executed. Cleanup61 dispatched once;
+directory identity `66311:276302480:110:112:700` is preserved under root0700
+`/var/lib/webminai/lab-recovery/ubuntu-ghost-task-57/mysql-after`.
+The original `/var/lib/mysql` path and all managed Ghost paths are absent;
+protected earlier database backups are unchanged and Netdata remains active.
+Future Ghost plans stop rollback with `DATABASE_DATA_REMAINS` rather than
+silently count newly created database residue as restored baseline.
 
-Latest local checks:669total/666passed/0failed/3opt-in skips; npm test, lint,
+Latest full checks:720 total/717 passed/0 failed/3 opt-in skips; lint, typecheck,
+package-install, native checksums and diff whitespace checks pass. Historical
+counts/checks below are not the latest release sign-off.
+
+New apt cases passed the combined read-only lifecycle assertion:
+Debian37/38/39/40/41 and Ubuntu45/46/47/48/49. Exact unchanged reapply and both
+separately reviewed rollbacks preserved/restored the selected package/path state.
+Debian removed only task-added htop; Ubuntu preserved its pre-existing htop.
+
+Run25 Mattermost: Debian34, Oracle35 and Rocky34 passed7 forward/4 separately
+reviewed rollback commands, each dispatched once, no unknown outcomes. Oracle's
+safe pause preserved5 completed commands; reviewed resume executed only2 pending
+steps. Ubuntu44 revision10 also passed7 forward/4 original reviewed rollback
+commands, each once, no unknown; current acquisition fix passed live.
+
+Rocky WordPress35 passed10 forward/3 separately reviewed rollback commands,
+each dispatched once with no unknown outcome. Lifecycle journal assertion PASS.
+
+Fresh read-only journal audit confirms160 ordinary apply/rollback cases plus3
+reviewed recovery cycles: Alma PrestaShop18/revision3, openSUSE Drupal39/revision6,
+Ubuntu Odoo42/revision7. Their original failures/unknown events remain intact.
+All9 completed health-task forward journals also pass, confirming172 before the
+latest Ubuntu Mattermost and Alma update completions.
+These are execution-evidence checks, not universal baseline-restoration proof.
+Run26 now stages8 one-way current-release updates; Ubuntu is excluded and no
+update is counted until its report and journal assertions pass. Alma44 now passes
+all3 commands and its report:2 package updates, no reboot, no unknown. Fresh binary
+host inspection confirmed Stage2 healthy before the batch-1 gate was approved.
+Alpine37 and Arch35 also passed3/3 commands and fresh binary SSH/Stage2 checks.
+Alpine updated libexpat; Arch recorded8 package upgrades. Arch's udev hook
+reported read-only container sysfs warnings while pacman returned0. They remain
+recorded warnings, not fabricated task failures or grounds to change isolation.
+Debian35 and Fedora32 passed3/3 update commands and fresh binary SSH/Stage2
+checks before their health gate released openSUSE49/Oracle36.
+openSUSE49/Oracle36 passed3/3 update commands and fresh binary SSH/Stage2 checks;
+Rocky36 also passed3/3 and fresh binary SSH/Stage2 checks. Run26 completed all8
+hosts; its AI summaries are read-only follow-up. Ubuntu's update remains last.
+The report-content audit then found lexical release sorting hid Alma/Rocky10.x.
+Fixed version sorting passed a failing-before shell regression and normal-binary
+read-only correction run27 (Alma45/Rocky37), both showing10.2. Original update
+dispatches remain1 each; old reports are preserved, not rewritten.
+
+Latest local checks:683total/680passed/0failed/3opt-in skips; npm test, lint,
 typecheck, package-install and all5 native checksums PASS. Archive SHA256
-28388d21f245c7396557d2a11b8c0ff5c992035ae47136299254dadab25180e8.
+0d1c031c8734a3084fbde4a5c2cc0b6153765e679b53b5ba92c5327a25180f9c.
+All87 promoted native Linux application routes have explicit eligibility/plan
+regression coverage. Mattermost now resumes retained partial download bytes
+between bounded fresh curl invocations; real-HTTP truncation failed before the
+fix and passes afterward, along with retry-cap/checksum/HTTP-error cases.
 CLI rollback now rejects symlinked ownership state; CLI planning foundations no
 longer claim databases or container bootstraps. Both regressions failed before
 the fix and pass afterward. These checks do not count the in-progress live cases.
@@ -63,7 +129,7 @@ Current authoritative total: **140/183** fresh distinct reviewed health/apply-an
 | Moodle | PASS #20 | PASS #17; reviewed revision and formal repeat #18 | PASS #30; formal repeat #31 | PASS #32 | PASS #30 (reviewed recovery) | PASS #42; formal repeat #45 | PASS #33 | PASS #32 | PASS #41 |
 | n8n | PASS #15 | PASS #14 | PASS #11 | PASS #16 | PASS #5 | PASS #8 | PASS #15 | PASS #16; old outcome unknown | PASS #26 |
 | Ghost | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Pending |
-| Mattermost | PASS #41 | Unsupported | Unsupported | Pending | Unsupported | Unsupported | Pending | Pending | Pending |
+| Mattermost | PASS #41 | Unsupported | Unsupported | PASS #34 | Unsupported | Unsupported | PASS #35 (pause/resume) | PASS #34 | Pending #44 |
 | Odoo | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | PASS #42 (reviewed rollback recovery) |
 | Jellyfin | PASS #9 | Unsupported | PASS #2/#3 | PASS #9 | PASS #1 | PASS #12/#13 | PASS #9 | PASS #9 | PASS #12 (reviewed revision3 recovery) |
 | Intent AI Ops install | PASS #43 | PASS #36 | PASS #34 (reviewed private-runtime recovery) | PASS #33 | PASS #31 | PASS #48 (reviewed recovery) | PASS #34 | PASS #33 | PASS #43 |

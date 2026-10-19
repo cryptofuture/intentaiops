@@ -19,7 +19,7 @@ const GHOST_IMAGE = 'ghost@sha256:5cb081c6be54af505f28cde86f209e8e43910da0a40622
 const MYSQL_IMAGE = 'mysql@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b'
 const NGINX_IMAGE = 'nginx@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
 const IMAGES = [GHOST_IMAGE, MYSQL_IMAGE, NGINX_IMAGE]
-const DPKG_PACKAGE_FORMAT = '$' + '{binary:Package} $' + '{Version}\\n'
+const DPKG_PACKAGE_FORMAT = '$' + '{db:Status-Abbrev} $' + '{binary:Package} $' + '{Version}\\n'
 const DOCKER_CODENAME_FALLBACK = '$' + '{UBUNTU_CODENAME:-$VERSION_CODENAME}'
 const MYSQL_ROOT_REFERENCE = '$$' + '{MYSQL_ROOT_PASSWORD}'
 
@@ -64,7 +64,7 @@ function buildUbuntuTask (taskId, context) {
   const paths = ubuntuPaths()
   const commands = [
     item('capture-baseline', 'baseline', ubuntuBaseline(state, paths), 'Capture package, repository, nginx, MySQL, and task-owned path state exactly once'),
-    item('install-stack', 'packages', ubuntuPackages(state), 'Install NodeSource Node.js 22, Oracle MySQL 8, nginx, and required utilities', ['capture-baseline'], 1200000, 'job'),
+    item('install-stack', 'packages', ubuntuPackages(state), 'Install private Node.js 22, Oracle MySQL 8, nginx, and required utilities', ['capture-baseline'], 1200000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(), 'Generate the database password on-host without emitting it', ['capture-baseline']),
     item('initialize-database', 'database', ubuntuDatabase(state), 'Create the isolated MySQL database and least-privilege Ghost account', ['install-stack', 'generate-credentials'], 900000, 'job'),
     item('install-ghost', 'acquire', ubuntuGhostInstall(state), `Install Ghost ${VERSION} through the pinned official Ghost-CLI`, ['install-stack'], 3600000, 'job'),
@@ -151,7 +151,7 @@ function compatibilityManifest (context, route) {
     host: { fingerprint: context.fingerprint, distribution: context.identity.id, distributionVersion: context.identity.versionId, architecture: context.identity.architecture, family: context.management.family },
     selectedRoute: { id: route, status: route === 'no-change-incompatible' ? 'unsupported' : 'supported' },
     components: [
-      { profileId: 'nodejs', selectedVersion: route.startsWith('compose') ? 'image-managed' : '22', source: route.startsWith('compose') ? 'official-container-image' : 'signed-nodesource', status: route === 'no-change-incompatible' ? 'unavailable' : 'supported' },
+      { profileId: 'nodejs', selectedVersion: route.startsWith('compose') ? 'image-managed' : '22.23.1', source: route.startsWith('compose') ? 'official-container-image' : 'checksum-pinned-official-node-archive', status: route === 'no-change-incompatible' ? 'unavailable' : 'supported' },
       { profileId: 'mysql', selectedVersion: '8', source: route.startsWith('compose') ? 'official-container-image' : 'ubuntu-package', status: route === 'no-change-incompatible' ? 'unavailable' : 'supported' },
       { profileId: 'nginx', selectedVersion: 'distribution-or-image', source: 'reviewed-profile', status: route === 'no-change-incompatible' ? 'not-selected' : 'supported' }
     ]
@@ -180,6 +180,7 @@ function ubuntuBaseline (state, paths) {
   return join([
     'set -eu', `test ! -L ${quote(state)}`, `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...owned.map(path => `if [ -e ${quote(path)} ] || [ -L ${quote(path)} ]; then printf '%s\\n' ${quote(`BASELINE_DRIFT: managed path already exists: ${path}`)} >&2; exit 1; fi`),
     `install -d -o root -g root -m 0700 ${quote(`${state}/backup`)}`,
+    `if [ ! -e /var/lib/mysql ] && [ ! -L /var/lib/mysql ]; then : > ${quote(`${state}/mysql-data.absent`)}; fi`,
     `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)} | LC_ALL=C sort -u > ${quote(`${state}/packages.before`)}`,
     `systemctl is-active --quiet nginx 2>/dev/null && : > ${quote(`${state}/nginx.active`)} || true`,
     `systemctl is-enabled --quiet nginx 2>/dev/null && : > ${quote(`${state}/nginx.enabled`)} || true`,
@@ -192,22 +193,24 @@ function ubuntuBaseline (state, paths) {
 
 function ubuntuPackages (state) {
   return join([
-    'set -eu',
+    'set -eu', 'umask 077',
     'if [ -e /var/lib/mysql/aria_log_control ] || { [ -s /var/lib/mysql/mysql_upgrade_info ] && grep -qi MariaDB /var/lib/mysql/mysql_upgrade_info; }; then printf \'%s\\n\' \'Existing MariaDB data requires an operator-reviewed migration before MySQL installation\' >&2; exit 1; fi',
-    'export DEBIAN_FRONTEND=noninteractive', 'apt-get update', 'apt-get install -y ca-certificates curl gnupg nginx mysql-server openssl',
-    'if ! node -e "const [a,b,c]=process.versions.node.split(\'.\').map(Number);process.exit(a===22&&(b>23||(b===23&&c>=1))?0:1)" >/dev/null 2>&1; then',
-    'install -d -o root -g root -m 0755 /usr/share/keyrings',
-    'curl --fail --location --silent --show-error https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor --yes --output /usr/share/keyrings/nodesource.gpg',
-    'chmod 0644 /usr/share/keyrings/nodesource.gpg',
-    "arch=$(dpkg --print-architecture); printf '%s\\n' 'Types: deb' 'URIs: https://deb.nodesource.com/node_22.x' 'Suites: nodistro' 'Components: main' \"Architectures: $arch\" 'Signed-By: /usr/share/keyrings/nodesource.gpg' > /etc/apt/sources.list.d/nodesource.sources",
-    "printf '%s\\n' 'Package: nodejs' 'Pin: origin deb.nodesource.com' 'Pin-Priority: 600' > /etc/apt/preferences.d/nodejs",
-    "printf '%s\\n' 'Package: nsolid' 'Pin: origin deb.nodesource.com' 'Pin-Priority: 600' > /etc/apt/preferences.d/nsolid",
-    'apt-get update', 'apt-get install -y nodejs', 'fi',
-    'node -e "const [a,b,c]=process.versions.node.split(\'.\').map(Number);process.exit(a===22&&(b>23||(b===23&&c>=1))?0:1)"',
+    'export DEBIAN_FRONTEND=noninteractive',
+    `status=0; ( apt-get update && apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confmiss install -y ca-certificates curl gnupg nginx mysql-server openssl ) > ${quote(`${state}/packages.log`)} 2>&1 || status=$?`,
+    `if [ "$status" -ne 0 ]; then tail -c 4000 ${quote(`${state}/packages.log`)} || true; exit "$status"; fi`,
+    `if [ ! -x ${quote(`${CLI_ROOT}/bin/node`)} ]; then`,
+    "case $(uname -m) in x86_64) arch=x64; checksum=7a8cb04b4a1df4eaf432125324b81b29a088e73570a23259a8de1c65d07fc129;; aarch64|arm64) arch=arm64; checksum=543fa39e57d4c07855939459a323f4deb9a79dd1bb45e6e99458b0f2de10db8d;; *) printf '%s\\n' 'Unsupported Ghost Node runtime architecture' >&2; exit 1;; esac",
+    `archive=${quote(`${state}/node-runtime.tar.gz`)}`,
+    'curl --fail --location --silent --show-error --connect-timeout 15 --max-time 600 "https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-$arch.tar.gz" --output "$archive"',
+    'printf \'%s  %s\\n\' "$checksum" "$archive" | sha256sum -c -',
+    `install -d -o root -g root -m 0755 ${quote(CLI_ROOT)}`,
+    `tar -xzf "$archive" --strip-components=1 -C ${quote(CLI_ROOT)}`, 'rm -- "$archive"', 'fi',
+    `export PATH=${quote(`${CLI_ROOT}/bin`)}:"$PATH"`,
+    'node -e "process.exit(process.versions.node===\'22.23.1\'?0:1)"',
     'npm --version >/dev/null', 'mysqld --version | grep -Eq \'Ver 8\\.0\' || { printf \'Ghost production requires Oracle MySQL 8.0\\n\' >&2; exit 1; }',
     'systemctl enable --now mysql', 'systemctl enable --now nginx',
     `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)} | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}`,
-    `LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)} || true`,
+    addedDebianPackages(state),
     'printf \'%s\\n\' stack-ready'
   ])
 }
@@ -234,18 +237,19 @@ function ubuntuDatabase (state) {
 function ubuntuGhostInstall (state) {
   return join([
     'set -eu', 'umask 022', `if ! id webminai-ghost >/dev/null 2>&1; then useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-ghost; : > ${quote(`${state}/user-created`)}; fi`,
+    `export PATH=${quote(`${CLI_ROOT}/bin`)}:"$PATH"`,
     'export NODE_OPTIONS="${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000"', // eslint-disable-line no-template-curly-in-string
-    `install -d -o webminai-ghost -g webminai-ghost -m 0750 ${quote(DATA_ROOT)}`, `install -d -o webminai-ghost -g webminai-ghost -m 0755 ${quote(APP_ROOT)}`, `install -d -o webminai-ghost -g webminai-ghost -m 0755 ${quote(`${state}/npm-cache`)}`,
+    `install -d -o webminai-ghost -g webminai-ghost -m 0750 ${quote(DATA_ROOT)}`, `install -d -o webminai-ghost -g webminai-ghost -m 0755 ${quote(APP_ROOT)}`, `install -d -o root -g root -m 0700 ${quote(`${state}/npm-cache`)}`, `install -d -o webminai-ghost -g webminai-ghost -m 0700 ${quote(`${DATA_ROOT}/npm-cache`)}`,
     `if [ ! -x ${quote(`${CLI_ROOT}/bin/ghost`)} ]; then npm_config_cache=${quote(`${state}/npm-cache`)} npm install --global --prefix ${quote(CLI_ROOT)} --omit=dev --no-audit --no-fund --loglevel=error ghost-cli@1.29.1; fi`,
     `if [ ! -x ${quote(`${CLI_ROOT}/bin/pnpm`)} ]; then npm_config_cache=${quote(`${state}/npm-cache`)} npm install --global --prefix ${quote(CLI_ROOT)} --omit=dev --no-audit --no-fund --loglevel=error pnpm@11.15.1; fi`,
-    `if [ ! -f ${quote(`${APP_ROOT}/current/package.json`)} ]; then chown webminai-ghost:webminai-ghost ${quote(APP_ROOT)}; runuser -u webminai-ghost -- env HOME=${quote(DATA_ROOT)} PATH=${quote(`${CLI_ROOT}/bin:/usr/bin:/bin`)} npm_config_cache=${quote(`${state}/npm-cache`)} ${quote(`${CLI_ROOT}/bin/ghost`)} install ${quote(VERSION)} --dir ${quote(APP_ROOT)} --no-prompt --no-setup --no-start --no-stack --no-color; fi`,
+    `if [ ! -f ${quote(`${APP_ROOT}/current/package.json`)} ]; then chown webminai-ghost:webminai-ghost ${quote(APP_ROOT)}; runuser -u webminai-ghost -- env HOME=${quote(DATA_ROOT)} PATH=${quote(`${CLI_ROOT}/bin:/usr/bin:/bin`)} npm_config_cache=${quote(`${DATA_ROOT}/npm-cache`)} ${quote(`${CLI_ROOT}/bin/ghost`)} install ${quote(VERSION)} --dir ${quote(APP_ROOT)} --no-prompt --no-setup --no-start --no-stack --no-color; fi`,
     `node -p "require('${APP_ROOT}/current/package.json').version" | grep -Fx ${quote(VERSION)}`, 'printf \'%s\\n\' ghost-installed'
   ])
 }
 
 function ubuntuConfigure (paths) {
   const config = JSON.stringify({ url: `http://__PRIMARY__:${PORT}/blog/`, server: { host: '127.0.0.1', port: GHOST_PORT }, database: { client: 'mysql', connection: { host: '127.0.0.1', port: 3306, user: DATABASE_USER, database: DATABASE } }, paths: { contentPath: `${DATA_ROOT}/content` }, privacy: { useUpdateCheck: false } }, null, 2)
-  const unit = ['[Unit]', 'Description=Intent AI Ops Ghost validation service', 'After=network-online.target mysql.service', 'Wants=network-online.target', 'Requires=mysql.service', '', '[Service]', 'Type=simple', 'User=webminai-ghost', 'Group=webminai-ghost', `WorkingDirectory=${APP_ROOT}`, 'Environment=NODE_ENV=production', `EnvironmentFile=${CREDENTIALS}/service.env`, `ExecStart=/usr/bin/node ${APP_ROOT}/current/index.js`, 'Restart=on-failure', 'RestartSec=5', 'NoNewPrivileges=true', 'PrivateTmp=true', '', '[Install]', 'WantedBy=multi-user.target'].join('\n')
+  const unit = ['[Unit]', 'Description=Intent AI Ops Ghost validation service', 'After=network-online.target mysql.service', 'Wants=network-online.target', 'Requires=mysql.service', '', '[Service]', 'Type=simple', 'User=webminai-ghost', 'Group=webminai-ghost', `WorkingDirectory=${APP_ROOT}`, 'Environment=NODE_ENV=production', `EnvironmentFile=${CREDENTIALS}/service.env`, `ExecStart=${CLI_ROOT}/bin/node ${APP_ROOT}/current/index.js`, 'Restart=on-failure', 'RestartSec=5', 'NoNewPrivileges=true', 'PrivateTmp=true', '', '[Install]', 'WantedBy=multi-user.target'].join('\n')
   const nginx = ['server {', `    listen ${PORT};`, '    server_name _;', '    location = / { default_type text/plain; return 200 "' + MARKER + '\\n"; }', '    location /blog/ {', `        proxy_pass http://127.0.0.1:${GHOST_PORT};`, '        proxy_set_header Host $host;', '        proxy_set_header X-Real-IP $remote_addr;', '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;', '        proxy_set_header X-Forwarded-Proto $scheme;', '    }', '}'].join('\n')
   return join([
     'set -eu', `id webminai-ghost >/dev/null 2>&1 || useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-ghost`,
@@ -290,6 +294,7 @@ function ubuntuRestore (state, paths) {
   commands.push(removeDebianPackages(`${state}/packages.added`))
   commands.push(`if systemctl cat nginx >/dev/null 2>&1; then if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx >/dev/null 2>&1 || true; else systemctl disable nginx >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx 2>/dev/null || true; fi; fi`)
   commands.push(`if systemctl cat mysql >/dev/null 2>&1; then if [ -e ${quote(`${state}/mysql.enabled`)} ]; then systemctl enable mysql >/dev/null 2>&1 || true; else systemctl disable mysql >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/mysql.active`)} ]; then systemctl start mysql; else systemctl stop mysql 2>/dev/null || true; fi; fi`)
+  commands.push(`if [ -e ${quote(`${state}/mysql-data.absent`)} ] && { [ -e /var/lib/mysql ] || [ -L /var/lib/mysql ]; }; then printf '%s\\n' 'DATABASE_DATA_REMAINS: MySQL created data outside the baseline. Preserve it and review a separate cleanup before continuing rollback.' >&2; exit 1; fi`)
   commands.push(`if [ -e ${quote(`${state}/user-created`)} ]; then id webminai-ghost >/dev/null 2>&1 && userdel webminai-ghost 2>/dev/null || true; fi`, `rm -rf -- ${quote(state)}`)
   return join(commands)
 }
@@ -313,7 +318,7 @@ function prepareDocker (state) {
     'printf \'%s\\n\' \'Types: deb\' \'URIs: https://download.docker.com/linux/ubuntu\' "Suites: $codename" \'Components: stable\' "Architectures: $arch" \'Signed-By: /etc/apt/keyrings/docker.asc\' > /etc/apt/sources.list.d/docker.sources',
     'apt-get update', 'apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin', 'systemctl start docker', 'fi',
     'docker info >/dev/null', 'docker compose version >/dev/null', `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)} | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}`,
-    `LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)} || true`
+    addedDebianPackages(state)
   ])
 }
 
@@ -368,8 +373,12 @@ function restoreDocker (state) {
   ])
 }
 
+function addedDebianPackages (state) {
+  return `awk 'FILENAME == ARGV[1] { if ($1 == "ii") present[$2] = 1; next } $1 == "ii" && !($2 in present) { print $2, $3 }' ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}`
+}
+
 function removeDebianPackages (list) {
-  return `if [ -s ${quote(list)} ]; then packages=$(awk '{print $1}' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || { DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages || true; DEBIAN_FRONTEND=noninteractive apt-get autoremove -y || true; }; fi`
+  return `if [ -s ${quote(list)} ]; then packages=$(awk '{print $1}' ${quote(list)} | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages; fi`
 }
 
 function waitUrl (url, attempts) {

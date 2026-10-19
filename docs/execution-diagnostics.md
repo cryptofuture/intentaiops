@@ -104,6 +104,11 @@ cross-namespace reads are introduced. Structured diagnostics are returned with
 API errors/results and delivered to an optional `onDiagnostics` callback. Gateway
 activation forwards that callback through its existing progress interface.
 
+Termination identity comes from that termination's own `containerID`, not the
+replacement container's current ID. Missing termination IDs remain omitted while
+the pod UID, logical container name and observation window still scope the report.
+The field is defined by the [official Pod API](https://kubernetes.io/docs/reference/kubernetes-api/core/pod-v1/#ContainerStateTerminated).
+
 ## Security and remaining limits
 
 - No raw kernel logs, Event Log messages, container health output, pod specs or

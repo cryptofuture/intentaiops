@@ -8,6 +8,12 @@ import { KubernetesStage2Service } from '../src/kubernetes-stage2-service.js'
 
 const ACTION_KEY = 'ab'.repeat(32)
 
+test('remote recovery remains unavailable without a durable gateway backend and performs no API writes', () => {
+  const service = new KubernetesStage2Service({ kubernetes: { request () { assert.fail('capability inspection must not access or mutate the cluster') } } })
+  assert.equal(service.remoteRecoveryCapabilities().available, false)
+  assert.match(service.remoteRecoveryCapabilities().reason, /persistent volume/u)
+})
+
 test('Kubernetes Stage 2 uploads bounded plugin chunks and installs least-privilege gateway RBAC', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'webminai-kubernetes-stage2-'))
   const pluginPath = path.join(directory, 'webminai.plugin')

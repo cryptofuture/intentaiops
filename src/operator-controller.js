@@ -7,6 +7,8 @@ import { planFingerprint } from './execution-journal.js'
 import { sanitizePlannerData } from './codex-planner.js'
 import { validateCommandPlan } from './plan-validator.js'
 import { detectOperationLoop } from './operation-loop-detector.js'
+import { buildCommonTask, commonTaskEligibility, listCommonTasks } from './common-tasks.js'
+import { regenerateCatalogRevision } from './catalog-plan-revision.js'
 
 export class OperatorController {
   constructor ({ dataRoot, settings, passphrase, adminFor, tasks, runs }) {
@@ -101,6 +103,44 @@ export class OperatorController {
     return this.withAdmin(hostId, async admin => this.sanitize(await admin.consult({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, question: `${this.sanitize(question)}\nRecorded execution evidence:\n${JSON.stringify(evidence).slice(0, 64000)}` })))
   }
 
+  async remoteCommonTasks (hostId, after = '') {
+    return this.withAdmin(hostId, async admin => this.sanitize(await admin.listRemoteCommonTasks({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, after })))
+  }
+
+  async inspectRemoteCommonTask (hostId, executionId) {
+    return this.withAdmin(hostId, async admin => this.sanitize(await admin.inspectRemoteCommonTask({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, executionId })))
+  }
+
+  async remoteRecoveryOptions (admin, hostId) {
+    const connection = { settings: this.settings, passphrase: this.passphrase, serverId: hostId }
+    const inventory = await admin.refreshInventory(connection)
+    return { platform: 'linux', linuxContext: inventory.webminaiLinuxContext, docker: inventory.webminaiDocker, applicationDefaults: await admin.settings.decryptApplicationDefaults(connection) }
+  }
+
+  async prepareRemoteRecovery (hostId, executionId) {
+    return this.withAdmin(hostId, async admin => {
+      const options = await this.remoteRecoveryOptions(admin, hostId)
+      const proposal = await admin.prepareRemoteCommonTaskRecovery({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, executionId, options })
+      this.record({ type: 'remote_recovery_proposed', hostId, taskId: proposal.taskId })
+      return { ...this.sanitize(proposal), plan: proposal.plan, ownership: proposal.ownership, stateVersion: this.tasks.stateVersion(hostId, proposal.taskId), fingerprint: planFingerprint(proposal.plan) }
+    })
+  }
+
+  async executeRemoteRecovery (hostId, taskId, expectedVersion, fingerprint, { approved = false, takeoverApproved = false, takeoverFingerprint } = {}) {
+    if (approved !== true) throw new Error('Explicit recovery plan approval is required')
+    this.checkVersion(hostId, taskId, expectedVersion)
+    const task = this.tasks.get(hostId, taskId)
+    if (planFingerprint(task.plan) !== fingerprint) throw new Error('Recovery approval fingerprint does not match the reviewed plan')
+    return this.withAdmin(hostId, async admin => {
+      const options = await this.remoteRecoveryOptions(admin, hostId)
+      this.checkVersion(hostId, taskId, expectedVersion)
+      const results = await admin.executeRemoteCommonTaskRecovery({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, options, approve: async () => true, takeoverApproved, takeoverFingerprint, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
+      const saved = this.tasks.saveResults(hostId, taskId, results)
+      this.record({ type: 'remote_recovery_finished', hostId, taskId, status: saved.status })
+      return this.inspect(hostId, taskId)
+    })
+  }
+
   async propose (hostId, taskId, instructions, expectedVersion, rollback = false) {
     this.checkVersion(hostId, taskId, expectedVersion)
     if (typeof instructions !== 'string' || !instructions.trim() || instructions.length > 8192) throw new TypeError('revision instructions must contain 1-8192 characters')
@@ -111,7 +151,8 @@ export class OperatorController {
       const completedIds = evidence.commands.filter(command => command.status === 'completed').map(command => command.commandId)
       const executedIds = new Set(evidence.commands.filter(command => command.status !== 'pending').map(command => command.commandId))
       this.record({ type: 'revision_planning', hostId, taskId })
-      const replacement = await admin.plan({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, request: this.sanitize(task.request), taskId, requireRevert: !rollback, previousAttempts: [this.sanitize({ ...task, executionEvidence: evidence })], retryInstructions: `${this.sanitize(instructions)}\n${rollback ? 'Propose ONLY rollback commands as the forward commands, in rollback order. Revert only confirmed completed changes. Never include rollback for uncertain or failed commands without separately verified evidence.' : 'Generate only replacement UNEXECUTED work. Use new command IDs. Do not repeat completed changes. Preserve cumulative rollback coverage for original completed changes and replacement work.'} Completed IDs: ${completedIds.join(', ')}. Return self-contained dependencies.`, onProgress: event => this.record({ type: 'planner_progress', hostId, taskId, event }) })
+      const replacement = await admin.plan({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, request: this.sanitize(task.request), taskId, catalogId: task.catalogId, requireRevert: !rollback, previousAttempts: [this.sanitize({ ...task, executionEvidence: evidence })], retryInstructions: `${this.sanitize(instructions)}\n${rollback ? 'Propose ONLY rollback commands as the forward commands, in rollback order. Revert only confirmed completed changes. Never include rollback for uncertain or failed commands without separately verified evidence.' : 'Generate only replacement UNEXECUTED work. Use new command IDs. Do not repeat completed changes. Preserve cumulative rollback coverage for original completed changes and replacement work.'} Completed IDs: ${completedIds.join(', ')}. Return self-contained dependencies.`, onProgress: event => this.record({ type: 'planner_progress', hostId, taskId, event }) })
+      if (!replacement.commands.length) throw new Error('No executable replacement commands were proposed; original plan is unchanged')
       if (replacement.commands.some(command => executedIds.has(command.id))) throw new Error('replacement reuses an executed command ID')
       const completed = task.plan.commands.filter(command => completedIds.includes(command.id))
       const plan = { ...replacement, commands: rollback ? replacement.commands : [...completed, ...replacement.commands], operatorRollback: rollback }
@@ -124,8 +165,36 @@ export class OperatorController {
     })
   }
 
+  async proposeCatalogRefresh (hostId, taskId, expectedVersion) {
+    this.checkVersion(hostId, taskId, expectedVersion)
+    const task = this.tasks.get(hostId, taskId)
+    if (task.kind !== 'catalog' || !listCommonTasks({ platform: 'linux', category: 'application' }).some(definition => definition.id === task.catalogId && !definition.prerequisite)) throw new Error('Catalog refresh currently requires a native Linux application task')
+    if (!this.tasks.executionEvents(hostId, taskId).length && (task.results?.length || task.status !== 'planned')) throw new Error('Legacy execution has no journal; operator investigation required')
+    if (task.revertResults?.length || this.tasks.rollbackState(hostId, taskId).some(command => command.status !== 'pending')) throw new Error('Rollback has started; do not refresh deployment work')
+    const execution = this.tasks.executionState(hostId, taskId)
+    if (execution.some(command => command.status === 'uncertain')) throw new Error('Reconcile uncertain commands before refreshing catalog work')
+    return this.withAdmin(hostId, async admin => {
+      const inventory = await admin.refreshInventory({ settings: this.settings, passphrase: this.passphrase, serverId: hostId })
+      this.checkVersion(hostId, taskId, expectedVersion)
+      if (!inventory.webminaiLinuxContext || inventory.webminaiDocker?.preferred) throw new Error('Catalog refresh currently requires a native Linux route')
+      const applicationDefaults = await admin.settings.decryptApplicationDefaults({ settings: this.settings, passphrase: this.passphrase })
+      const options = { platform: 'linux', linuxContext: inventory.webminaiLinuxContext, docker: inventory.webminaiDocker, applicationDefaults }
+      const eligibility = commonTaskEligibility(task.catalogId, options)
+      if (!eligibility.eligible) throw new Error(`Catalog task is no longer eligible: ${eligibility.reason}`)
+      const plan = regenerateCatalogRevision(task, execution, buildCommonTask(task.catalogId, task.id, options).plan)
+      const rules = await admin.workspace.loadRules(hostId)
+      validateCommandPlan(plan, rules.policy)
+      this.checkVersion(hostId, taskId, expectedVersion)
+      const revisionId = this.tasks.proposeRevision(hostId, taskId, plan, expectedVersion)
+      this.record({ type: 'catalog_revision_proposed', hostId, taskId, revisionId })
+      return { version: 1, revisionId, expectedVersion, fingerprint: planFingerprint(plan), differences: planDifferences(task.plan, plan) }
+    })
+  }
+
   approve (hostId, taskId, revisionId, expectedVersion, fingerprint) {
     this.checkVersion(hostId, taskId, expectedVersion)
+    const revision = this.tasks.revisions(hostId, taskId).find(item => item.id === revisionId)
+    if (revision && !revision.plan.commands.length) throw new Error('No executable replacement commands were proposed; original plan is unchanged')
     const result = this.tasks.approveRevision(hostId, taskId, revisionId, expectedVersion, fingerprint)
     this.record({ type: 'revision_approved', hostId, taskId, revisionId })
     return this.sanitize(result)

@@ -15,6 +15,12 @@ import { planFingerprint } from './execution-journal.js'
 import { detectOperationLoop } from './operation-loop-detector.js'
 import { executionDiagnostics, diagnosticSummary } from './execution-diagnostics.js'
 import { captureExecutionEvidence } from './host-execution-evidence.js'
+import { RemoteRecoveryState } from './remote-recovery-state.js'
+import { RemoteRecoveryTransport } from './remote-recovery-transport.js'
+import { commonTaskRecoveryManifest, commonTaskRecoverySupported, RemoteCommonTaskJournal, retrieveRecoveryExecution, regenerateCommonTaskRecovery } from './remote-common-task-recovery.js'
+import { inspectRecoveryBaseline } from './remote-recovery-baseline.js'
+
+const REMOTE_RECOVERY_EXECUTION = Symbol('reviewed remote common-task recovery')
 
 export class AdminService {
   constructor ({
@@ -35,6 +41,7 @@ export class AdminService {
     this.stage2 = stage2
     this.planner = planner
     this.linuxContext = linuxContext
+    this.remoteRecovery = new RemoteRecoveryState(this.dataRoot)
   }
 
   async addServer ({
@@ -245,6 +252,7 @@ export class AdminService {
     request,
     inventory,
     taskId,
+    catalogId = null,
     previousAttempts,
     retryInstructions,
     consultationContext,
@@ -267,6 +275,7 @@ export class AdminService {
       inventory: observed,
       policy: rules.policy,
       taskId,
+      catalogId,
       previousAttempts,
       retryInstructions,
       consultationContext,
@@ -320,10 +329,12 @@ export class AdminService {
     })
   }
 
-  async execute ({ settings, passphrase, serverId, taskId, plan, approve, onResult, onProgress, beforeCommand, requireRevert = true }) {
+  async execute ({ settings, passphrase, serverId, taskId, plan, approve, onResult, onProgress, beforeCommand, requireRevert = true, executionObserver, recoveryAuthorization }) {
     const server = await this.serverSecrets({ settings, passphrase, serverId })
     const rules = await this.workspace.loadRules(serverId)
     if (taskId === undefined) return executeApprovedPlan({ plan, policy: rules.policy, netdata: this.netdata(server), approve, onResult, onProgress, requireRevert })
+    const recoveryState = this.remoteRecovery.get(settings.servers?.[serverId]?.hostFingerprint, taskId)
+    if (recoveryState?.manifest.recoveryId && recoveryAuthorization !== REMOTE_RECOVERY_EXECUTION) throw new Error('Use remote common-task recovery to recheck the source head, baseline and ownership before execution')
     const lease = this.tasks.acquireExecution(serverId, taskId, plan)
     let ownershipError
     const heartbeat = setInterval(() => {
@@ -332,6 +343,7 @@ export class AdminService {
     heartbeat.unref()
     try {
       const saved = this.tasks.get(serverId, taskId)
+      const remoteJournal = await this.remoteTaskJournal({ settings, serverId, taskId, plan, server, task: saved })
       if (saved.results?.length && this.tasks.executionEvents(serverId, taskId).length === 0) throw new Error('legacy execution has no journal; continuation requires operator investigation')
       const state = this.tasks.executionState(serverId, taskId)
       if (this.tasks.rollbackState(serverId, taskId).some(command => command.status !== 'pending')) throw new Error('rollback has started; do not resume the original deployment')
@@ -361,9 +373,18 @@ export class AdminService {
           return true
         },
         completedCommandIds: state.filter(command => command.status === 'completed').map(command => command.commandId),
-        onExecutionEvent: event => {
+        onExecutionEvent: async event => {
           if (ownershipError) throw ownershipError
-          this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
+          if (event.type !== 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
+          if (remoteJournal) {
+            let baselineDigest = null
+            if (event.type === 'command_completed' && commonTaskRecoverySupported(saved.catalogId, recoveryState?.manifest.platform)) {
+              baselineDigest = await inspectRecoveryBaseline(this.netdata(server), saved.catalogId, taskId).catch(() => null)
+            }
+            await remoteJournal.append(event, { baselineDigest })
+          }
+          await executionObserver?.(event)
+          if (event.type === 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
           if (event.type === 'execution_paused' && event.metadata?.reason === 'recovery_requires_approval') {
             const control = this.tasks.control(serverId, taskId)
             if (control.action === 'run') this.tasks.setControl(serverId, taskId, 'pause', control.version)
@@ -372,6 +393,7 @@ export class AdminService {
         requireRevert
       })
       const confirmed = state.filter(command => command.status === 'completed').map(command => previous.find(result => result.id === command.commandId && result.status === 'completed') ?? { id: command.commandId, status: 'completed', result: { exitCode: 0, stdout: '[completion confirmed by execution journal]', stderr: '' } })
+      if (remoteJournal && !this.tasks.executionState(serverId, taskId).some(command => command.status === 'uncertain')) await remoteJournal.release()
       return [...confirmed, ...results]
     } finally {
       clearInterval(heartbeat)
@@ -386,13 +408,8 @@ export class AdminService {
     }
     const server = await this.serverSecrets({ settings, passphrase, serverId })
     const rules = await this.workspace.loadRules(serverId)
-    const revertPlan = reviewedPlan ?? {
-      ...task.plan,
-      summary: `Revert task ${taskId}: ${task.plan.summary}`,
-      changeOverview: `Restore the state captured before task ${taskId}`,
-      commands: task.plan.revertCommands,
-      revertCommands: []
-    }
+    const revertPlan = reviewedPlan ?? savedRevertPlan(task)
+    const remoteJournal = await this.remoteTaskJournal({ settings, serverId, taskId, plan: reviewedPlan ? { ...task.plan, revertCommands: reviewedPlan.commands } : task.plan, server, task })
     const lease = this.tasks.acquireExecution(serverId, taskId, task.plan)
     const heartbeat = setInterval(() => {
       try { this.tasks.renewExecution(serverId, taskId, lease.owner) } catch {}
@@ -407,14 +424,32 @@ export class AdminService {
       if (this.tasks.rollbackState(serverId, taskId).some(command => command.status === 'uncertain')) throw new Error('rollback outcome requires reconciliation before further changes')
       if (!reviewedPlan && this.tasks.executionEvents(serverId, taskId).length && this.tasks.executionState(serverId, taskId).some(command => command.status !== 'completed')) throw new Error('partial execution requires a separately reviewed rollback plan; saved rollback commands do not identify their forward changes')
       this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'rollback_started' })
+      await remoteJournal?.append({ type: 'rollback_started' }, { operation: 'rollback' })
       const rollbackRevision = planFingerprint(revertPlan)
       const history = this.tasks.allExecutionEvents(serverId, taskId).filter(event => event.metadata.rollbackRevision === rollbackRevision && event.commandId && !['plan_approved', 'execution_recovery'].includes(event.type))
       const last = new Map(history.map(event => [event.commandId, event]))
       if ([...last.values()].some(event => !['command_completed', 'command_prepared'].includes(event.type))) throw new Error('rollback outcome needs reconciliation; rollback will not be repeated')
-      const results = await executeApprovedPlan({ plan: revertPlan, policy: rules.policy, netdata: this.netdata(server), approve, onResult, onProgress: event => { this.tasks.appendProgress(serverId, taskId, event); return onProgress?.(event) }, completedCommandIds: [...last.values()].filter(event => event.type === 'command_completed').map(event => event.commandId), onExecutionEvent: event => this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { ...event, metadata: { ...event.metadata, operation: 'rollback', rollbackRevision } }), requireRevert: false })
+      const results = await executeApprovedPlan({
+        plan: revertPlan,
+        policy: rules.policy,
+        netdata: this.netdata(server),
+        approve,
+        onResult,
+        onProgress: event => { this.tasks.appendProgress(serverId, taskId, event); return onProgress?.(event) },
+        completedCommandIds: [...last.values()].filter(event => event.type === 'command_completed').map(event => event.commandId),
+        onExecutionEvent: async event => {
+          if (event.type !== 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { ...event, metadata: { ...event.metadata, operation: 'rollback', rollbackRevision } })
+          await remoteJournal?.append(event, { operation: 'rollback' })
+          if (event.type === 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { ...event, metadata: { ...event.metadata, operation: 'rollback', rollbackRevision } })
+        },
+        requireRevert: false
+      })
       const confirmed = [...last.values()].filter(event => event.type === 'command_completed').map(event => task.revertResults?.find(result => result.id === event.commandId && result.status === 'completed') ?? { id: event.commandId, status: 'completed', result: { exitCode: 0, stdout: '[completion confirmed by execution journal]', stderr: '' } })
       const combined = [...confirmed, ...results]
-      this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { type: 'rollback_completed', metadata: { completed: combined.length === revertPlan.commands.length && combined.every(result => result.status === 'completed') } })
+      const completion = { type: 'rollback_completed', metadata: { completed: combined.length === revertPlan.commands.length && combined.every(result => result.status === 'completed') } }
+      this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, completion)
+      await remoteJournal?.append(completion, { operation: 'rollback' })
+      if (remoteJournal && !this.tasks.rollbackState(serverId, taskId).some(command => command.status === 'uncertain')) await remoteJournal.release()
       return combined
     } finally {
       clearInterval(heartbeat)
@@ -436,6 +471,8 @@ export class AdminService {
     try {
       const server = await this.serverSecrets({ settings, passphrase, serverId })
       const netdata = this.netdata(server)
+      const rollbackPlans = [savedRevertPlan(task), ...this.tasks.revisions(serverId, taskId).filter(revision => revision.approved && revision.plan.operatorRollback).map(revision => revision.plan)]
+      let remoteJournal
       for (const command of [...this.tasks.executionState(serverId, taskId), ...this.tasks.rollbackState(serverId, taskId)]) {
         if (command.status !== 'uncertain') continue
         this.tasks.renewExecution(serverId, taskId, lease.owner)
@@ -452,7 +489,8 @@ export class AdminService {
         let reconciliationError
         try { if (command.jobId && netdata.jobStatus) remote = await netdata.jobStatus(command.jobId, { onRecovery: report }) } catch (error) { reconciliationError = error; await report({ state: 'operator_review_required' }) }
         const prepared = this.tasks.allExecutionEvents(serverId, taskId).find(event => event.type === 'command_prepared' && event.commandId === command.commandId && event.attemptId === command.attemptId && (event.metadata.rollbackRevision ?? null) === (command.rollbackRevision ?? null))
-        const item = (command.rollbackRevision ? task.plan?.revertCommands : task.plan?.commands)?.find(item => item.id === command.commandId)
+        const commands = command.rollbackRevision ? rollbackPlans.find(plan => planFingerprint(plan) === command.rollbackRevision)?.commands : task.plan.commands
+        const item = commands?.find(item => item.id === command.commandId)
         const after = await captureExecutionEvidence(netdata, { item, before: prepared?.metadata.evidenceBefore })
         const diagnostics = executionDiagnostics({ item, result: remote, error: reconciliationError, before: prepared?.metadata.evidenceBefore, after })
         if (diagnostics.length) {
@@ -466,16 +504,25 @@ export class AdminService {
         if (remote.state === 'unknown') await report({ state: 'operator_review_required' })
         if (!['succeeded', 'failed', 'cancelled', 'timed_out'].includes(remote.state)) continue
         const completed = remote.state === 'succeeded' && remote.exitCode === 0
-        this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, {
+        const completion = {
           type: completed ? 'command_completed' : 'command_failed',
           commandId: command.commandId,
           attemptId: command.attemptId,
           metadata: { jobId: command.jobId, state: remote.state, exitCode: remote.exitCode, reconciled: true, ...(diagnostics.length ? { diagnostics } : {}), ...(command.rollbackRevision ? { operation: 'rollback', rollbackRevision: command.rollbackRevision } : {}) }
-        })
+        }
+        this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, completion)
         const result = { id: command.commandId, status: completed ? 'completed' : 'failed', result: { exitCode: remote.exitCode, stdout: '[remote output omitted during reconciliation]', stderr: '' }, ...(diagnostics.length ? { diagnostics } : {}) }
         if (command.rollbackRevision) this.tasks.appendRevertResult(serverId, taskId, result)
         else this.tasks.appendResult(serverId, taskId, result)
+        remoteJournal = await this.remoteTaskJournal({ settings, serverId, taskId, server, task, plan: command.rollbackRevision ? { ...task.plan, revertCommands: commands } : task.plan })
+        if (remoteJournal) {
+          const baselineDigest = completed && !command.rollbackRevision && commonTaskRecoverySupported(task.catalogId, 'linux')
+            ? await inspectRecoveryBaseline(netdata, task.catalogId, taskId).catch(() => null)
+            : null
+          await remoteJournal.append(completion, { operation: command.rollbackRevision ? 'rollback' : 'deployment', baselineDigest })
+        }
       }
+      if (remoteJournal && ![...this.tasks.executionState(serverId, taskId), ...this.tasks.rollbackState(serverId, taskId)].some(command => command.status === 'uncertain')) await remoteJournal.release()
       return this.tasks.executionState(serverId, taskId)
     } finally {
       clearInterval(heartbeat)
@@ -512,8 +559,133 @@ export class AdminService {
     return this.tasks.consultationsForTask(serverId, taskId)
   }
 
-  saveTaskPlan (serverId, taskId, plan) {
+  saveTaskPlan (serverId, taskId, plan, recovery) {
+    if (recovery) {
+      const manifest = commonTaskRecoveryManifest({ ...recovery, taskId, plan })
+      this.remoteRecovery.register(manifest)
+    }
     return this.tasks.savePlan(serverId, taskId, plan)
+  }
+
+  async remoteTaskJournal ({ settings, serverId, taskId, plan, server, task }) {
+    const target = settings.servers?.[serverId]?.hostFingerprint
+    if (!task?.catalogId || !target) return null
+    const saved = this.remoteRecovery.get(target, taskId)
+    if (!saved) return null
+    await this.assertRecoveryHostIdentity(server, target)
+    return new RemoteCommonTaskJournal({ transport: new RemoteRecoveryTransport({ client: this.netdata(server), platform: saved.manifest.platform }), state: this.remoteRecovery, target, taskId, plan })
+  }
+
+  async listRemoteCommonTasks ({ settings, passphrase, serverId, after = '' }) {
+    const { transport, target } = await this.remoteRecoveryConnection({ settings, passphrase, serverId })
+    const key = await transport.key()
+    if (!key) return { available: false, executions: [] }
+    this.remoteRecovery.pin(target, key)
+    return transport.list(after)
+  }
+
+  async inspectRemoteRecoveryKey ({ settings, passphrase, serverId }) {
+    const { transport, target } = await this.remoteRecoveryConnection({ settings, passphrase, serverId })
+    const key = await transport.key()
+    if (!key) throw new Error('No remote recovery signing key exists; inspection does not provision one')
+    const known = this.remoteRecovery.currentKey(target)
+    if (!known) this.remoteRecovery.pin(target, key)
+    return { target, pinnedFingerprint: known?.fingerprint ?? key.fingerprint, publishedFingerprint: key.fingerprint, changed: !!known && known.fingerprint !== key.fingerprint, hasRotation: !!key.rotation }
+  }
+
+  async rotateRemoteRecoveryKey ({ settings, passphrase, serverId, expectedFingerprint, approved = false }) {
+    if (approved !== true || !/^[a-f0-9]{64}$/u.test(expectedFingerprint)) throw new Error('Explicit recovery key rotation approval is required')
+    const { transport, target } = await this.remoteRecoveryConnection({ settings, passphrase, serverId })
+    const key = await transport.key()
+    if (!key || key.fingerprint !== expectedFingerprint) throw new Error('Recovery key changed after review')
+    this.remoteRecovery.pin(target, key)
+    const replacement = await transport.rotateKey(expectedFingerprint, target)
+    this.remoteRecovery.acceptKeyRotation(target, replacement, expectedFingerprint)
+    return { target, previousFingerprint: expectedFingerprint, fingerprint: replacement.fingerprint }
+  }
+
+  async acceptRemoteRecoveryKeyRotation ({ settings, passphrase, serverId, expectedFingerprint, publishedFingerprint, approved = false }) {
+    if (approved !== true || !/^[a-f0-9]{64}$/u.test(expectedFingerprint) || !/^[a-f0-9]{64}$/u.test(publishedFingerprint)) throw new Error('Explicit recovery key transition approval is required')
+    const { transport, target } = await this.remoteRecoveryConnection({ settings, passphrase, serverId })
+    const key = await transport.key()
+    if (!key || key.fingerprint !== publishedFingerprint) throw new Error('Published recovery key changed after review')
+    this.remoteRecovery.acceptKeyRotation(target, key, expectedFingerprint)
+    return { target, previousFingerprint: expectedFingerprint, fingerprint: key.fingerprint }
+  }
+
+  async inspectRemoteCommonTask ({ settings, passphrase, serverId, executionId }) {
+    const { transport, target } = await this.remoteRecoveryConnection({ settings, passphrase, serverId })
+    return retrieveRecoveryExecution({ transport, state: this.remoteRecovery, target, executionId })
+  }
+
+  async prepareRemoteCommonTaskRecovery ({ settings, passphrase, serverId, executionId, options }) {
+    const { transport, target, client } = await this.remoteRecoveryConnection({ settings, passphrase, serverId })
+    const verified = await retrieveRecoveryExecution({ transport, state: this.remoteRecovery, target, executionId })
+    const original = verified.records[0]
+    if (!commonTaskRecoverySupported(original.catalogId, original.platform) || original.platform !== options.platform) throw new Error('Common-task baseline validation is not registered for this target and task family')
+    if (verified.records.some(record => record.operation !== 'deployment')) throw new Error('Recovery or rollback has already started; inspect that operation instead of generating another cleanup')
+    const baselineDigest = await inspectRecoveryBaseline(client, original.catalogId, original.taskId)
+    const proposal = regenerateCommonTaskRecovery({ ...verified, options, baselineDigest })
+    const task = this.createTask(serverId, `Reviewed remote common-task recovery: ${original.catalogId}, execution ${executionId}`)
+    this.saveTaskPlan(serverId, task.id, proposal.plan)
+    const manifest = Object.fromEntries(['executionId', 'target', 'identityMethod', 'platform', 'catalogId', 'taskId', 'catalogDigest', 'planDigest', 'rollbackDigest', 'revision', 'parentRevision'].map(field => [field, original[field]]))
+    this.remoteRecovery.registerRecovery(task.id, manifest, { sequence: verified.sequence, head: verified.head, recoveryId: proposal.recoveryId, recoveryPlanDigest: planFingerprint(proposal.plan), baselineDigest })
+    const ownership = await transport.ownership({ executionId, sequence: verified.sequence, head: verified.head })
+    return { ...proposal, taskId: task.id, ownership }
+  }
+
+  async executeRemoteCommonTaskRecovery ({ settings, passphrase, serverId, taskId, options, approve, onResult, onProgress, takeoverFingerprint, takeoverApproved = false }) {
+    if (takeoverFingerprint !== undefined && (takeoverApproved !== true || !/^[a-f0-9]{64}$/u.test(takeoverFingerprint))) throw new Error('Explicit ownership takeover approval is required')
+    const { transport, target, client } = await this.remoteRecoveryConnection({ settings, passphrase, serverId })
+    const saved = this.remoteRecovery.get(target, taskId)
+    if (!saved?.manifest.recoveryId) throw new Error('No locally reviewed remote recovery proposal exists')
+    const meta = saved.manifest
+    if (saved.sequence !== meta.sourceSequence || saved.head !== meta.sourceHead) throw new Error('Recovery already started; inspect and reconcile before further changes')
+    const verified = await retrieveRecoveryExecution({ transport, state: this.remoteRecovery, target, executionId: meta.executionId })
+    if (verified.head !== meta.sourceHead) throw new Error('Remote recovery approval is stale')
+    const baselineDigest = await inspectRecoveryBaseline(client, meta.catalogId, meta.taskId)
+    const proposal = regenerateCommonTaskRecovery({ ...verified, options, baselineDigest, recoveryId: meta.recoveryId })
+    const task = this.tasks.get(serverId, taskId)
+    if (planFingerprint(proposal.plan) !== meta.recoveryPlanDigest || planFingerprint(task.plan) !== meta.recoveryPlanDigest) throw new Error('Recovery plan changed; fresh review is required')
+    const journal = new RemoteCommonTaskJournal({ transport, state: this.remoteRecovery, target, taskId, plan: proposal.plan })
+    const results = await this.execute({
+      settings,
+      passphrase,
+      serverId,
+      taskId,
+      plan: proposal.plan,
+      approve,
+      onResult,
+      onProgress,
+      requireRevert: false,
+      recoveryAuthorization: REMOTE_RECOVERY_EXECUTION,
+      executionObserver: async event => {
+        if (takeoverFingerprint && !journal.claimed) {
+          const current = this.remoteRecovery.get(target, taskId)
+          await transport.takeover({ executionId: meta.executionId, sequence: current.sequence, head: current.head, owner: current.owner, ownerFingerprint: takeoverFingerprint })
+          journal.claimed = true
+          await journal.append({ type: 'recovery_approved' }, { operation: 'recovery' })
+        }
+        return journal.append(event, { operation: 'recovery' })
+      }
+    })
+    if (journal.claimed) await journal.append({ type: 'rollback_completed', metadata: { completed: results.length === proposal.plan.commands.length && results.every(result => result.status === 'completed') } }, { operation: 'recovery' })
+    if (!this.tasks.executionState(serverId, taskId).some(command => command.status === 'uncertain')) await journal.release()
+    return results
+  }
+
+  async remoteRecoveryConnection ({ settings, passphrase, serverId }) {
+    const server = await this.serverSecrets({ settings, passphrase, serverId })
+    const target = settings.servers?.[serverId]?.hostFingerprint
+    if (!/^SHA256:[a-f0-9]{64}$/u.test(target)) throw new Error('Verified host identity is required for remote recovery')
+    await this.assertRecoveryHostIdentity(server, target)
+    const client = this.netdata(server)
+    const health = await client.health()
+    return { target, client, transport: new RemoteRecoveryTransport({ client, platform: health.platform }) }
+  }
+
+  async assertRecoveryHostIdentity (server, expected) {
+    if (typeof this.ssh.hostFingerprint !== 'function' || await this.ssh.hostFingerprint(server.connectionUrl) !== expected) throw new Error('Current host identity does not match the recovery target')
   }
 
   saveConsultation (serverId, taskId, consultation) {
@@ -578,6 +750,10 @@ function withDockerPreference (inventory, preference) {
       inventory
     })
   }
+}
+
+function savedRevertPlan (task) {
+  return { ...task.plan, summary: `Revert task ${task.id}: ${task.plan.summary}`, changeOverview: `Restore the state captured before task ${task.id}`, commands: task.plan.revertCommands, revertCommands: [] }
 }
 
 function boundedContextError (error) {

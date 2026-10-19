@@ -412,7 +412,7 @@ INFO: Enter submits • Shift+Enter or Ctrl+J adds a line • ↑/↓ recalls ta
 [Codex turn.started] Codex is analyzing the task
 ```
 
-Codex defaults to `gpt-5.6-luna` with medium reasoning. The dashboard can persist a different supported pairing in `settings.json`: `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, or `mimo-v2.6-pro`, with low, medium, or high reasoning. Selecting `mimo-v2.6-pro` runs Codex through the local `mimo` profile and validates schema-directed JSON because that provider does not support native JSON-schema responses. Its JSONL progress and reasoning summaries are shown as they arrive and saved with the task. Codex receives the sanitized Netdata inventory, including Agent information, contexts, functions, container visibility, and alerts, plus optional `context.md`, the policy extracted from `rules.json`, and your request. On Linux, this also includes Intent AI Ops's cached host profile: the exact `/etc/os-release` identity, architecture, kernel, init/service and package-manager conventions, detected stack commands and versions, distro-specific package-name candidates, and checked official documentation/package/release links. It does not receive the SSH URL, vault, password, or action key.
+Codex defaults to `gpt-6.1-sol` with low reasoning. The dashboard reads models and model-specific reasoning levels from the installed Codex CLI, including hidden catalog entries, and persists the selected pair in `settings.json`. Existing saved selections are preserved. Selecting `mimo-v2.6-pro` with low, medium or high reasoning runs Codex through the local `mimo` profile and validates schema-directed JSON because that provider does not support native JSON-schema responses. Its JSONL progress and reasoning summaries are shown as they arrive and saved with the task. Codex receives the sanitized Netdata inventory, including Agent information, contexts, functions, container visibility, and alerts, plus optional `context.md`, the policy extracted from `rules.json`, and your request. On Linux, this also includes Intent AI Ops's cached host profile: the exact `/etc/os-release` identity, architecture, kernel, init/service and package-manager conventions, detected stack commands and versions, distro-specific package-name candidates, and checked official documentation/package/release links. It does not receive the SSH URL, vault, password, or action key.
 
 Planner calls use a filtered child environment, not the application's vault or SSH environment. Codex authentication still uses its normal home and provider API keys whose variable names end in `_API_KEY`; custom authentication variables with other names are not forwarded. Routing, consultation and planning all receive embedded sanitized references, bounded to 2 MiB. They disable shell, browser, connector, plugin, hook and delegation features and run without the Codex daemon. Before each request, a bounded local configuration read identifies MCP servers; each is disabled using a transport-compatible placeholder. Failed inspection blocks planning rather than accepting an unchecked tool configuration. Local Codex profiles and configuration are trusted operator-owned inputs and must not change during a request.
 
@@ -714,7 +714,7 @@ Host authentication is delegated to OpenSSH. The initial interactive connection 
 
 ## Codex planner
 
-The planner defaults to `gpt-5.6-luna` with `medium` reasoning. The dashboard stores one validated model/reasoning pair in `settings.json`; supported models are `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, and `mimo-v2.6-pro`, and supported reasoning levels are `low`, `medium`, and `high`. Selecting `mimo-v2.6-pro` loads the local `mimo` Codex profile. Codex runs in a newly created temporary directory containing only:
+The planner defaults to `gpt-6.1-sol` with `low` reasoning. The dashboard reads `codex debug models` through the existing bounded process runner and filtered environment, extracts only model identifiers and supported reasoning levels, and adds the configured MiMo choice. Catalog prompts and provider stderr are not displayed or passed to AI. Invalid, truncated or unavailable discovery blocks changes without overwriting saved settings. Models are not restricted to a fixed name allowlist; identifiers remain syntax-validated and the picker rejects reasoning levels absent from the selected model. Catalog presence is not proof of account entitlement. Selecting `mimo-v2.6-pro` loads the local `mimo` Codex profile and supports low/medium/high; a live high-reasoning structured-routing check passed on 2026-10-19 without host execution. Codex runs in a newly created temporary directory containing only:
 
 - sanitized Netdata inventory;
 - non-secret server context;
@@ -1086,6 +1086,22 @@ scripts/kubernetes-helm-lab.sh destroy
 The script never uses the current kubectl context implicitly; every kubectl and Helm operation names `kind-webminai-k8s`. Netdata is installed from its [official Helm repository](https://learn.netdata.cloud/docs/netdata-agent/installation/kubernetes), which deploys a parent plus per-node child collectors for Kubernetes monitoring.
 
 ## Development
+
+### Signed remote common-task recovery
+
+See [remote recovery implementation and limits](docs/remote-common-task-recovery.md)
+before changing its contracts. The host CLI records new unchanged catalog runs
+through the existing signed Stage2 path. Recovery regenerates trusted code;
+remote records never supply executable rollback. Linux systemd service/timer
+fixtures and native non-Alpine CLI installation have registered baseline profiles;
+the CLI-install profile has a reviewed Debian live recovery. Key rotation is explicitly
+reviewed, archives public verification keys and never silently changes a pin.
+Shared-controller browser actions require separate proposal and execution approval.
+Reviewed owner takeover is limited to confirmed untouched sources; partial or
+unknown execution and already-started recovery remain blocked.
+Windows CNG storage is unverified on a native host; FreeBSD/macOS live tests and
+Kubernetes's durable gateway backend remain outstanding. Do not broaden that
+coverage claim or silently accept a changed signing key.
 
 The promoted Linux application catalog is exposed through the host menu and structured Codex routing. It contains 13 reviewed builders; candidates without a promoted builder remain on the research/AI path. Run the staged Linux-lab and separate Docker-host promotion checks with:
 

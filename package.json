@@ -29,6 +29,7 @@
     "src",
     "docs/execution-milestones.md",
     "docs/execution-diagnostics.md",
+    "docs/remote-common-task-recovery.md",
     "docs/ssh-connection-reuse.md",
     "README.md"
   ],

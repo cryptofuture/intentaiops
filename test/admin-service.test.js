@@ -14,6 +14,7 @@ test('AdminService composes executable verified foundations with only the AI app
     },
     planner: {
       async plan (options) {
+        assert.equal(options.catalogId, 'wordpress-linux')
         deploymentBlueprint = options.deploymentBlueprint
         return {
           summary: 'Initialize custom application',
@@ -35,6 +36,7 @@ test('AdminService composes executable verified foundations with only the AI app
     request: 'Deploy a custom PHP CMS',
     inventory: { info: { agents: [{ application: { os: 'Linux' } }] }, webminaiDocker: { capable: false } },
     taskId: 1,
+    catalogId: 'wordpress-linux',
     candidateContext: [{ catalogId: 'wordpress-linux', foundationMode: 'executable', foundationIds: ['linux-baseline', 'safe-baseline-rollback'], executablePlan: { modifiedFiles: ['/var/lib/webminai/task-state/1'], commands: [foundationCommand], revertCommands: [foundationRevert] } }]
   })
   assert.equal(deploymentBlueprint.format, 'webminai-foundation-assisted-blueprint')

@@ -122,12 +122,14 @@ test('Codex model settings are validated and persisted', async t => {
   const store = new SettingsStore(root)
   const settings = await store.initialize()
 
-  assert.deepEqual(settings.codex, { model: 'gpt-5.6-luna', reasoningEffort: 'medium' })
+  assert.deepEqual(settings.codex, { model: 'gpt-6.1-sol', reasoningEffort: 'low' })
   await store.setCodexSettings({ settings, model: 'gpt-5.6-terra', reasoningEffort: 'low' })
   assert.deepEqual((await store.load()).codex, { model: 'gpt-5.6-terra', reasoningEffort: 'low' })
   await store.setCodexSettings({ settings, model: 'mimo-v2.6-pro', reasoningEffort: 'high' })
   assert.deepEqual((await store.load()).codex, { model: 'mimo-v2.6-pro', reasoningEffort: 'high' })
-  await assert.rejects(store.setCodexSettings({ settings, model: 'gpt-5.5', reasoningEffort: 'medium' }), /unsupported Codex model/u)
+  await store.setCodexSettings({ settings, model: 'gpt-6-astra', reasoningEffort: 'ultra' })
+  assert.deepEqual((await store.load()).codex, { model: 'gpt-6-astra', reasoningEffort: 'ultra' })
+  await assert.rejects(store.setCodexSettings({ settings, model: '--invalid', reasoningEffort: 'medium' }), /invalid Codex model/u)
 })
 
 test('terminal controls are validated and persisted', async t => {

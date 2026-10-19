@@ -161,7 +161,7 @@ The first run creates a vault and asks for a passphrase of at least 12 character
 
 The dashboard also lets you set one global administrator email. Verified application installers use it where software requires an initial administrator or contact address—for example, the WordPress administrator account, WooCommerce store contact, or another application's setup email. Relevant AI-planned tasks receive the same preference. The value is vault encrypted and is never used as an SSH username, host identifier, or Netdata identity. If no email is configured, Intent AI Ops uses the intentionally non-deliverable `intentaiops@example.invalid` fallback.
 
-Choose **Set Codex model** on the dashboard to use `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, or `mimo-v2.6-pro` with `low`, `medium`, or `high` reasoning. The default remains `gpt-5.6-luna` with `medium` reasoning. Selecting `mimo-v2.6-pro` runs Codex through the local `mimo` profile and validates schema-directed JSON because that provider does not support native JSON-schema responses. The selection is saved in `settings.json` for subsequent tasks.
+The default is **`gpt-6.1-sol` with `low` reasoning**. Choose **Set Codex model** on the dashboard to load your installed Codex CLI's model catalog, including hidden entries, and select from that model's supported reasoning levels. Catalog presence does not guarantee account access or provider capacity. `mimo-v2.6-pro` also supports selection with `low`, `medium`, or `high` through your configured local `mimo` profile; its responses are validated against the JSON schema locally. Settings are saved for subsequent tasks; existing saved selections are preserved. If discovery fails, settings remain unchanged. Model discovery requires a Codex version supporting `codex debug models`.
 
 Choose **Controls** to configure wrapping menu navigation, optional `j`/`k` navigation, number shortcuts, shortcut hints, and automatic/color/monochrome output. These preferences are also saved in `settings.json`.
 
@@ -223,9 +223,42 @@ Failure details now separate **what happened** from **why it may have happened**
 
 Use **Review a pending plan revision** to reopen a proposal you did not approve earlier. Approval leaves execution paused; **Review and resume** is a separate step.
 
+If a native Linux application failed and its catalog recipe has been fixed,
+choose **Refresh remaining native Linux catalog steps**. This rebuilds remaining
+steps from local catalog code without an AI call. Review the new plan, approve,
+then resume. It preserves completed commands and the original rollback, and
+refuses uncertain work or incompatible catalog changes. This requires local task
+history; it is not fresh-install remote recovery.
+
 For example: “Use port 8080 instead of 80 for the remaining deployment steps.” You can also ask Codex a read-only question, abort remaining work, or review a rollback. A partly completed task needs a separately reviewed rollback proposal.
 
 To pause during a single-host task, enable **intervention at command boundaries** after reviewing the plan. Pausing stops before the next command; it does not kill a command already running.
+
+### Recover a common task from another installation
+
+New verified common-task runs also write signed, secret-free records on the
+managed host. From another installation, add the same host, connect normally,
+and authorize Stage 2 through the usual plugin activation flow if needed. Then
+choose **Remote common-task recovery**. Select an execution to verify its
+signature and host identity, then request a newly generated recovery plan.
+Review and approve that plan before anything changes.
+
+The audited recovery profiles cover the Linux systemd service and timer
+fixtures, plus native Intent AI Ops CLI installation on non-Alpine Linux.
+The CLI-install profile has fixture coverage and a reviewed Debian lab recovery.
+Other task families can be recorded but cannot yet use verified remote
+rollback. Changed catalogs, missing or modified baseline files, partial execution
+and unknown outcomes block that recovery path. Windows storage code is included
+but has not been live-validated; Kubernetes currently reports recovery unavailable
+because its gateway has no durable recovery backend.
+
+Keys stay on the host; normal verified SSH establishes the public-key pin. A
+changed pin is refused. The recovery menu also offers explicitly reviewed key
+rotation, retaining public keys so older records still verify. Completed sources
+with abandoned ownership need separate takeover approval; partial or unknown
+work stays blocked. These signatures do not protect against compromised host
+administrators or prove that a fresh installation received the newest records.
+See [implementation coverage and limits](docs/remote-common-task-recovery.md).
 
 ### Open the browser console
 

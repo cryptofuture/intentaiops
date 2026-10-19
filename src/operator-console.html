@@ -84,6 +84,15 @@
     <main hidden id="main"><button id="refresh">Refresh overview</button>
         <h2>Hosts and tasks</h2>
         <div id="hosts"></div>
+        <section>
+            <h2>Remote common-task recovery</h2>
+            <p>Choose a host's remote records to verify signed history. Inspection does not approve recovery.</p>
+            <div id="remote-records"></div>
+            <pre id="remote-history"></pre>
+            <button id="prepare-remote" hidden>Inspect baseline and propose recovery</button>
+            <pre id="remote-plan"></pre>
+            <button id="execute-remote" hidden>Approve and execute displayed recovery</button>
+        </section>
         <h2>Kubernetes clusters</h2>
         <pre id="clusters"></pre>
         <h2>Multi-host runs</h2>

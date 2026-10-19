@@ -103,16 +103,17 @@ export class MultiHostService {
             catalogInventory = planningHint?.inventory ?? await admin.refreshInventory({ settings, passphrase, serverId })
           }
         }
+        const recoveryOptions = {
+          platform: catalogPlatform,
+          linuxContext: catalogInventory?.webminaiLinuxContext,
+          windowsExecution: catalogInventory?.webminaiExecution,
+          freebsdExecution: catalogInventory?.webminaiExecution,
+          macosExecution: catalogInventory?.webminaiExecution,
+          docker: catalogInventory?.webminaiDocker,
+          applicationDefaults
+        }
         const plan = kind === 'catalog'
-          ? buildCommonTask(catalogId, task.id, {
-            platform: catalogPlatform,
-            linuxContext: catalogInventory?.webminaiLinuxContext,
-            windowsExecution: catalogInventory?.webminaiExecution,
-            freebsdExecution: catalogInventory?.webminaiExecution,
-            macosExecution: catalogInventory?.webminaiExecution,
-            docker: catalogInventory?.webminaiDocker,
-            applicationDefaults
-          }).plan
+          ? buildCommonTask(catalogId, task.id, recoveryOptions).plan
           : await admin.plan({
             settings,
             passphrase,
@@ -140,7 +141,7 @@ export class MultiHostService {
               onEvent({ type: 'planner-progress', runId: run.id, serverId, taskId: task.id, event, message: event.message })
             }
           })
-        admin.saveTaskPlan(serverId, task.id, plan)
+        admin.saveTaskPlan(serverId, task.id, plan, kind === 'catalog' && settings.servers?.[serverId]?.hostFingerprint && ['linux', 'freebsd', 'macos', 'windows'].includes(catalogPlatform) ? { catalogId, options: recoveryOptions, target: settings.servers[serverId].hostFingerprint } : undefined)
         this.runs.updateHost(run.id, serverId, { status: 'planned' })
         onEvent({ type: 'planned', runId: run.id, serverId, taskId: task.id, plan, message: 'Plan ready' })
         return { serverId, admin, taskId: task.id, plan }

@@ -19,6 +19,10 @@ const MANAGED_LABELS = {
 }
 
 export class KubernetesStage2Service {
+  remoteRecoveryCapabilities () {
+    return { version: 1, available: false, reason: 'The current gateway has ephemeral writable storage and no persistent recovery signing backend. Remote recovery requires an explicitly configured persistent volume, a verified cluster identity, and a gateway-native signer. No RBAC changes or pod-exec fallback are performed.' }
+  }
+
   constructor ({
     kubernetes,
     pluginPath = fileURLToPath(new URL('../dist/webminai.plugin-kubernetes-amd64', import.meta.url)),

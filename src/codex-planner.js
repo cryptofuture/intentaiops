@@ -7,6 +7,7 @@ import { runProcess } from './process-runner.js'
 import { validateApplicationDeltaPlan } from './application-delta.js'
 import { validateCommandPlan } from './plan-validator.js'
 import { normalizeApplicationDefaults } from './application-defaults.js'
+import { buildCommonTask } from './common-tasks.js'
 import {
   detectPlannerPlatform,
   validateDockerAndSecrets,
@@ -15,16 +16,15 @@ import {
   validateWindowsPlan
 } from './planner-platform-policy.js'
 
-export const CODEX_MODELS = Object.freeze(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'mimo-v2.6-pro'])
-export const CODEX_REASONING_EFFORTS = Object.freeze(['low', 'medium', 'high'])
-export const DEFAULT_CODEX_SETTINGS = Object.freeze({ model: 'gpt-5.6-luna', reasoningEffort: 'medium' })
+export const CODEX_REASONING_EFFORTS = Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
+export const DEFAULT_CODEX_SETTINGS = Object.freeze({ model: 'gpt-6.1-sol', reasoningEffort: 'low' })
 const CODEX_MODEL_PROFILES = Object.freeze({ 'mimo-v2.6-pro': 'mimo' })
 const PLANNER_DISABLED_FEATURES = ['shell_tool', 'unified_exec', 'shell_snapshot', 'apps', 'plugins', 'multi_agent', 'multi_agent_v2', 'browser_use', 'browser_use_external', 'computer_use', 'view_image', 'image_generation', 'hooks', 'workspace_dependencies', 'code_mode', 'memories', 'skill_search', 'skill_mcp_dependency_install', 'goals', 'default_mode_request_user_input']
 
 export function normalizeCodexSettings (value = {}) {
   const model = value?.model ?? DEFAULT_CODEX_SETTINGS.model
   const reasoningEffort = value?.reasoningEffort ?? DEFAULT_CODEX_SETTINGS.reasoningEffort
-  if (!CODEX_MODELS.includes(model)) throw new TypeError(`unsupported Codex model: ${model}`)
+  if (typeof model !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/u.test(model)) throw new TypeError('invalid Codex model identifier')
   if (!CODEX_REASONING_EFFORTS.includes(reasoningEffort)) throw new TypeError(`unsupported Codex reasoning effort: ${reasoningEffort}`)
   return { model, reasoningEffort }
 }
@@ -51,12 +51,37 @@ export class CodexPlanner {
     this.routingSchemaPath = path.resolve(routingSchemaPath)
   }
 
+  async listModels () {
+    const options = { env: plannerEnvironment(), timeoutMs: 15000, maxOutputBytes: 8 * 1024 * 1024 }
+    const result = await this.configurationRunner(this.codexBinary, ['--config', 'features.hooks=false', '--config', 'features.plugins=false', 'debug', 'models'], options)
+    if (result.code !== 0 || result.timedOut || result.signal || result.stdoutTruncated) throw new Error('Unable to list Codex models. Check Codex authentication and CLI version; saved settings are unchanged.')
+    let catalog
+    try { catalog = JSON.parse(result.stdout) } catch { throw new Error('Invalid Codex model catalog') }
+    if (!Array.isArray(catalog.models) || !catalog.models.length || catalog.models.length > 1000) throw new Error('Invalid Codex model catalog')
+    const seen = new Set()
+    const models = catalog.models.map(item => {
+      if (!item || typeof item.slug !== 'string') throw new Error('Invalid Codex model identifier')
+      const model = normalizeCodexSettings({ model: item.slug }).model
+      if (seen.has(model) || !Array.isArray(item.supported_reasoning_levels) || !item.supported_reasoning_levels.length || item.supported_reasoning_levels.length > CODEX_REASONING_EFFORTS.length) throw new Error('Invalid Codex model capabilities')
+      seen.add(model)
+      const reasoningEfforts = item.supported_reasoning_levels.map(level => {
+        if (!level || typeof level.effort !== 'string') throw new Error('Invalid Codex model capabilities')
+        return normalizeCodexSettings({ model, reasoningEffort: level.effort }).reasoningEffort
+      })
+      if (new Set(reasoningEfforts).size !== reasoningEfforts.length) throw new Error('Invalid Codex model capabilities')
+      return { model, reasoningEfforts }
+    })
+    if (!seen.has('mimo-v2.6-pro')) models.push({ model: 'mimo-v2.6-pro', reasoningEfforts: ['low', 'medium', 'high'] })
+    return models
+  }
+
   async plan ({
     serverDirectory,
     request,
     inventory,
     policy = {},
     taskId,
+    catalogId = null,
     previousAttempts,
     retryInstructions,
     consultationContext,
@@ -66,7 +91,7 @@ export class CodexPlanner {
     requireRevert = true,
     onProgress
   }) {
-    const basePrompt = buildPrompt(request, taskId, inventory, { previousAttempts, retryInstructions, consultationContext, deploymentBlueprint, candidateContext, applicationDefaults })
+    const basePrompt = buildPrompt(request, taskId, inventory, { catalogId, previousAttempts, retryInstructions, consultationContext, deploymentBlueprint, candidateContext, applicationDefaults })
     let validationError
     for (let attempt = 1; attempt <= 3; attempt++) {
       const prompt = validationError
@@ -255,7 +280,13 @@ export class CodexPlanner {
         '--skip-git-repo-check'
       ]
       if (!profile) args.push('--output-schema', schemaPath)
-      const progress = onProgress ? createProgressParser(onProgress) : null
+      let progressError
+      const progress = onProgress
+        ? createProgressParser(event => {
+          if (event.type === 'error') progressError = sanitizePlannerString(event.message).slice(0, 1000)
+          onProgress(event)
+        })
+        : null
       if (progress) args.push('--json', '--output-last-message', lastMessagePath)
       args.push('-')
       const result = await this.runner(this.codexBinary, args, {
@@ -270,7 +301,7 @@ export class CodexPlanner {
       progress?.flush()
       if (result.timedOut === true) throw new Error(`Codex ${failureLabel} timed out after 300 seconds; no final response was accepted`)
       if (result.signal) throw new Error(`Codex ${failureLabel} was interrupted (${result.signal}); no final response was accepted`)
-      if (result.code !== 0) throw new Error(`Codex ${failureLabel} failed: ${result.stderr.trim()}`)
+      if (result.code !== 0) throw new Error(`Codex ${failureLabel} failed: ${sanitizePlannerString(result.stderr.trim() || progressError || `exit code ${result.code}`).slice(0, 1000)}`)
 
       let output = result.stdout
       if (progress) {
@@ -319,7 +350,7 @@ function disableShellTracing (command) {
     .replace(/(\bset[^;\r\n]*?)\s+-o\s+xtrace\b/gu, '$1')
 }
 
-function buildPrompt (request, taskId, inventory, { previousAttempts, retryInstructions, consultationContext, deploymentBlueprint, candidateContext, applicationDefaults }) {
+function buildPrompt (request, taskId, inventory, { catalogId, previousAttempts, retryInstructions, consultationContext, deploymentBlueprint, candidateContext, applicationDefaults }) {
   const targetPlatform = detectPlannerPlatform(inventory)
   const taskStateRoot = targetPlatform === 'windows'
     ? 'C:\\ProgramData\\WebminAI\\Tasks'
@@ -411,10 +442,31 @@ function buildPrompt (request, taskId, inventory, { previousAttempts, retryInstr
     ...candidateKnowledgePrompt(candidateContext),
     ...consultationPrompt(consultationContext, 'task'),
     ...retryPrompt(previousAttempts, retryInstructions),
+    ...catalogRevisionReference(catalogId, ownershipTaskId, inventory, defaults),
     '',
     'Authoritative current user request (takes precedence over consultation context and retry evidence):',
     request
   ].join('\n')
+}
+
+function catalogRevisionReference (catalogId, taskId, inventory, applicationDefaults) {
+  if (!catalogId) return []
+  const observed = sanitizePlannerData(inventory)
+  const built = buildCommonTask(catalogId, taskId, {
+    platform: detectPlannerPlatform(observed),
+    linuxContext: observed.webminaiLinuxContext,
+    windowsExecution: observed.webminaiExecution,
+    freebsdExecution: observed.webminaiExecution,
+    macosExecution: observed.webminaiExecution,
+    docker: observed.webminaiDocker,
+    applicationDefaults
+  })
+  return [
+    '',
+    'Current verified catalog templates, rebuilt from public application source, not historical payloads or execution approval:',
+    'Use these public checksums and symbolic credential readers rather than reconstructing redacted history. Preserve completed commands and require review of every changed command. Never replace redaction with guessed secrets.',
+    JSON.stringify({ catalogId, commands: built.plan.commands, revertCommands: built.plan.revertCommands }, null, 2)
+  ]
 }
 
 function buildRoutingPrompt (request, candidates) {

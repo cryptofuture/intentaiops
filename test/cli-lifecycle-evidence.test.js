@@ -6,7 +6,9 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
-import { assertCliLifecycleEvidence } from '../scripts/assert-cli-lifecycle.js'
+import { assertCliLifecycleEvidence, assertCliReviewedRollbackEvidence } from '../scripts/assert-cli-lifecycle.js'
+import { assertCompletedExecutionIsNotReplayed } from '../scripts/audit-linux-cli-history.js'
+import { buildCommonTask } from '../src/common-tasks.js'
 import { planFingerprint } from '../src/execution-journal.js'
 
 const command = (id, text, risk = 'change') => ({ id, command: text, risk, requiresSudo: true, timeoutMs: 1000, dependsOn: [] })
@@ -46,6 +48,43 @@ function ordered (value) {
 test('CLI lifecycle evidence proves unchanged repeat state, both rollbacks and no duplicate dispatch', () => {
   assert.deepEqual(assertCliLifecycleEvidence(fixture()), { firstTask: 2, repeatTask: 3, commands: 1, rollbackCommands: 1, scope: 'reviewed state probe and single-dispatch journal evidence' })
 })
+
+test('completed common-task evidence can be replay-checked without contacting any target', async () => {
+  const task = record(2, buildCommonTask('systemd-service', 2, { platform: 'linux' }).plan, 'reverted')
+  await assertCompletedExecutionIsNotReplayed(task)
+  task.events.find(event => event.type === 'command_completed').type = 'command_outcome_unknown'
+  await assert.rejects(assertCompletedExecutionIsNotReplayed(task), /outcome|completion/u)
+})
+
+function reviewedRollbackFixture () {
+  const task = fixture().first
+  const cleanup = command('reviewed-cleanup', 'reviewed-guarded-cleanup')
+  const plan = { commands: [cleanup], revertCommands: [], operatorRollback: true }
+  task.revisions = [{ approved: 1, plan }]
+  task.revertResults = [{ id: cleanup.id, status: 'completed', result: { exitCode: 0 } }]
+  task.events = task.events.filter(event => event.metadata.operation !== 'rollback')
+  task.events.push(...['plan_approved', 'command_prepared', 'command_dispatched', 'command_completed'].map((type, index) => ({ id: 100 + index, type, commandId: cleanup.id, attemptId: type === 'plan_approved' ? null : 'cleanup-attempt', revision: planFingerprint(task.plan), metadata: { operation: 'rollback', rollbackRevision: planFingerprint(plan), ...(type === 'command_completed' ? { exitCode: 0 } : {}) } })))
+  return task
+}
+
+test('reviewed recovery rollback evidence binds approval, original plan, attempts and completion', () => {
+  assertCliReviewedRollbackEvidence(reviewedRollbackFixture())
+})
+
+for (const [name, mutate] of [
+  ['unapproved cleanup', task => { task.revisions[0].approved = 0 }],
+  ['changed cleanup bytes', task => { task.revisions[0].plan.commands[0].command = 'different-cleanup' }],
+  ['stale parent', task => { task.events.at(-1).revision = 'a'.repeat(64) }],
+  ['unknown outcome', task => { task.events.at(-1).type = 'command_outcome_unknown' }],
+  ['wrong attempt', task => { task.events.at(-1).attemptId = 'other-attempt' }],
+  ['duplicate dispatch', task => { task.events.push({ ...task.events.at(-2), id: 104 }) }]
+]) {
+  test(`reviewed recovery audit rejects ${name}`, () => {
+    const task = reviewedRollbackFixture()
+    mutate(task)
+    assert.throws(() => assertCliReviewedRollbackEvidence(task))
+  })
+}
 
 function revisedFixture () {
   const value = fixture()

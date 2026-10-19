@@ -42,7 +42,11 @@ export function executionDiagnostics ({ item = { id: 'execution' }, result = {},
     const failure = classifyFailure({ item, result, error })
     const explanation = failure.code === 'PACKAGE_MANAGER_BUSY'
       ? 'The package manager reported an installation lock held by another process. Wait for it to finish; do not remove its lock.'
-      : `Recorded failure category: ${failure.code}.`
+      : failure.code === 'PACKAGE_CONFIGURATION_CONFLICT'
+        ? 'dpkg required a configuration-file decision but no interactive input was available. Review the affected package configuration before continuing.'
+        : failure.code === 'BASELINE_RESTORATION_BLOCKED'
+          ? 'The baseline guard refused cleanup because data remains or recorded baseline integrity changed. Preserve the data and baseline, inspect ownership, and review a new cleanup plan; restoration is not complete.'
+          : `Recorded failure category: ${failure.code}.`
     if (!['COMMAND_FAILED', 'TIMEOUT', 'PERMISSION_DENIED', 'INSUFFICIENT_MEMORY'].includes(failure.code)) add(failure.code, 'confirmed', 'remote-command', explanation, {}, 'failure-classifier')
   }
   const elapsed = Date.parse(after?.observedAt) - Date.parse(before?.observedAt)

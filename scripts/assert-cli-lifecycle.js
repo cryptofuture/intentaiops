@@ -73,6 +73,32 @@ function confirmed (task, rollback = false) {
 
 export { confirmed as assertCliTaskExecutionEvidence }
 
+export function assertCliReviewedRollbackEvidence (task) {
+  const revision = (task.revisions ?? []).filter(item => item.approved && item.plan.operatorRollback).at(-1)
+  assert.ok(revision && task.status === 'reverted', 'approved recovery rollback and reverted task required')
+  const plan = revision.plan
+  const fingerprint = planFingerprint(plan)
+  const parent = planFingerprint(task.plan)
+  assert.deepEqual(task.revertResults?.map(item => item.id), plan.commands.map(item => item.id), 'recovery results differ from approved cleanup')
+  const events = task.events.filter(event => event.metadata?.operation === 'rollback' && event.metadata.rollbackRevision === fingerprint)
+  let previous = 0
+  for (const command of plan.commands) {
+    assert.ok(completed(task.revertResults.find(item => item.id === command.id)), 'recovery cleanup did not complete')
+    const group = events.filter(event => event.commandId === command.id)
+    assert.ok(group.every(event => event.revision === parent), 'recovery parent plan changed')
+    const ordered = ['plan_approved', 'command_prepared', 'command_dispatched', 'command_completed'].map(type => {
+      const matches = group.filter(event => event.type === type)
+      assert.equal(matches.length, 1, 'reviewed recovery requires exactly one ordered attempt')
+      return matches[0]
+    })
+    assert.ok(ordered.every((event, index) => event.id > (index ? ordered[index - 1].id : previous)), 'recovery approval, intent and outcome are out of order')
+    assert.ok(ordered[1].attemptId && ordered[1].attemptId === ordered[2].attemptId && ordered[2].attemptId === ordered[3].attemptId, 'recovery attempt identity changed')
+    assert.equal(ordered[3].metadata.exitCode, 0)
+    assert.equal(group.at(-1).type, 'command_completed', 'recovery cleanup has unresolved observations')
+    previous = ordered[3].id
+  }
+}
+
 function output (task, commandId) {
   const result = task.results.find(result => result.id === commandId)
   assert.ok(completed(result) && typeof result.result.stdout === 'string' && result.result.stdout.trim() && result.result.stdout.length <= 65536 && !result.result.stdoutTruncated, 'probe evidence is absent, incomplete or truncated')

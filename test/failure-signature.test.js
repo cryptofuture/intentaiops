@@ -30,6 +30,30 @@ test('authoritative job timeouts retain their cause even with empty or misleadin
   assert.equal(classifyFailure({ item: { id: 'download', phase: 'acquire' }, result: { timedOut: true, exitCode: 143, stderr: 'curl: (56) connection reset' } }).code, 'TIMEOUT')
 })
 
+test('an explicit dpkg conffile prompt explains a package configuration failure', () => {
+  const item = { id: 'install-stack', phase: 'packages' }
+  const result = { exitCode: 100, stderr: 'dpkg: error processing package mysql-server-8.0 (--configure):\n end of file on stdin at conffile prompt' }
+  assert.equal(classifyFailure({ item, result }).code, 'PACKAGE_CONFIGURATION_CONFLICT')
+  const observations = executionDiagnostics({ item, result })
+  assert.ok(observations.some(value => value.code === 'PACKAGE_CONFIGURATION_CONFLICT' && value.confidence === 'confirmed'))
+  assert.match(observations.find(value => value.code === 'PACKAGE_CONFIGURATION_CONFLICT').explanation, /configuration-file decision/u)
+  assert.ok(!observations.some(value => value.code === 'CAUSE_UNKNOWN'))
+  assert.deepEqual(executionDiagnostics({ item, result: { ...result, exitCode: 0 } }), [])
+})
+
+test('explicit recovery guard refusals explain incomplete restoration without implying data loss or retry', () => {
+  for (const marker of ['DATABASE_DATA_REMAINS', 'RECOVERY_BASELINE_CHANGED']) {
+    const item = { id: 'restore-stack', phase: 'cleanup' }
+    const result = { exitCode: 1, stderr: marker + ': preserve and inspect baseline', stdout: 'x'.repeat(10000) }
+    assert.equal(classifyFailure({ item, result }).code, 'BASELINE_RESTORATION_BLOCKED')
+    const diagnostics = executionDiagnostics({ item, result })
+    assert.ok(diagnostics.some(value => value.code === 'BASELINE_RESTORATION_BLOCKED' && value.confidence === 'confirmed'))
+    assert.match(diagnostics.find(value => value.code === 'BASELINE_RESTORATION_BLOCKED').explanation, /restoration is not complete/u)
+    assert.ok(!diagnostics.some(value => value.code === 'CAUSE_UNKNOWN'))
+    assert.deepEqual(executionDiagnostics({ item, result: { ...result, exitCode: 0 } }), [])
+  }
+})
+
 test('explicit cancellation is not inferred to be a timeout from SIGTERM alone', () => {
   const failure = classifyFailure({ item: { id: 'cancelled-job', phase: 'acquire' }, result: { state: 'cancelled', timedOut: false, exitCode: 143, signal: 15 } })
   assert.equal(failure.code, 'COMMAND_FAILED')

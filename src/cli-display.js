@@ -1,6 +1,7 @@
 import { parseSshConnection } from './connection.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
 import { PRODUCT_NAME } from './product.js'
+import { DEFAULT_CODEX_SETTINGS } from './codex-planner.js'
 
 export function mainActionOptions ({ hostCount, clusterCount = 0, recentServerId, codex = {} }) {
   const actions = []
@@ -13,7 +14,7 @@ export function mainActionOptions ({ hostCount, clusterCount = 0, recentServerId
   actions.push({ label: 'Add host', value: 'add' })
   actions.push({ label: 'Temporarily add host (removed on exit)', value: 'add-temporary' })
   actions.push({ label: 'Add Kubernetes cluster', value: 'add-kubernetes' })
-  actions.push({ label: `Set Codex model (${codex.model ?? 'gpt-5.6-luna'} / ${codex.reasoningEffort ?? 'medium'})`, value: 'codex-settings' })
+  actions.push({ label: `Set Codex model (${codex.model ?? DEFAULT_CODEX_SETTINGS.model} / ${codex.reasoningEffort ?? DEFAULT_CODEX_SETTINGS.reasoningEffort})`, value: 'codex-settings' })
   actions.push({ label: 'Controls', value: 'controls' })
   actions.push({ label: 'Set default administrator email', value: 'application-defaults' })
   actions.push({ label: 'Change vault passphrase', value: 'change-passphrase' })
@@ -36,6 +37,7 @@ export function connectedHostActionOptions ({ status, dockerPreference, temporar
       : []),
     { label: 'Run an AI-assisted task', value: 'task' },
     { label: 'Task history and reverts', value: 'history' },
+    { label: 'Remote common-task recovery', value: 'remote-recovery' },
     { label: 'Open an interactive SSH shell', value: 'shell' },
     { label: 'Show server requirements', value: 'requirements' },
     { label: 'Switch to another host', value: 'switch' },

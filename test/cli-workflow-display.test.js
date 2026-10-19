@@ -7,7 +7,9 @@ import {
   renderPlan,
   renderResults,
   renderTaskRecord,
-  reviewMultiHostPlans
+  reviewMultiHostPlans,
+  manageExecution,
+  setCodexSettings
 } from '../src/cli.js'
 import {
   catalogChoiceRows,
@@ -21,6 +23,44 @@ import {
   taskHistoryRows
 } from '../src/cli-workflow-display.js'
 import { TerminalUi } from '../src/terminal-ui.js'
+
+test('model picker limits reasoning to selected Codex capabilities and preserves settings on discovery failure', async () => {
+  const models = [
+    { model: 'gpt-6.1-sol', reasoningEfforts: ['low', 'max', 'ultra'] },
+    { model: 'mimo-v2.6-pro', reasoningEfforts: ['low', 'medium', 'high'] }
+  ]
+  for (const selected of models) {
+    const choices = []
+    const saved = []
+    const context = {
+      settings: { codex: { model: 'gpt-6.1-sol', reasoningEffort: 'low' } },
+      settingsStore: { setCodexSettings: async value => saved.push(value) },
+      ui: {
+        clear () {},
+        banner () {},
+        info () {},
+        success () {},
+        pause: async () => {},
+        choose: async (label, options) => {
+          choices.push(options.filter(item => item.value).map(item => item.value))
+          return label === 'Model' ? selected.model : selected.reasoningEfforts.at(-1)
+        }
+      }
+    }
+    await setCodexSettings({ context, planner: { listModels: async () => models } })
+    assert.deepEqual(choices, [models.map(item => item.model), selected.reasoningEfforts])
+    assert.equal(saved[0].model, selected.model)
+    assert.equal(saved[0].reasoningEffort, selected.reasoningEfforts.at(-1))
+    let warned = false
+    context.ui.warning = () => { warned = true }
+    await setCodexSettings({ context, planner: { listModels: async () => { throw new Error('unavailable') } } })
+    assert.equal(warned, true)
+    assert.equal(saved.length, 1)
+    context.ui.choose = async label => label === 'Model' ? selected.model : 'minimal'
+    await assert.rejects(setCodexSettings({ context, planner: { listModels: async () => models } }), /unsupported/u)
+    assert.equal(saved.length, 1)
+  }
+})
 
 test('verified application choices search label, description, and catalog id', () => {
   const [row] = catalogChoiceRows([{ id: 'wordpress', label: 'WordPress', description: 'Install a PHP publishing site' }])
@@ -96,6 +136,38 @@ test('plan rendering shows every complete apply and revert command without ANSI 
   assert.match(output.text, /Saved revert plan \(not executed now\)/)
   assert.match(output.text, /WARNING: Review this warning/)
   assert.equal(hasSgr(output.text), false)
+})
+
+test('local operator reviews show stored commands rather than sanitized browser projections', async () => {
+  for (const action of ['inspect', 'propose', 'refresh-catalog', 'review-revision', 'resume']) {
+    const { ui, output } = plainUi()
+    const original = plan()
+    const checksum = 'a'.repeat(64)
+    original.commands[0].command = `printf '%s' '${checksum}'`
+    const publicPlan = { ...original, commands: original.commands.map(command => ({ ...command, command: '[redacted-64-hex]' })) }
+    const revision = { id: 7, parentId: 1, approved: 0, plan: publicPlan, fingerprint: 'decision', differences: {} }
+    const selections = [action, ...(action === 'review-revision' ? [revision] : []), null]
+    ui.choose = async () => selections.shift()
+    ui.editor = async () => 'Reviewed changes'
+    ui.pause = async () => {}
+    ui.confirm = async () => {
+      assert.ok(output.text.includes(checksum))
+      assert.ok(!output.text.includes('[redacted-64-hex]'))
+      return false
+    }
+    const proposal = { revisionId: 7, expectedVersion: 'state', fingerprint: 'decision', proposed: publicPlan, differences: {} }
+    const controller = {
+      tasks: { get: () => ({ kind: 'catalog', catalogId: 'ghost-linux', plan: original, results: [] }), revisions: () => [{ ...revision, plan: original }] },
+      inspect: () => ({ task: { status: 'partial', plan: publicPlan }, commands: [], revisions: [revision], stateVersion: 'state', fingerprint: 'decision' }),
+      propose: async () => proposal,
+      proposeCatalogRefresh: async () => proposal,
+      approve: () => { throw new Error('No implicit approval') },
+      resume: () => { throw new Error('No implicit execution') }
+    }
+    await manageExecution({ ui, controller, serverId: 'host', taskId: 1 })
+    assert.ok(output.text.includes(checksum), action)
+    assert.ok(!output.text.includes('[redacted-64-hex]'), action)
+  }
 })
 
 test('result rendering keeps complete stdout and stderr in separate labelled sections', () => {

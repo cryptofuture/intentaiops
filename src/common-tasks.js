@@ -1028,7 +1028,7 @@ function simpleTask (definition, state, options) {
     plan: {
       changeOverview: options.overview,
       modifiedFiles: options.files,
-      commands: [command('apply', `set -eu; for path in ${options.files.map(quote).join(' ')}; do test ! -L "$path"; done; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${options.apply}; : > ${quote(`${state}/apply-complete`)}; fi`, options.applyPurpose, 'change', 300000)],
+      commands: [command('apply', `set -eu; for path in ${options.files.map(quote).join(' ')}; do test ! -L "$path"; done; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${options.apply}; : > ${quote(`${state}/apply-complete`)}; chmod 0600 ${quote(`${state}/apply-complete`)}; fi`, options.applyPurpose, 'change', 300000)],
       revertCommands: [command('revert', `set -eu; test ! -L ${quote(state)}; [ -d ${quote(state)} ] || exit 0; ${options.revert}`, options.revertPurpose, 'change', 300000)]
     },
     verifyApplied: options.verifyApplied,

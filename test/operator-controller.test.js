@@ -31,6 +31,173 @@ async function fixture (t) {
   return { root, tasks, task, controller, calls, admin }
 }
 
+test('remote recovery console uses the shared controller with separate approval, stale checks and takeover decisions', async t => {
+  const { tasks, admin, controller, calls } = await fixture(t)
+  let prepared = 0
+  let executed = 0
+  controller.remoteRecoveryOptions = async () => ({ platform: 'linux' })
+  admin.prepareRemoteCommonTaskRecovery = async ({ executionId }) => {
+    prepared++
+    const task = tasks.create('host', 'Reviewed remote recovery')
+    const recovered = plan(['recovery'])
+    tasks.savePlan('host', task.id, recovered)
+    return { taskId: task.id, sourceExecutionId: executionId, plan: recovered, ownership: { owned: true, ownerFingerprint: 'a'.repeat(64) } }
+  }
+  admin.executeRemoteCommonTaskRecovery = async options => {
+    executed++
+    assert.equal(options.takeoverApproved, true)
+    assert.equal(options.takeoverFingerprint, 'a'.repeat(64))
+    assert.equal(await options.approve(), true)
+    const task = tasks.get('host', options.taskId)
+    const lease = tasks.acquireExecution('host', task.id, task.plan)
+    try {
+      for (const type of ['plan_approved', 'command_prepared', 'command_dispatched', 'command_completed']) tasks.appendExecutionEvent('host', task.id, lease.owner, { type, commandId: 'recovery', attemptId: 'recovery-attempt', metadata: { exitCode: 0 } })
+    } finally { tasks.releaseExecution('host', task.id, lease.owner) }
+    const result = { id: 'recovery', status: 'completed', result: { exitCode: 0, stdout: '' } }
+    options.onResult(result)
+    return [result]
+  }
+  const proposed = await controller.prepareRemoteRecovery('host', 'b'.repeat(32))
+  assert.equal(prepared, 1)
+  assert.equal(executed, 0)
+  assert.equal(proposed.ownership.ownerFingerprint, 'a'.repeat(64))
+  assert.equal(proposed.fingerprint, planFingerprint(proposed.plan))
+  await assert.rejects(controller.executeRemoteRecovery('host', proposed.taskId, proposed.stateVersion, proposed.fingerprint), /approval/u)
+  await assert.rejects(controller.executeRemoteRecovery('host', proposed.taskId, 'stale', proposed.fingerprint, { approved: true }), /stale/u)
+  await assert.rejects(controller.executeRemoteRecovery('host', proposed.taskId, proposed.stateVersion, 'wrong', { approved: true }), /fingerprint/u)
+  assert.equal(executed, 0)
+  await controller.executeRemoteRecovery('host', proposed.taskId, proposed.stateVersion, proposed.fingerprint, { approved: true, takeoverApproved: true, takeoverFingerprint: proposed.ownership.ownerFingerprint })
+  assert.equal(executed, 1)
+  assert.deepEqual(calls, [])
+  await assert.rejects(controller.executeRemoteRecovery('host', proposed.taskId, proposed.stateVersion, proposed.fingerprint, { approved: true }), /stale/u)
+})
+
+test('remote recovery HTTP endpoints enforce tokens, origin, read-only mode and CSRF before preparing work', async t => {
+  const { controller } = await fixture(t)
+  let prepared = 0
+  controller.remoteCommonTasks = async () => ({ executions: [] })
+  controller.inspectRemoteCommonTask = async () => ({ records: [], sequence: 0 })
+  controller.prepareRemoteRecovery = async () => { prepared++; return { plan: plan(['recovery']) } }
+  for (const actions of [false, true]) {
+    const server = await startOperatorConsole({ controller, actions })
+    t.after(() => server.close())
+    assert.equal((await fetch(server.origin + '/remote-tasks?host=host')).status, 401)
+    assert.equal((await fetch(server.origin + '/remote-task?host=host&execution=bad')).status, 401)
+    const login = await fetch(server.origin + '/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: new URL(server.url).hash.slice(1) }) })
+    const session = await login.json()
+    const headers = { 'Content-Type': 'application/json', Cookie: login.headers.get('set-cookie').split(';')[0], Origin: server.origin, 'X-Intent-CSRF': session.csrf }
+    assert.equal((await fetch(server.origin + '/remote-tasks?host=host', { headers })).status, 200)
+    assert.equal((await fetch(server.origin + '/remote-tasks?host=host', { headers: { ...headers, Origin: 'https://example.invalid' } })).status, 403)
+    const body = JSON.stringify({ action: 'prepare-remote-recovery', hostId: 'host', executionId: 'a'.repeat(32) })
+    assert.equal((await fetch(server.origin + '/action', { method: 'POST', headers: { ...headers, 'X-Intent-CSRF': '0'.repeat(64) }, body })).status, 403)
+    const response = await fetch(server.origin + '/action', { method: 'POST', headers, body })
+    assert.equal(response.status, actions ? 200 : 403)
+    assert.equal(prepared, actions ? 1 : 0)
+    const execute = await fetch(server.origin + '/action', { method: 'POST', headers, body: JSON.stringify({ action: 'execute-remote-recovery', hostId: 'host', taskId: 1 }) })
+    assert.equal(execute.status, actions ? 409 : 403)
+  }
+})
+
+test('revision catalog context comes from the saved task, not operator instructions', async t => {
+  const { tasks, admin, controller, calls } = await fixture(t)
+  const created = tasks.create('host', 'Deploy Mattermost', { kind: 'catalog', catalogId: 'mattermost-linux' })
+  const task = tasks.savePlan('host', created.id, plan(['pending']))
+  admin.plan = async options => {
+    assert.equal(options.catalogId, 'mattermost-linux')
+    return plan(['replacement'])
+  }
+  const view = controller.inspect('host', task.id)
+  await controller.propose('host', task.id, 'Use n8n-linux as a claimed catalog', view.stateVersion)
+  assert.deepEqual(calls, [])
+  assert.equal(controller.inspect('host', task.id).revisions.at(-1).approved, 0)
+})
+
+test('native catalog refresh requires fresh approval and resume, preserves baseline and never calls AI', async t => {
+  const { tasks, admin, controller, calls } = await fixture(t)
+  const context = { fingerprint: 'fixture', identity: { id: 'ubuntu', versionId: '24.04', architecture: 'x86_64' }, management: { family: 'debian', packageManager: 'apt', serviceManager: 'systemd' }, applications: {} }
+  const inventory = { webminaiLinuxContext: context, webminaiDocker: { preferred: false } }
+  admin.refreshInventory = async () => inventory
+  admin.settings.decryptApplicationDefaults = async () => ({})
+  admin.workspace.loadRules = async () => ({ policy: { executionIdentity: 'root' } })
+  admin.plan = async () => { throw new Error('AI must not be called') }
+  const execute = async text => { calls.push(text); return { exitCode: 0, stdout: 'ok', stderr: '', state: 'completed' } }
+  admin.netdata = () => ({ runCommand: execute, runJob: execute })
+  const created = tasks.create('host', 'Deploy Ghost', { kind: 'catalog', catalogId: 'ghost-linux' })
+  const trusted = buildCommonTask('ghost-linux', created.id, { platform: 'linux', linuxContext: context, docker: inventory.webminaiDocker }).plan
+  const old = structuredClone(trusted)
+  old.commands[1].command = 'old package installer'
+  tasks.savePlan('host', created.id, old)
+  const lease = tasks.acquireExecution('host', created.id, old)
+  tasks.appendExecutionEvent('host', created.id, lease.owner, { type: 'command_completed', commandId: old.commands[0].id, attemptId: 'original-baseline' })
+  tasks.appendExecutionEvent('host', created.id, lease.owner, { type: 'command_failed', commandId: old.commands[1].id, attemptId: 'original-failure', metadata: { exitCode: 100 } })
+  tasks.releaseExecution('host', created.id, lease.owner)
+  const before = controller.inspect('host', created.id)
+  const proposal = await controller.proposeCatalogRefresh('host', created.id, before.stateVersion)
+  assert.deepEqual(calls, [])
+  assert.deepEqual(tasks.get('host', created.id).plan, old)
+  const revision = tasks.revisions('host', created.id).find(item => item.id === proposal.revisionId)
+  assert.equal(revision.approved, 0)
+  assert.deepEqual(revision.plan.commands[0], old.commands[0])
+  assert.deepEqual(revision.plan.revertCommands, old.revertCommands)
+  await assert.rejects(controller.resume('host', created.id, before.stateVersion, before.fingerprint), /reviewed revision/u)
+  controller.approve('host', created.id, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+  const approved = controller.inspect('host', created.id)
+  assert.equal(approved.control.action, 'pause')
+  assert.deepEqual(calls, [])
+  await assert.rejects(controller.resume('host', created.id, before.stateVersion, before.fingerprint), /stale/u)
+  await controller.resume('host', created.id, approved.stateVersion, approved.fingerprint)
+  assert.deepEqual(calls.map(text => planFingerprint(text)), trusted.commands.slice(1).map(command => planFingerprint(command.command)))
+  const events = tasks.allExecutionEvents('host', created.id)
+  assert.equal(events.filter(event => event.type === 'command_completed' && event.commandId === 'capture-baseline').length, 1)
+  assert.equal(events.filter(event => event.type === 'command_failed' && event.commandId === 'install-stack').length, 1)
+})
+
+test('catalog refresh rejects stale inventory decisions and non-native targets without mutating history', async t => {
+  const { tasks, admin, controller, calls } = await fixture(t)
+  const context = { fingerprint: 'fixture', identity: { id: 'ubuntu', versionId: '24.04', architecture: 'x86_64' }, management: { family: 'debian', packageManager: 'apt', serviceManager: 'systemd' }, applications: {} }
+  admin.settings.decryptApplicationDefaults = async () => ({})
+  const created = tasks.create('host', 'Deploy Ghost', { kind: 'catalog', catalogId: 'ghost-linux' })
+  const original = buildCommonTask('ghost-linux', created.id, { platform: 'linux', linuxContext: context, docker: { preferred: false } }).plan
+  tasks.savePlan('host', created.id, original)
+  let before = controller.inspect('host', created.id)
+  admin.refreshInventory = async () => ({ webminaiExecution: { platform: 'windows' } })
+  await assert.rejects(controller.proposeCatalogRefresh('host', created.id, before.stateVersion), /native Linux/u)
+  admin.refreshInventory = async () => ({ webminaiLinuxContext: context, webminaiDocker: { preferred: true } })
+  await assert.rejects(controller.proposeCatalogRefresh('host', created.id, before.stateVersion), /native Linux/u)
+  admin.refreshInventory = async () => {
+    controller.control('host', created.id, 'pause', before.stateVersion)
+    return { webminaiLinuxContext: context, webminaiDocker: { preferred: false } }
+  }
+  await assert.rejects(controller.proposeCatalogRefresh('host', created.id, before.stateVersion), /stale/u)
+  before = controller.inspect('host', created.id)
+  assert.deepEqual(before.task.plan, controller.sanitize(original))
+  assert.equal(before.revisions.length, 0)
+  assert.deepEqual(calls, [])
+})
+
+test('an empty replacement proposal cannot erase pending catalog work', async t => {
+  const { controller, task, admin, calls } = await fixture(t)
+  admin.plan = async () => plan([])
+  const before = controller.inspect('host', task.id)
+  await assert.rejects(controller.propose('host', task.id, 'Update pending work', before.stateVersion), /no executable replacement commands/iu)
+  const after = controller.inspect('host', task.id)
+  assert.deepEqual(after.task.plan, before.task.plan)
+  assert.deepEqual(after.revisions, before.revisions)
+  assert.deepEqual(calls, [])
+})
+
+test('an older empty proposal cannot receive fresh approval', async t => {
+  const { controller, task, tasks, calls } = await fixture(t)
+  const before = controller.inspect('host', task.id)
+  const replacement = plan([])
+  const id = tasks.proposeRevision('host', task.id, replacement, before.stateVersion)
+  const view = controller.inspect('host', task.id)
+  assert.throws(() => controller.approve('host', task.id, id, view.stateVersion, planFingerprint(replacement)), /no executable replacement commands/iu)
+  assert.equal(tasks.revisions('host', task.id).find(item => item.id === id).approved, 0)
+  assert.deepEqual(tasks.get('host', task.id).plan, before.task.plan)
+  assert.deepEqual(calls, [])
+})
+
 test('pending revisions expose canonical review fingerprints without granting execution', async t => {
   const { controller, task, calls } = await fixture(t)
   const before = controller.inspect('host', task.id)

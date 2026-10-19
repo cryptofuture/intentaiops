@@ -32,6 +32,28 @@ test('AI plans cannot set controller-owned rollback mode', async () => {
   assert.equal(attempts, 3)
 })
 
+test('catalog revision references preserve public checksums without unredacting history', async () => {
+  let prompt
+  const planner = new CodexPlanner()
+  planner.runStructured = async options => {
+    prompt = options.prompt
+    return JSON.stringify({ summary: 'Inspect', changeOverview: 'Inspect pending work', modifiedFiles: [], commands: [{ id: 'inspect', command: 'true', purpose: 'Inspect', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [] }], revertCommands: [] })
+  }
+  await planner.plan({
+    request: 'Inspect pending work',
+    taskId: 44,
+    catalogId: 'mattermost-linux',
+    inventory: { os: 'linux', webminaiLinuxContext: { identity: { id: 'ubuntu', versionId: '24.04', architecture: 'x86_64' }, management: { family: 'debian', packageManager: 'apt', serviceManager: 'systemd' } }, webminaiDocker: { preferred: false } },
+    previousAttempts: [{ id: 44, plan: { commands: [{ id: 'old', command: `echo password=KNOWN_SECRET ${'a'.repeat(64)}` }], revertCommands: [] }, executionEvidence: { commands: [], rollbackCommands: [] } }],
+    retryInstructions: 'Review current verified acquisition, not redacted historical payloads'
+  })
+  assert.match(prompt, /Current verified catalog templates/u)
+  assert.match(prompt, /0fc1637ca6cec0a53fc7112a22f67651dba50fe3667e5ed957acf0d3bbb9da93/u)
+  assert.ok(prompt.includes("password=$(cat '/root/mattermost_credentials/database_password')"))
+  assert.ok(!prompt.includes('KNOWN_SECRET'))
+  assert.ok(!prompt.includes('a'.repeat(64)))
+})
+
 test('shared planner boundary isolates credentials and embeds references without execution tools', async t => {
   const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-boundary-'))
   t.after(() => rm(serverDirectory, { recursive: true, force: true }))
@@ -195,11 +217,60 @@ test('AI schema preserves reviewed bounded retries and normalizes nullable polic
   }
 })
 
-test('Codex planner rejects unsupported model settings', () => {
-  assert.throws(() => new CodexPlanner({ model: 'gpt-5.5' }), /unsupported Codex model/u)
-  assert.throws(() => new CodexPlanner({ model: 'gpt-6-astra' }), /unsupported Codex model/u)
+test('Codex planner accepts catalog model identifiers and validates setting syntax', () => {
+  assert.equal(new CodexPlanner().model, 'gpt-6.1-sol')
+  assert.equal(new CodexPlanner().reasoningEffort, 'low')
+  assert.throws(() => new CodexPlanner({ model: '--config=malicious' }), /invalid Codex model/u)
+  assert.throws(() => new CodexPlanner({ model: 'model\ncontrol' }), /invalid Codex model/u)
+  assert.doesNotThrow(() => new CodexPlanner({ model: 'gpt-6-astra', reasoningEffort: 'ultra' }))
+  assert.doesNotThrow(() => new CodexPlanner({ model: 'gpt-future', reasoningEffort: 'max' }))
   assert.doesNotThrow(() => new CodexPlanner({ model: 'mimo-v2.6-pro', reasoningEffort: 'high' }))
-  assert.throws(() => new CodexPlanner({ reasoningEffort: 'ultra' }), /unsupported Codex reasoning effort/u)
+  assert.throws(() => new CodexPlanner({ reasoningEffort: 'invalid' }), /unsupported Codex reasoning effort/u)
+})
+
+test('Codex model discovery uses native capabilities, includes hidden models and retains MiMo high', async () => {
+  let call
+  const planner = new CodexPlanner({
+    configurationRunner: async (binary, args, options) => {
+      call = { binary, args, options }
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          models: [
+            { slug: 'gpt-6.1-sol', supported_reasoning_levels: [{ effort: 'low' }, { effort: 'max' }], model_messages: { instructions_template: 'never expose catalog prompts' } },
+            { slug: 'gpt-hidden', visibility: 'hide', supported_reasoning_levels: [{ effort: 'none' }, { effort: 'ultra' }] }
+          ]
+        })
+      }
+    }
+  })
+  assert.deepEqual(await planner.listModels(), [
+    { model: 'gpt-6.1-sol', reasoningEfforts: ['low', 'max'] },
+    { model: 'gpt-hidden', reasoningEfforts: ['none', 'ultra'] },
+    { model: 'mimo-v2.6-pro', reasoningEfforts: ['low', 'medium', 'high'] }
+  ])
+  assert.deepEqual(call.args.slice(-2), ['debug', 'models'])
+  assert.equal(call.options.env.VAULT_TEST, undefined)
+  assert.equal(call.options.timeoutMs, 15000)
+})
+
+test('Codex model discovery rejects failed, truncated and malformed catalogs without using stderr', async () => {
+  const model = { slug: 'gpt-test', supported_reasoning_levels: [{ effort: 'low' }] }
+  for (const result of [
+    { code: 1, stderr: 'private provider detail' },
+    { code: 0, timedOut: true },
+    { code: 0, stdoutTruncated: true },
+    { code: 0, stdout: 'not json' },
+    { code: 0, stdout: JSON.stringify({ models: [] }) },
+    { code: 0, stdout: JSON.stringify({ models: [model, model] }) },
+    { code: 0, stdout: JSON.stringify({ models: [{ supported_reasoning_levels: [{ effort: 'low' }] }] }) },
+    { code: 0, stdout: JSON.stringify({ models: [{ ...model, supported_reasoning_levels: [{}] }] }) },
+    { code: 0, stdout: JSON.stringify({ models: [{ ...model, slug: '--bad' }] }) },
+    { code: 0, stdout: JSON.stringify({ models: [{ ...model, supported_reasoning_levels: [{ effort: 'invalid' }] }] }) }
+  ]) {
+    const planner = new CodexPlanner({ configurationRunner: async () => result })
+    await assert.rejects(planner.listModels(), error => !error.message.includes('private provider detail'))
+  }
 })
 
 test('Codex planner uses the MiMo profile without ignoring user config', async t => {
@@ -391,7 +462,7 @@ test('Codex planner reads bounded verified candidate intelligence for custom tas
   assert.deepEqual(planned.commands[0].source, { type: 'ai-planned' })
 })
 
-test('Codex planner uses luna medium in an isolated sanitized job directory', async t => {
+test('Codex planner uses GPT-6.1 Sol low in an isolated sanitized job directory', async t => {
   const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'webminai-server-test-'))
   t.after(() => rm(serverDirectory, { recursive: true, force: true }))
   await writeFile(path.join(serverDirectory, 'context.md'), 'Role: web server\n')
@@ -444,8 +515,8 @@ test('Codex planner uses luna medium in an isolated sanitized job directory', as
   assert.equal(result.commands[0].command, 'uptime')
   assert.equal(call.binary, 'codex')
   assert.deepEqual(call.args.slice(0, 3), ['--no-daemon', 'exec', '--cd'])
-  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-5.6-luna')
-  assert.equal(call.args[call.args.indexOf('--config') + 1], 'model_reasoning_effort="medium"')
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6.1-sol')
+  assert.equal(call.args[call.args.indexOf('--config') + 1], 'model_reasoning_effort="low"')
   assert.ok(call.args.includes('approval_policy="never"'))
   assert.ok(call.args.includes('--strict-config'))
   assert.ok(call.args.includes('--ignore-user-config'))
@@ -1759,6 +1830,27 @@ test('Codex planner streams JSONL progress while reading the final schema respon
   })
   assert.equal(result.summary, 'Read uptime')
   assert.deepEqual(events.map(event => event.type), ['thread.started', 'reasoning'])
+})
+
+test('Codex JSONL errors explain failed planning without exposing credentials or retrying', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-error-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  for (const message of ['Selected model is at capacity. Please try a different model. token=private-fixture-token', null]) {
+    let calls = 0
+    const planner = new CodexPlanner({
+      runner: async (binary, args, options) => {
+        calls++
+        if (message) options.onStdout(JSON.stringify({ type: 'error', message }) + '\n')
+        return { code: 1, stdout: '', stderr: '' }
+      }
+    })
+    await assert.rejects(planner.plan({ serverDirectory, request: 'Inspect uptime', inventory: {}, taskId: 7, onProgress: () => {} }), error => {
+      assert.match(error.message, message ? /Selected model is at capacity/u : /exit code 1/u)
+      assert.doesNotMatch(error.message, /private-fixture-token/u)
+      return true
+    })
+    assert.equal(calls, 1)
+  }
 })
 
 test('Codex interruptions and missing final responses fail without accepting partial output or retrying', async t => {
