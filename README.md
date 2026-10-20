@@ -265,15 +265,22 @@ See [implementation coverage and limits](docs/remote-common-task-recovery.md).
 ### Open the browser console
 
 ```sh
-intentaiops console                   # view progress and history
-intentaiops console --console-actions # also allow reviewed operator actions
+intentaiops --web                     # read-only workspace
+intentaiops --web --console-actions   # reviewed task and host controls
+intentaiops --web --console-actions --web-port 4317
+# intentaiops console [--console-actions] remains compatible
 ```
 
 1. Run either command and unlock your vault in the terminal.
-2. Open the printed URL to see hosts, runs, command progress, failures, and plan revisions.
-3. With actions enabled, select a task to pause, revise, resume, or review rollback. Changed plans require fresh approval. SSH login prompts still appear in the terminal.
+2. Open the printed URL for host navigation, task panes, monitoring, activity and 27 themes. Appearance persists in the local profile, including read-only mode.
+3. With actions enabled, explicitly select targets and prepare a task. Review its saved plan before execution. Pause, revise, resume and rollback remain separately reviewed; SSH and elevation prompts stay in the launch terminal.
+4. For a direct interactive shell, open a host's **terminal** tab and approve **Open SSH shell**. This is operator-controlled SSH outside managed plan validation and rollback; terminal traffic is not saved or sent to AI. End the session explicitly before starting other changes on that host.
 
 The console is local-only (`127.0.0.1`). Keep its launch URL private. Replay and diagnostic exports only read history, never run commands. Raw command output is withheld from browser views and exports; inspect it in local task history.
+
+Keep the foreground process open. Closing a pane or refreshing the page never
+cancels or restarts work. Read [workspace instructions](docs/web-workspace.md)
+for launch ports, host identity, staged runs, themes, shutdown and build details.
 
 For several hosts, choose a **staged canary rollout** to try one host first, then continue in batches of two. Verify health after each stage. Failures or missing verification stop further stages; you can inspect and safely resume selected hosts without repeating successful ones.
 

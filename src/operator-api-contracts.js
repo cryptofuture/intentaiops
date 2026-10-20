@@ -30,4 +30,20 @@
  * @property {string | null} jobId
  */
 
+/**
+ * @typedef {object} WorkspaceOperation
+ * @property {string} id
+ * @property {'running' | 'completed' | 'failed' | 'interrupted'} status
+ * @property {unknown} result
+ * @property {string | null} error
+ * @property {string} created
+ */
+
+/**
+ * @typedef {object} AppearancePreference
+ * @property {'system' | 'light' | 'dark'} mode
+ * @property {string} light
+ * @property {string} dark
+ */
+
 export {}

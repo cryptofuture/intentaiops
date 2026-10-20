@@ -6,13 +6,25 @@ import { detectOperationLoop } from './operation-loop-detector.js'
 import { OperatorController } from './operator-controller.js'
 import { isHostHealthTask, sanitizeHealthResult } from './host-health-task.js'
 import { isSystemUpdateTask } from './system-update-task.js'
+import { AsyncLocalStorage } from 'node:async_hooks'
 
 export class MultiHostService {
   /** @param {import('./public-api-contracts.js').MultiHostServiceOptions} options */
   constructor ({ dataRoot, adminFor, runs = new MultiHostRunStore(dataRoot), scorecard = new DeploymentScorecard(dataRoot), concurrency = 4 }) {
     if (typeof adminFor !== 'function') throw new TypeError('adminFor must be a function')
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new TypeError('concurrency must be between 1 and 32')
-    this.adminFor = adminFor
+    const ownership = new AsyncLocalStorage()
+    this.adminFor = async serverId => {
+      const opened = await adminFor(serverId)
+      if (opened.admin) ownership.getStore().push(() => opened.close?.())
+      return opened.admin ?? opened
+    }
+    for (const name of ['run', 'revert']) {
+      const method = this[name].bind(this)
+      this[name] = options => ownership.run([], async () => {
+        try { return await method(options) } finally { await Promise.allSettled(ownership.getStore().map(close => close())) }
+      })
+    }
     this.runs = runs
     this.scorecard = scorecard
     this.concurrency = concurrency

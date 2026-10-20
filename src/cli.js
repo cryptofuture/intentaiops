@@ -1,8 +1,11 @@
 import { access, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { buildCandidatePlanningContext, buildCommonTask, listCommonTasks, listEligibleCommonTasks } from './common-tasks.js'
-import { isSystemUpdateTask, systemUpdateProfile } from './system-update-task.js'
+import { listCommonTasks, listEligibleCommonTasks } from './common-tasks.js'
+import { prepareTask } from './task-preparation.js'
+import { completeTaskReport } from './task-completion-report.js'
+import { withHostMutation, assertHostMutationReady } from './host-mutation-ownership.js'
+import { isSystemUpdateTask } from './system-update-task.js'
 import { parseSshConnection } from './connection.js'
 import { VaultAuthenticationError } from './crypto-vault.js'
 import { resolveDockerPolicy } from './docker-policy.js'
@@ -25,13 +28,16 @@ import { SettingsStore } from './settings-store.js'
 import { TaskStore } from './task-store.js'
 import { OperatorController } from './operator-controller.js'
 import { startOperatorConsole } from './operator-console.js'
+import { OperatorWorkspace } from './operator-workspace.js'
+import { OperatorHosts } from './operator-hosts.js'
+import { OperatorMetrics } from './operator-metrics.js'
 import { Stage2Service } from './stage2-service.js'
 import { SystemSsh } from './system-ssh.js'
 import { updateIntentAiOps } from './self-update.js'
 import { TerminalUi } from './terminal-ui.js'
 import { FALLBACK_ADMIN_EMAIL, normalizeAdminEmailPreset } from './application-defaults.js'
 import { CLI_NAME, DATA_DIRECTORY_NAME, LEGACY_DATA_DIRECTORY_NAME, PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_URL } from './product.js'
-import { hostHealthProfile, isHostHealthTask, redactHealthText, sanitizeHealthResult } from './host-health-task.js'
+import { isHostHealthTask, redactHealthText, sanitizeHealthResult } from './host-health-task.js'
 import { detectOperationLoop } from './operation-loop-detector.js'
 import { normalizeTerminalControls } from './terminal-controls.js'
 import {
@@ -120,6 +126,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
     ui,
     settingsStore,
     workspace,
+    taskStore,
     baseSsh,
     settings,
     hostRuntime,
@@ -134,20 +141,19 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
   let selectedHostId = null
 
   if (cliOptions.console) {
+    const hosts = new OperatorHosts({ factory: hostSessions, settingsStore, workspace, settings, tasks: taskStore, passphrase, credential: capabilities => chooseElevation(ui, capabilities), notify: event => controller?.record(event) })
     const controller = new OperatorController({
       dataRoot,
       settings,
       passphrase,
       tasks: taskStore,
-      adminFor: async serverId => {
-        const opened = await hostSessions.open({ settings, passphrase, serverId, requireActive: true })
-        return { admin: opened.admin, close: () => opened.session.close() }
-      }
+      adminFor: serverId => hosts.lease(serverId)
     })
-    const consoleServer = await startOperatorConsole({ controller, actions: cliOptions.consoleActions })
+    const runtime = new OperatorWorkspace({ controller, hosts, metrics: new OperatorMetrics(controller) })
+    const consoleServer = await startOperatorConsole({ controller, workspace: runtime, actions: cliOptions.consoleActions, port: cliOptions.webPort ?? 0 })
     ui.info(`Open ${consoleServer.url}`)
     ui.info('Press Ctrl+C in this terminal to stop the local console. SSH authentication prompts appear here when needed.')
-    try { await new Promise(resolve => process.once('SIGINT', resolve)) } finally { await consoleServer.close() }
+    try { await new Promise(resolve => { process.once('SIGINT', resolve); process.once('SIGTERM', resolve) }) } finally { await consoleServer.close() }
     return
   }
 
@@ -934,7 +940,7 @@ async function executeMultiHostConsultation ({
 }
 
 async function updatePluginFleet ({ context, serverIds, debug }) {
-  const { ui, settingsStore, workspace, baseSsh, settings, passphrase } = context
+  const { ui, settingsStore, workspace, taskStore, baseSsh, settings, passphrase } = context
   ui.clear()
   ui.banner(`Plugin v${PLUGIN_VERSION} fleet update`)
   const selectedHosts = await selectConfiguredHosts({ context, serverIds, title: `Plugin v${PLUGIN_VERSION} fleet targets` })
@@ -997,11 +1003,11 @@ async function updatePluginFleet ({ context, serverIds, debug }) {
     const results = await parallelMap(ready, 4, async entry => {
       try {
         ui.info(`[${entry.serverId}] Installing plugin v${PLUGIN_VERSION}...`)
-        const result = await entry.stage2.activate({
+        const result = await withHostMutation({ dataRoot: settingsStore.dataRoot, identity: settings.servers[entry.serverId].historyId ?? entry.serverId, before: () => assertHostMutationReady({ settingsStore, tasks: taskStore, settings, serverId: entry.serverId }) }, () => entry.stage2.activate({
           ...entry.server,
           ...entry.elevation,
           installNetdata: false
-        })
+        }))
         ui.success(`[${entry.serverId}] ${pluginActionLabel(result)}; Netdata preserved.`)
         return { ...entry, result }
       } catch (error) {
@@ -1151,7 +1157,7 @@ export async function renderMultiHostReports ({ ui, run, adminFor, settings, pas
       if (!results) continue
       const inventory = await admin.refreshInventory({ settings, passphrase, serverId: host.serverId })
       ui.heading(`${host.serverId} / task #${host.taskId}`)
-      await render({ ui, admin, settings, passphrase, serverId: host.serverId, task, platform, inventory, results })
+      await render({ ui, admin, settings, passphrase, serverId: host.serverId, task: { ...task, catalogId: run.catalogId }, platform, inventory, results })
     } catch (error) {
       ui.warn(`[${host.serverId}] Report unavailable; command outcomes remain recorded: ${redactHealthText(error.message)}`)
     }
@@ -1507,7 +1513,7 @@ async function runConnectedHostSession ({
       }
       if (selected === 'shell') {
         ui.info(`Entering the remote shell. Exit it to return to ${PRODUCT_NAME}.`)
-        await ui.withTerminalSuspended(() => ssh.interactiveShell(server.connectionUrl))
+        await withHostMutation({ dataRoot: settingsStore.dataRoot, identity: settings.servers[serverId].historyId ?? serverId }, () => ui.withTerminalSuspended(() => ssh.interactiveShell(server.connectionUrl)))
       }
       if (selected === 'activate' || selected === 'activate-plugin') {
         await activate({
@@ -1932,110 +1938,17 @@ async function runTask ({
     }
     request = parsed.request
   }
-  let inventory = null
-  let routing = catalogId
-    ? { decision: 'verified_task', catalogId, relevantCatalogIds: [catalogId], foundationIds: [], foundationMode: 'executable', confidence: 'high', rationale: 'Selected explicitly from the verified common-task catalog.' }
-    : ordinaryTaskRouting('Candidate routing was not run.')
-  if (!catalogId && previousAttempts.length === 0 && ['freebsd', 'linux', 'macos', 'windows'].includes(status.capabilities.platform?.os)) {
-    const taskPlatform = status.capabilities.platform.os
-    ui.info(`Asking Codex whether this request matches or can reuse a verified ${taskPlatform} common task...`)
-    inventory = await admin.refreshInventory({ settings, passphrase, serverId })
-    try {
-      routing = await admin.routeTask({
-        settings,
-        passphrase,
-        serverId,
-        request,
-        inventory,
-        candidates: eligibleInteractiveCommonTasks({ platform: taskPlatform, inventory, status }),
-        onProgress: event => renderTaskProgress(ui, event)
-      })
-    } catch (error) {
-      ui.warn(`Candidate routing failed; ordinary AI planning will continue: ${error.message}`)
-    }
-  }
-  renderTaskRouting(ui, routing)
-  const effectiveCatalogId = routing.decision === 'verified_task' ? routing.catalogId : null
-  const kind = effectiveCatalogId ? 'catalog' : 'ai'
-  if (routing.decision === 'verified_task' && !catalogId) ui.info(`Codex selected the unchanged verified task ${effectiveCatalogId}; command-plan generation will be skipped.`)
-  if (routing.decision === 'informed_planning') ui.info(`Custom planning will reuse verified knowledge from ${routing.relevantCatalogIds.join(', ')}.`)
-  const retryOfTaskId = previousAttempts.at(-1)?.id ?? null
-  const consultationContext = kind === 'catalog'
-    ? []
-    : retryOfTaskId
-      ? admin.getTaskConsultations(serverId, retryOfTaskId)
-      : admin.listPendingConsultations(serverId)
-  const task = admin.createTask(serverId, request, {
-    kind,
-    catalogId: effectiveCatalogId,
-    retryOfTaskId,
-    retryInstructions,
-    consultationIds: consultationContext.map(item => item.id),
-    consumeConsultations: retryOfTaskId === null
-  })
-  admin.appendTaskProgress(serverId, task.id, {
-    at: new Date().toISOString(),
-    type: 'task_routing',
-    message: `${routing.decision}: ${routing.rationale}`
-  })
-  if (retryOfTaskId) ui.info(`Created retry task #${task.id} from task #${retryOfTaskId}.`)
-  if (consultationContext.length > 0) {
-    ui.info(`Using ${consultationContext.length} compact consultation ${consultationContext.length === 1 ? 'summary' : 'summaries'}; this task request takes precedence.`)
-  }
-  ui.info(kind === 'catalog'
-    ? 'Preparing the verified common task from the current Netdata inventory...'
-    : 'Collecting Netdata inventory and asking Codex for a command plan...')
+  let task
+  let inventory
+  let effectiveCatalogId
   try {
-    let plan
-    let recoveryOptions
-    if (kind === 'catalog') {
-      const refreshed = inventory ?? ((isHostHealthTask(effectiveCatalogId) || isSystemUpdateTask(effectiveCatalogId))
-        ? await admin.refreshInventory({ settings, passphrase, serverId })
-        : status.linuxContext
-          ? null
-          : await admin.refreshInventory({ settings, passphrase, serverId }))
-      if (isHostHealthTask(effectiveCatalogId) || isSystemUpdateTask(effectiveCatalogId)) inventory = refreshed
-      recoveryOptions = {
-        platform: status.capabilities.platform?.os,
-        linuxContext: refreshed?.webminaiLinuxContext ?? status.linuxContext,
-        windowsExecution: refreshed?.webminaiExecution ?? status.windowsExecution,
-        freebsdExecution: refreshed?.webminaiExecution ?? status.freebsdExecution,
-        macosExecution: refreshed?.webminaiExecution ?? status.macosExecution,
-        docker: refreshed?.webminaiDocker ?? status.docker,
-        applicationDefaults
-      }
-      plan = buildCommonTask(effectiveCatalogId, task.id, recoveryOptions).plan
-    } else {
-      const candidateContext = buildCandidatePlanningContext(routing.relevantCatalogIds, task.id, {
-        platform: status.capabilities.platform?.os,
-        linuxContext: inventory?.webminaiLinuxContext ?? status.linuxContext,
-        windowsExecution: inventory?.webminaiExecution ?? status.windowsExecution,
-        freebsdExecution: inventory?.webminaiExecution ?? status.freebsdExecution,
-        macosExecution: inventory?.webminaiExecution ?? status.macosExecution,
-        docker: inventory?.webminaiDocker ?? status.docker,
-        foundationIds: routing.foundationIds,
-        foundationMode: routing.foundationMode ?? 'context-only',
-        applicationDefaults
-      })
-      plan = await admin.plan({
-        settings,
-        passphrase,
-        serverId,
-        request,
-        inventory,
-        taskId: task.id,
-        previousAttempts,
-        retryInstructions,
-        consultationContext,
-        candidateContext,
-        applicationDefaults,
-        onProgress: event => {
-          admin.appendTaskProgress(serverId, task.id, event)
-          renderTaskProgress(ui, event)
-        }
-      })
-    }
-    admin.saveTaskPlan(serverId, task.id, plan, recoveryOptions && settings.servers?.[serverId]?.hostFingerprint && ['linux', 'freebsd', 'macos', 'windows'].includes(recoveryOptions.platform) ? { catalogId: effectiveCatalogId, options: recoveryOptions, target: settings.servers[serverId].hostFingerprint } : undefined)
+    ui.info('Preparing a persisted plan for review; no commands will execute yet...')
+    const prepared = await prepareTask({ admin, settings, passphrase, serverId, request, catalogId, retryOfTaskId: previousAttempts.at(-1)?.id ?? null, retryInstructions, onProgress: event => renderTaskProgress(ui, event) })
+    task = admin.getTask(serverId, prepared.taskId)
+    inventory = prepared.inventory
+    effectiveCatalogId = task.catalogId
+    renderTaskRouting(ui, prepared.routing)
+    const plan = task.plan
     renderPlan(ui, plan)
     const approvalMode = await chooseApprovalMode(ui, plan.commands)
     if (!approvalMode) {
@@ -2105,7 +2018,7 @@ async function runTask ({
       })
     }
   } catch (error) {
-    admin.saveTaskError(serverId, task.id, error)
+    if (task) admin.saveTaskError(serverId, task.id, error)
     ui.error(`Task failed: ${error.message}`)
   }
   await ui.pause()
@@ -2492,115 +2405,15 @@ export function eligibleInteractiveCommonTasks (options) {
 }
 
 async function renderAndSaveSystemUpdateReport ({ ui, admin, settings, passphrase, serverId, task, platform, inventory, results }) {
-  ui.info('Asking Codex to summarize the exact update delta, reboot requirement, and newer-release availability...')
-  const reportInventory = {
-    ...inventory,
-    webminaiSystemUpdateEvidence: {
-      format: 'webminai-system-update-evidence',
-      version: 1,
-      platform,
-      collectedAt: new Date().toISOString(),
-      source: 'approved verified common task',
-      profile: systemUpdateProfile(platform),
-      results: results.map(result => ({
-        id: result.id,
-        status: result.status,
-        stdout: redactHealthText(result.result?.stdout).slice(0, 64 * 1024),
-        stderr: redactHealthText(result.result?.stderr).slice(0, 16 * 1024)
-      }))
-    }
-  }
-  const report = await admin.consult({
-    settings,
-    passphrase,
-    serverId,
-    inventory: reportInventory,
-    consultationContext: [],
-    question: systemUpdateQuestion(),
-    onProgress: event => {
-      const safeEvent = { ...event, message: redactHealthText(event.message) }
-      admin.appendTaskProgress(serverId, task.id, safeEvent)
-      renderTaskProgress(ui, safeEvent)
-    }
-  })
-  const safeReport = {
-    answer: redactHealthText(report.answer),
-    contextSummary: redactHealthText(report.contextSummary)
-  }
-  admin.appendTaskProgress(serverId, task.id, {
-    at: new Date().toISOString(),
-    type: 'system_update_report',
-    message: safeReport.answer,
-    contextSummary: safeReport.contextSummary
-  })
-  await admin.saveUpdateContext(serverId, {
-    ...systemUpdateProfile(platform),
-    observedAt: new Date().toISOString(),
-    taskId: task.id,
-    reportSummary: safeReport.contextSummary
-  })
+  const safeReport = await completeTaskReport({ admin, settings, passphrase, serverId, task: { ...task, status: 'completed' }, platform, inventory, results, onProgress: event => renderTaskProgress(ui, event) })
   ui.heading('System update report')
   writeWrapped(ui, safeReport.answer)
   ui.separator()
   renderWrappedField(ui, 'Reusable update context', safeReport.contextSummary)
 }
 
-function systemUpdateQuestion () {
-  return [
-    'Prepare a concise system-update completion report from webminaiSystemUpdateEvidence.',
-    'State whether the update succeeded, then enumerate the software or packages installed, updated, removed, skipped, or failed with before and after versions when present.',
-    'State explicitly that no reboot was performed and whether a reboot is now required.',
-    'State whether a newer operating-system release or Windows feature upgrade is available, naming it when evidence does so; use unknown when the native check could not determine this.',
-    'Do not confuse a package-manager full or dist upgrade inside configured repositories with an operating-system release upgrade.',
-    'Mention the retained full audit path if terminal evidence is bounded. Do not propose or execute commands and do not reproduce credentials or secrets.'
-  ].join(' ')
-}
-
 async function renderAndSaveHostHealthReport ({ ui, admin, settings, passphrase, serverId, task, platform, inventory, results }) {
-  ui.info('Asking Codex to turn the Netdata inventory and bounded platform evidence into a concise health report...')
-  const evidence = healthEvidence(results)
-  const reportInventory = {
-    ...inventory,
-    webminaiHealthEvidence: {
-      format: 'webminai-host-health-evidence',
-      version: 1,
-      platform,
-      collectedAt: new Date().toISOString(),
-      source: 'approved read-only common task',
-      profile: hostHealthProfile(platform, inventory),
-      stdout: evidence.stdout,
-      stderr: evidence.stderr
-    }
-  }
-  const report = await admin.consult({
-    settings,
-    passphrase,
-    serverId,
-    inventory: reportInventory,
-    consultationContext: [],
-    question: hostHealthQuestion(),
-    onProgress: event => {
-      const safeEvent = { ...event, message: redactHealthText(event.message) }
-      admin.appendTaskProgress(serverId, task.id, safeEvent)
-      renderTaskProgress(ui, safeEvent)
-    }
-  })
-  const safeReport = {
-    answer: redactHealthText(report.answer),
-    contextSummary: redactHealthText(report.contextSummary)
-  }
-  admin.appendTaskProgress(serverId, task.id, {
-    at: new Date().toISOString(),
-    type: 'health_report',
-    message: safeReport.answer,
-    contextSummary: safeReport.contextSummary
-  })
-  await admin.saveHealthContext(serverId, {
-    ...hostHealthProfile(platform, inventory),
-    observedAt: new Date().toISOString(),
-    taskId: task.id,
-    reportSummary: safeReport.contextSummary
-  })
+  const safeReport = await completeTaskReport({ admin, settings, passphrase, serverId, task: { ...task, status: 'completed' }, platform, inventory, results, onProgress: event => renderTaskProgress(ui, event) })
   ui.heading('Host health report')
   writeWrapped(ui, safeReport.answer)
   ui.separator()
@@ -2612,23 +2425,6 @@ export function completedReportResults (task) {
   const byId = new Map((task.results ?? []).map(result => [result.id, result]))
   const results = task.plan.commands.map(command => byId.get(command.id))
   return results.every(result => result?.status === 'completed') ? results : null
-}
-
-function healthEvidence (results) {
-  const sections = results.filter(item => item.id.startsWith('collect-health-'))
-  return {
-    stdout: sections.map(item => `=== ${item.id} ===\n${redactHealthText(item.result?.stdout).slice(0, 48 * 1024)}`).join('\n').slice(0, 128 * 1024),
-    stderr: sections.map(item => item.result?.stderr ? `=== ${item.id} ===\n${redactHealthText(item.result.stderr).slice(0, 16 * 1024)}` : '').filter(Boolean).join('\n').slice(0, 32 * 1024)
-  }
-}
-
-function hostHealthQuestion () {
-  return [
-    'Prepare a concise, decision-useful health report for this host.',
-    'Netdata inventory is the primary source for metrics, load, storage, containers, contexts, and alerts. webminaiHealthEvidence is a bounded read-only supplement for recent errors, failed services, updates, reboot state, and platform-specific details.',
-    'Report: overall health; immediate issues; load, CPU, memory, storage and swap; service/container reliability; recent errors; pending updates and reboot needs; monitoring gaps; and prioritized next actions.',
-    'Distinguish confirmed observations from unavailable or stale checks. Mention evidence timestamps where useful. Do not propose or execute commands. Do not reproduce secrets, tokens, credentials, raw log dumps, or unnecessary personal data.'
-  ].join(' ')
 }
 
 function renderTaskRouting (ui, routing) {
@@ -2819,8 +2615,12 @@ function parseArguments (argv) {
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]
     if (argument === '--help' || argument === '-h') options.help = true
-    else if (argument === 'console') options.console = true
-    else if (argument === '--console-actions') options.consoleActions = true
+    else if (argument === 'console' || argument === '--web') options.console = true
+    else if (argument === '--web-port') {
+      const value = argv[++index]
+      if (!value || !/^\d{1,5}$/u.test(value) || Number(value) > 65535) throw new TypeError('--web-port requires a port between 0 and 65535')
+      options.webPort = Number(value)
+    } else if (argument === '--console-actions') options.consoleActions = true
     else if (argument === '--update') options.update = true
     else if (argument === '--debug') options.debug = true
     else if (argument === '--no-debug') options.debug = false
@@ -2830,12 +2630,15 @@ function parseArguments (argv) {
       if (!options.dataRoot) throw new TypeError('--data-root requires a directory')
     } else throw new TypeError(`unknown argument: ${argument}`)
   }
+  if (!options.console && (options.consoleActions || options.webPort !== undefined)) throw new TypeError('--console-actions and --web-port require --web or console')
+  if (options.console && (options.update || options.labTasks)) throw new TypeError('--web/console cannot be combined with --update or --lab-tasks')
   return options
 }
 
 function printHelp (ui) {
   ui.output.write(`Usage: ${CLI_NAME} --update\n`)
   ui.output.write(`       ${CLI_NAME} console [--console-actions] [--data-root DIRECTORY]\n`)
+  ui.output.write(`       ${CLI_NAME} --web [--console-actions] [--web-port PORT] [--data-root DIRECTORY]\n`)
   ui.output.write(`       ${CLI_NAME} [--debug|--no-debug] [--lab-tasks] [--data-root DIRECTORY]\n\n`)
   ui.output.write('Interactive AI-assisted administration over system OpenSSH and Netdata.\n')
   ui.output.write(`${PRODUCT_URL}\n`)

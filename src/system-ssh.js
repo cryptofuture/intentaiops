@@ -284,16 +284,17 @@ export class SystemSsh {
     }
   }
 
-  async interactiveShell (connectionUrl) {
-    if (!this.terminalCheck()) {
+  async interactiveShell (connectionUrl, { runner = this.interactiveRunner, browser = false } = {}) {
+    if (!browser && !this.terminalCheck()) {
       throw new Error('interactive SSH shell requires a terminal')
     }
     const connection = parseSshConnection(connectionUrl)
     await this.beforeChannel(undefined, connectionUrl)
     const args = interactiveArguments(connection, this.controlPath, this.transport)
+    if (browser) args.push('-o', 'BatchMode=yes', '-o', 'ControlMaster=no', '-o', 'EscapeChar=none', '-o', 'PermitLocalCommand=no', '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'ClearAllForwardings=yes')
     args.push(sshTarget(connection))
     this.onDiagnostic({ type: 'channel', kind: 'shell' })
-    const result = await this.interactiveRunner(this.sshBinary, args)
+    const result = await runner(this.sshBinary, args)
     if (result.code !== 0) {
       throw new SshCommandError(`interactive SSH exited with code ${result.code}`, result)
     }

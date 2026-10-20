@@ -87,6 +87,13 @@ test('host session factory closes the sole SSH session when fingerprint setup fa
   assert.equal(setup.calls.filter(call => call === 'close').length, 1)
 })
 
+test('a changed machine cannot inherit configured history or Stage 2 authorization', async () => {
+  const setup = dependencies()
+  const factory = new HostSessionFactory({ dataRoot: '/tmp/webminai-test', settingsStore: setup.settingsStore, workspace: setup.workspace, baseSsh: { openInteractiveSession: async () => setup.session } })
+  await assert.rejects(factory.open({ settings: { servers: { prod: { hostFingerprint: 'SHA256:different-machine', historyId: 'original-history' } } }, passphrase: 'fixture', serverId: 'prod' }), /identity changed/u)
+  assert.deepEqual(setup.calls, ['close'])
+})
+
 test('host session factory reports SSH success before host identity probing finishes', async () => {
   const setup = dependencies()
   const progress = []

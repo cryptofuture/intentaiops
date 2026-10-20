@@ -22,6 +22,7 @@ export class HostSessionFactory {
       onProgress({ phase: 'identity', state: 'started', message: 'Verifying the remote host identity...' })
       const fingerprint = await session.ssh.hostFingerprint(server.connectionUrl)
       const configured = settings.servers[serverId]
+      if (configured.hostFingerprint && configured.hostFingerprint !== fingerprint) throw new Error('Remote machine identity changed; review and replace this connection before establishing new Stage 2 authorization')
       const historyId = await this.settingsStore.registerHostFingerprint({
         settings,
         serverId,

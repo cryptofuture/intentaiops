@@ -14,6 +14,8 @@ const temporary = mkdtempSync(path.join(os.tmpdir(), 'intentaiops-build-package-
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 
 try {
+  const web = spawnSync(npm, ['run', 'build:web'], { cwd: projectRoot, encoding: 'utf8', timeout: 180000 })
+  if (web.status !== 0) throw new Error(`web build failed\n${web.stdout}\n${web.stderr}`)
   const result = spawnSync(npm, ['pack', '--ignore-scripts', '--json', '--pack-destination', temporary], {
     cwd: projectRoot,
     encoding: 'utf8',
@@ -23,16 +25,28 @@ try {
   if (result.status !== 0) throw new Error(`npm pack failed (${result.status})\n${result.stdout}\n${result.stderr}`)
   const [manifest] = JSON.parse(result.stdout)
   const paths = manifest.files.map(file => file.path)
+  if (!paths.some(file => /^src\/operator-web\/assets\/ghostty-vt-[\w-]+\.wasm$/u.test(file))) throw new Error('package is missing the bundled terminal engine')
+  if (!paths.some(file => /^src\/operator-web\/assets\/logo-[\w-]+\.png$/u.test(file))) throw new Error('package is missing the bundled Intent AI Ops logo')
   for (const forbidden of ['dist/intent-ai-ops.tgz', 'dist/intent-ai-ops.tgz.sha256']) {
     if (paths.includes(forbidden)) throw new Error(`package recursively contains ${forbidden}`)
   }
   for (const required of [
     'LICENSE',
-    'NOTICE',
+    'docs/muxin-provenance.md',
     'bin/intentaiops.js',
     'src/operator-console.html',
     'src/operator-console-browser.js',
     'src/operator-controller.js',
+    'src/operator-web/index.html',
+    'src/operator-web/fonts/geist-400.ttf',
+    'src/operator-web/fonts/geist-mono-400.ttf',
+    'src/operator-web/licenses/OFL.txt',
+    'src/operator-web/licenses/Muxin-LICENSE.txt',
+    'src/operator-web/licenses/Preact-LICENSE.txt',
+    'src/operator-web/licenses/Ghostty-web-LICENSE.txt',
+    'src/operator-web/licenses/Lucide-LICENSE.txt',
+    'web/themes/index.js',
+    'web/themes/palettes.js',
     'src/catalog-plan-revision.js',
     'src/remote-common-task-recovery.js',
     'src/remote-recovery-record.js',

@@ -20,6 +20,7 @@ import { RemoteRecoveryTransport } from './remote-recovery-transport.js'
 import { commonTaskRecoveryManifest, commonTaskRecoverySupported, RemoteCommonTaskJournal, retrieveRecoveryExecution, regenerateCommonTaskRecovery } from './remote-common-task-recovery.js'
 import { inspectRecoveryBaseline } from './remote-recovery-baseline.js'
 import { startExecutionHeartbeat } from './execution-heartbeat.js'
+import { guardAdminMutations } from './host-mutation-ownership.js'
 
 const REMOTE_RECOVERY_EXECUTION = Symbol('reviewed remote common-task recovery')
 
@@ -43,6 +44,7 @@ export class AdminService {
     this.planner = planner
     this.linuxContext = linuxContext
     this.remoteRecovery = new RemoteRecoveryState(this.dataRoot)
+    guardAdminMutations(this)
   }
 
   async addServer ({

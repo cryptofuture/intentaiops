@@ -17,6 +17,8 @@ test('single and multi-host routing share verified health and update candidates'
 test('interactive task menus expose verified platform applications and AI-assisted tasks', async () => {
   const source = [
     await readFile(new URL('../src/cli.js', import.meta.url), 'utf8'),
+    await readFile(new URL('../src/task-preparation.js', import.meta.url), 'utf8'),
+    await readFile(new URL('../src/task-completion-report.js', import.meta.url), 'utf8'),
     await readFile(new URL('../src/cli-display.js', import.meta.url), 'utf8')
   ].join('\n')
 
@@ -35,11 +37,11 @@ test('interactive task menus expose verified platform applications and AI-assist
   assert.match(source, /await session\?\.close\(\)/)
   assert.match(source, /ui\.withTerminalSuspended\(\(\) => ssh\.interactiveShell\(server\.connectionUrl\)\)/)
   assert.match(source, /buildCommonTask\([\s\S]*applicationDefaults/)
-  assert.match(source, /buildCandidatePlanningContext\([\s\S]*applicationDefaults/)
-  assert.match(source, /plan = await admin\.plan\([\s\S]*applicationDefaults/)
+  assert.match(source, /buildCandidatePlanningContext\([\s\S]*\.\.\.options/)
+  assert.match(source, /await admin\.plan\([\s\S]*applicationDefaults/)
   assert.match(source, /controller\.run\([\s\S]*applicationDefaults/)
   assert.match(source, /renderAndSaveSystemUpdateReport/)
-  assert.match(source, /admin\.saveUpdateContext/)
+  assert.match(source, /'saveHealthContext' : 'saveUpdateContext'/)
   assert.match(source, /parallelMap\(serverIds, 4/)
   assert.match(source, /parallelMap\(ready, 4/)
   assert.match(source, /installNetdata: false/)

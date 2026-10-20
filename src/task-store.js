@@ -150,7 +150,7 @@ export class TaskStore {
       const task = this.getFromDatabase(database, taskId)
       const event = database.prepare('SELECT max(id) AS id FROM execution_events WHERE task_id = ?').get(taskId).id ?? 0
       const control = database.prepare('SELECT version FROM task_controls WHERE task_id = ?').get(taskId)?.version ?? 0
-      return `${planFingerprint(task.plan)}:${event}:${control}`
+      return `${planFingerprint({ hostId: serverId, taskId, plan: task.plan })}:${event}:${control}`
     })
   }
 

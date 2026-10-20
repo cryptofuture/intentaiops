@@ -9,6 +9,8 @@ import { validateCommandPlan } from './plan-validator.js'
 import { detectOperationLoop } from './operation-loop-detector.js'
 import { buildCommonTask, commonTaskEligibility, listCommonTasks } from './common-tasks.js'
 import { regenerateCatalogRevision } from './catalog-plan-revision.js'
+import { completeTaskReport } from './task-completion-report.js'
+import { withHostMutation } from './host-mutation-ownership.js'
 
 export class OperatorController {
   constructor ({ dataRoot, settings, passphrase, adminFor, tasks, runs }) {
@@ -21,6 +23,7 @@ export class OperatorController {
     this.database(database => database.exec(`
       CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT UNIQUE, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cursors (host_id TEXT PRIMARY KEY, event_id INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS run_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, host_id TEXT NOT NULL, task_id INTEGER NOT NULL, state_version TEXT NOT NULL, fingerprint TEXT NOT NULL, reviewed_at TEXT NOT NULL);
     `))
   }
 
@@ -38,9 +41,12 @@ export class OperatorController {
   snapshot () {
     const runs = this.runs.list({ limit: 100 }).map(run => {
       const stage = this.database(database => database.prepare("SELECT payload FROM events WHERE json_extract(payload, '$.runId') = ? AND json_extract(payload, '$.type') IN ('rollout-stage', 'rollout-halted') ORDER BY id DESC LIMIT 1").get(run.id))
-      return { ...run, rollout: stage ? JSON.parse(stage.payload) : null, pendingHosts: run.hosts.filter(host => !['completed', 'reverted'].includes(host.status)).length }
+      const reviews = this.database(db => db.prepare('SELECT host_id AS hostId, task_id AS taskId, reviewed_at AS reviewedAt FROM run_reviews WHERE run_id=? ORDER BY id DESC LIMIT 128').all(run.id).map(review => ({ ...review, decision: 'explicitly approved selected continuation; not reusable authorization' })))
+      return { ...run, reviews, rollout: stage ? JSON.parse(stage.payload) : null, pendingHosts: run.hosts.filter(host => !['completed', 'reverted'].includes(host.status)).length }
     })
-    return this.sanitize({ version: 1, hosts: Object.keys(this.settings.servers ?? {}).map(id => ({ id, tasks: this.tasks.list(id, { limit: 100 }) })), clusters: Object.keys(this.settings.clusters ?? {}).map(id => ({ id, desiredStage2: this.settings.clusters[id].desiredStage2 })), runs })
+    const snapshot = this.sanitize({ version: 1, hosts: Object.keys(this.settings.servers ?? {}).map(id => ({ id, tasks: this.tasks.list(id, { limit: 100 }) })), clusters: Object.keys(this.settings.clusters ?? {}).map(id => ({ id, desiredStage2: this.settings.clusters[id].desiredStage2 })), runs })
+    for (const host of snapshot.hosts) host.hostVersion = planFingerprint(this.settings.servers[host.id])
+    return snapshot
   }
 
   sanitize (value) {
@@ -97,6 +103,10 @@ export class OperatorController {
     try { return await operation(opened.admin ?? opened) } finally { await opened.close?.() }
   }
 
+  async withMutationAdmin (hostId, taskId, operation) {
+    return this.withAdmin(hostId, admin => withHostMutation({ dataRoot: this.runs.dataRoot, identity: this.settings.servers[hostId].historyId ?? hostId }, () => operation(admin)))
+  }
+
   async analyze (hostId, taskId, question) {
     if (typeof question !== 'string' || !question.trim() || question.length > 8192) throw new TypeError('question must contain 1-8192 characters')
     const evidence = this.inspect(hostId, taskId)
@@ -131,7 +141,7 @@ export class OperatorController {
     this.checkVersion(hostId, taskId, expectedVersion)
     const task = this.tasks.get(hostId, taskId)
     if (planFingerprint(task.plan) !== fingerprint) throw new Error('Recovery approval fingerprint does not match the reviewed plan')
-    return this.withAdmin(hostId, async admin => {
+    return this.withMutationAdmin(hostId, taskId, async admin => {
       const options = await this.remoteRecoveryOptions(admin, hostId)
       this.checkVersion(hostId, taskId, expectedVersion)
       const results = await admin.executeRemoteCommonTaskRecovery({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, options, approve: async () => true, takeoverApproved, takeoverFingerprint, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
@@ -200,13 +210,15 @@ export class OperatorController {
     return this.sanitize(result)
   }
 
-  async resume (hostId, taskId, expectedVersion, fingerprint, onProgress) {
+  async resume (hostId, taskId, expectedVersion, fingerprint, onProgress, commandIds) {
     this.checkVersion(hostId, taskId, expectedVersion)
     const task = this.tasks.get(hostId, taskId)
+    if (task.status === 'completed') throw new Error('This plan already completed; its execution approval is consumed')
     if (!task.plan || planFingerprint(task.plan) !== fingerprint) throw new Error('explicit plan approval fingerprint required')
+    if (commandIds !== undefined && (!Array.isArray(commandIds) || !commandIds.length || new Set(commandIds).size !== commandIds.length || commandIds.some(id => !task.plan.commands.some(command => command.id === id)))) throw new Error('Invalid per-command review')
     if (['running', 'reverting', 'partial', 'failed'].includes(task.status) && !this.tasks.executionEvents(hostId, taskId).length) throw new Error('legacy interrupted execution has no journal; operator investigation required')
     const originalControl = this.tasks.control(hostId, taskId)
-    return this.withAdmin(hostId, async admin => {
+    return this.withMutationAdmin(hostId, taskId, async admin => {
       this.checkVersion(hostId, taskId, expectedVersion)
       await admin.reconcileTask({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, onProgress })
       const state = this.tasks.executionState(hostId, taskId)
@@ -217,8 +229,11 @@ export class OperatorController {
       if (control.action === 'abort') throw new Error('execution was aborted; request a reviewed revision')
       this.tasks.setControl(hostId, taskId, 'run', originalControl.version)
       this.tasks.markRunning(hostId, taskId)
-      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, requireRevert: remainingChanges, approve: async () => true, onProgress, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
+      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, requireRevert: remainingChanges, approve: async command => !commandIds || commandIds.includes(command.id), onProgress, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
       const saved = this.tasks.saveResults(hostId, taskId, results)
+      if (saved.status === 'completed') {
+        try { await completeTaskReport({ admin, settings: this.settings, passphrase: this.passphrase, serverId: hostId, task: this.tasks.get(hostId, taskId), onProgress }) } catch { this.record({ type: 'report_unavailable', hostId, taskId, message: 'Assessment unavailable; authoritative command outcomes remain recorded' }) }
+      }
       if (task.groupRunId) this.runs.updateHost(task.groupRunId, hostId, { status: saved.status })
       if (task.groupRunId) {
         const run = this.runs.get(task.groupRunId)
@@ -235,19 +250,53 @@ export class OperatorController {
     return service.run({ ...options, settings: this.settings, passphrase: this.passphrase })
   }
 
-  async resumeRun (runId, decisions) {
-    const run = this.runs.get(runId)
-    if (!Array.isArray(decisions) || !decisions.length || decisions.length > 32 || new Set(decisions.map(item => item.hostId)).size !== decisions.length) throw new TypeError('select distinct participating hosts')
-    for (const decision of decisions) {
-      const host = run.hosts.find(host => host.serverId === decision.hostId)
-      if (!host || host.taskId !== decision.taskId) throw new Error('task is not part of selected run')
-      if (host.status !== 'completed') this.checkVersion(decision.hostId, decision.taskId, decision.expectedVersion)
-    }
-    for (const decision of decisions) {
-      if (run.hosts.find(host => host.serverId === decision.hostId).status === 'completed') continue
-      await this.resume(decision.hostId, decision.taskId, decision.expectedVersion, decision.fingerprint)
-    }
-    return this.runs.get(runId)
+  async resumeRun (runId, decisions, options = {}) {
+    const body = { ...options, runId, decisions }
+    return withHostMutation({ dataRoot: this.runs.dataRoot, identity: `run:${runId}` }, async () => {
+      const c = this
+      const { parallelMap } = await import('./multi-host-service.js')
+      const run = c.runs.get(body.runId)
+      if (!Array.isArray(body.decisions) || !body.decisions.length || body.decisions.length > 32 || new Set(body.decisions.map(d => d.hostId)).size !== body.decisions.length) throw new Error('Explicit per-host decisions required')
+      for (const d of body.decisions) {
+        const host = run.hosts.find(h => h.serverId === d.hostId && h.taskId === d.taskId)
+        if (!host) throw new Error('Wrong run or host')
+        if (host.status !== 'completed') { c.checkVersion(d.hostId, d.taskId, d.expectedVersion); if (c.inspect(d.hostId, d.taskId).fingerprint !== d.fingerprint) throw new Error('Wrong plan fingerprint') }
+      }
+      const concurrency = body.concurrency ?? 1
+      if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new Error('Invalid concurrency')
+      const batchSize = body.rollout?.batchSize ?? concurrency
+      if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 32) throw new Error('Invalid rollout batch')
+      const pending = body.decisions.filter(d => run.hosts.find(h => h.serverId === d.hostId).status !== 'completed')
+      if (body.rollout?.canaryHost) {
+        const index = pending.findIndex(decision => decision.hostId === body.rollout.canaryHost)
+        if (index < 0) throw new Error('Canary must be an explicitly reviewed selected host')
+        pending.unshift(...pending.splice(index, 1))
+      }
+      c.database(db => db.transaction(() => {
+        const insert = db.prepare('INSERT INTO run_reviews(run_id,host_id,task_id,state_version,fingerprint,reviewed_at) VALUES(?,?,?,?,?,?)')
+        for (const decision of pending) insert.run(run.id, decision.hostId, decision.taskId, decision.expectedVersion, decision.fingerprint, new Date().toISOString())
+      }).immediate())
+      const control = c.runs.control(run.id)
+      c.runs.setControl(run.id, 'run', control.version)
+      const stages = body.rollout ? [pending.slice(0, 1), ...Array.from({ length: Math.ceil(Math.max(0, pending.length - 1) / batchSize) }, (_, i) => pending.slice(1 + i * batchSize, 1 + (i + 1) * batchSize))] : [pending]
+      for (const [index, stage] of stages.entries()) {
+        if (c.runs.control(run.id).action === 'pause') break
+        c.record({ type: 'rollout-stage', runId: run.id, stage: index + 1, pendingHosts: pending.length })
+        const result = await parallelMap(stage, concurrency, async d => {
+          try { await c.resume(d.hostId, d.taskId, d.expectedVersion, d.fingerprint); return c.inspect(d.hostId, d.taskId).task.status === 'completed' } catch {
+            c.record({ type: 'host-continuation-blocked', runId: run.id, hostId: d.hostId, taskId: d.taskId, message: 'Continuation blocked; inspect task state and review again' })
+            return false
+          }
+        })
+        const verified = !body.rollout || stage.every(d => {
+          const task = c.tasks.get(d.hostId, d.taskId)
+          const checks = task.plan.commands.filter(command => command.phase === 'verify')
+          return checks.length && checks.every(check => task.results?.some(result => result.id === check.id && result.status === 'completed' && result.result?.exitCode === 0))
+        })
+        if (result.some(ok => !ok) || !verified) { c.record({ type: 'rollout-halted', runId: run.id, stage: index + 1, message: 'Failure, incomplete work or missing approved verification; remaining hosts require review' }); break }
+      }
+      return c.runs.get(run.id)
+    })
   }
 
   async rollback (hostId, taskId, expectedVersion, fingerprint, revisionId) {
@@ -255,7 +304,7 @@ export class OperatorController {
     const task = this.tasks.get(hostId, taskId)
     const revision = revisionId ? this.tasks.revisions(hostId, taskId).find(revision => revision.id === revisionId && revision.approved && revision.plan.operatorRollback) : null
     if (planFingerprint(revision ? revision.plan : task.plan?.revertCommands) !== fingerprint) throw new Error('explicit rollback approval fingerprint required')
-    return this.withAdmin(hostId, async admin => {
+    return this.withMutationAdmin(hostId, taskId, async admin => {
       this.checkVersion(hostId, taskId, expectedVersion)
       const results = await admin.revertTask({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, reviewedPlan: revision?.plan, approve: async () => true, onResult: result => this.tasks.appendRevertResult(hostId, taskId, result) })
       const saved = this.tasks.saveRevertResults(hostId, taskId, results)

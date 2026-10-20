@@ -674,6 +674,24 @@ For each authenticated command, the plugin clears supplementary groups, establis
 
 This is intentionally a root administration boundary, not a restricted monitoring collector: a valid approved command can make arbitrary host changes. A native-plugin vulnerability would therefore have root impact. Loopback-only API access, system SSH transport, per-host keys, short-lived signed requests, deterministic plan validation, and interactive approval are all part of the required trust model.
 
+## Local browser workspace
+
+`intentaiops --web` and `intentaiops console` start the same authenticated,
+loopback-only foreground workspace. Add `--console-actions` for reviewed host
+and task controls, and `--web-port` for a fixed port. Credentials stay in the
+launch terminal. See [workspace usage and limitations](docs/web-workspace.md)
+and [third-party visual attribution](docs/muxin-provenance.md).
+
+CLI and browser preparation share `src/task-preparation.js`; completion reports
+share `src/task-completion-report.js`. `OperatorWorkspace` persists asynchronous
+operation IDs while `OperatorController` owns review/recovery transitions.
+Host mutation ownership is cross-process and keyed to verified history identity.
+It complements task leases, never replaces approval or uncertain-job checks.
+Initial host connections do not require active Stage 2; signed execution does.
+Metrics use bounded, node-scoped Netdata reads, not inventory-derived gauges.
+Frontend source is under `web/`; packaged assets are built explicitly into
+`src/operator-web/` before packing. Do not hand-edit generated bundles.
+
 ## SSH connection reuse
 
 Intent AI Ops shares an authenticated OpenSSH connection across compatible host operations, including SSH, SCP, inventory, and Stage 2. Each operation gets its own channel. Closing one workflow does not disconnect another; unused connections close after 10 minutes, and owned connections close when the CLI exits.
