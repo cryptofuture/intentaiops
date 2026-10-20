@@ -19,6 +19,7 @@ scripts/freebsd-vm-lab/id_ed25519.pub
 scripts/freebsd-vm-lab/known_hosts
 scripts/freebsd-vm-lab/known_hosts.old
 /artifacts/browser-screenshots/
+/artifacts/docker-package-lab/
 /src/operator-web/
 scripts/freebsd-vm-lab/ssh_config
 scripts/freebsd-vm-lab/webminai-hosts.tsv

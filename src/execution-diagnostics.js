@@ -22,6 +22,8 @@ export function executionDiagnostics ({ item = { id: 'execution' }, result = {},
   if (Number.isInteger(result.signal) && result.signal > 0) add('PROCESS_SIGNAL', 'confirmed', 'remote-command', 'The remote process terminated with a recorded signal; the signal alone does not identify why.', { signal: result.signal })
   if (Number.isInteger(result.exitCode) && result.exitCode !== 0) add('PROCESS_EXIT', 'confirmed', 'remote-command', 'The process recorded a nonzero exit status.', { exitCode: result.exitCode })
   const patterns = [
+    ['PACKAGE_MANAGER_FAILED', /\bDOCKER_PACKAGE_INSTALL_FAILED\b/u, 'remote-command', 'Docker package installation reported failure. Partial package changes may exist; inspect the captured package delta and review cleanup.'],
+    ['DOCKER_SERVICE_NOT_READY', /\bDOCKER_LAB_RUNTIME_UNAVAILABLE\b/u, 'remote-command', 'Docker package checks completed, but its daemon was unavailable inside the LXC lab. This is not an installation rollback or permission to change host isolation.'],
     ['SSH_HOST_KEY', /host key verification failed|remote host identification has changed/iu, 'transport', 'SSH host-key verification failed. Verify the server identity independently.'],
     ['SSH_AUTHENTICATION', /permission denied \((?:publickey|password|keyboard-interactive)[^)]*\)|ssh.*authentication failed/iu, 'transport', 'SSH authentication was rejected.'],
     ['NAME_RESOLUTION', /could not resolve host|could not resolve hostname|\bENOTFOUND\b|\bEAI_AGAIN\b/iu, error ? 'transport' : 'remote-command', 'Name resolution failed.'],

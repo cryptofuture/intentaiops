@@ -191,7 +191,8 @@ export async function executeApprovedPlan ({
     if (diagnostics?.length) entry.diagnostics = diagnostics
     if (diagnostics?.length && (status === 'failed' || recoveryRequired)) await onProgress?.({ phase: 'execution-diagnostics', commandId: item.id, outcome: rawResult.exitCode === null || rawResult.state === 'unknown' ? 'unknown' : status, message: diagnosticSummary(diagnostics), diagnostics })
     if (status === 'failed') {
-      entry.failure = classifyFailure({ item, result, error: executionError })
+      entry.failure = classifyFailure({ item, result: rawResult, error: executionError })
+      if (isSensitiveCommand(item.command)) entry.failure.evidence = 'Sensitive command output withheld; inspect structured execution diagnostics.'
       if (item.diagnostic && !recoveryRequired) entry.diagnostic = await runSafeDiagnostic(netdata, item.diagnostic)
     }
     results.push(entry)

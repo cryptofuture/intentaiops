@@ -228,8 +228,7 @@ export class OperatorController {
       const control = this.tasks.control(hostId, taskId)
       if (control.action === 'abort') throw new Error('execution was aborted; request a reviewed revision')
       this.tasks.setControl(hostId, taskId, 'run', originalControl.version)
-      this.tasks.markRunning(hostId, taskId)
-      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, requireRevert: remainingChanges, approve: async command => !commandIds || commandIds.includes(command.id), onProgress, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
+      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, requireRevert: remainingChanges, approve: async command => !commandIds || commandIds.includes(command.id), onProgress, executionObserver: event => { if (event.type === 'command_prepared') this.tasks.markRunning(hostId, taskId) }, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
       const saved = this.tasks.saveResults(hostId, taskId, results)
       if (saved.status === 'completed') {
         try { await completeTaskReport({ admin, settings: this.settings, passphrase: this.passphrase, serverId: hostId, task: this.tasks.get(hostId, taskId), onProgress }) } catch { this.record({ type: 'report_unavailable', hostId, taskId, message: 'Assessment unavailable; authoritative command outcomes remain recorded' }) }

@@ -5,6 +5,19 @@ import { executeApprovedPlan, validateCommandPlan } from '../src/plan-validator.
 
 const ROOT_POLICY = rootExecutionPolicy({})
 
+test('sensitive Docker output retains its failure category without disclosing evidence', async () => {
+  const candidate = plan()
+  candidate.commands = [{ ...candidate.commands[0], command: 'docker compose version' }]
+  const results = await executeApprovedPlan({
+    plan: candidate,
+    policy: ROOT_POLICY,
+    approve: async () => true,
+    netdata: { async runCommand () { return { exitCode: 78, stderr: 'DOCKER_LAB_RUNTIME_UNAVAILABLE: private-test-value' } } }
+  })
+  assert.equal(results[0].failure.code, 'DOCKER_SERVICE_NOT_READY')
+  assert.doesNotMatch(JSON.stringify(results), /private-test-value/u)
+})
+
 test('redaction markers cannot become executable command inputs', () => {
   for (const marker of ['[redacted-ssh-url]', '[redacted-64-hex]', '[redacted-private-key]']) {
     for (const key of ['commands', 'revertCommands']) {

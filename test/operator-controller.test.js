@@ -31,6 +31,15 @@ async function fixture (t) {
   return { root, tasks, task, controller, calls, admin }
 }
 
+test('a rejected execution preflight does not leave unstarted browser work running', async t => {
+  const { controller, tasks, task, admin, calls } = await fixture(t)
+  admin.execute = async () => { throw new Error('Remote task identity is occupied') }
+  const view = controller.inspect('host', task.id)
+  await assert.rejects(controller.resume('host', task.id, view.stateVersion, view.fingerprint), /identity is occupied/u)
+  assert.equal(tasks.get('host', task.id).status, 'planned')
+  assert.deepEqual(calls, [])
+})
+
 test('remote recovery console uses the shared controller with separate approval, stale checks and takeover decisions', async t => {
   const { tasks, admin, controller, calls } = await fixture(t)
   let prepared = 0

@@ -58,7 +58,7 @@ function validateHost (docker) {
 function baseline (state, manager) {
   const packages = packageSnapshot(manager, `${state}/packages.before`)
   const capturePaths = PATHS.map(path => `key=$(printf '%s' ${quote(path)} | tr '/.' '__'); [ ! -e ${quote(path)} ] || : > ${quote(state)}/"$key.existed"`).join('; ')
-  return `set -eu; umask 077; install -d -m 0700 ${quote(state)}; if [ ! -s ${quote(`${state}/baseline.sha256`)} ]; then ${packages}; sha256sum ${quote(`${state}/packages.before`)} | awk '{print $1}' > ${quote(`${state}/baseline.sha256`)}; ${capturePaths}; if command -v systemctl >/dev/null 2>&1; then systemctl is-active --quiet docker 2>/dev/null && : > ${quote(`${state}/docker.active`)} || true; systemctl is-enabled --quiet docker 2>/dev/null && : > ${quote(`${state}/docker.enabled`)} || true; elif command -v rc-service >/dev/null 2>&1; then rc-service docker status >/dev/null 2>&1 && : > ${quote(`${state}/docker.active`)} || true; rc-update show default 2>/dev/null | grep -Eq '(^|[[:space:]])docker([[:space:]]|$)' && : > ${quote(`${state}/docker.enabled`)} || true; fi; command -v docker >/dev/null 2>&1 && : > ${quote(`${state}/docker-cli.existed`)} || true; fi`
+  return `set -eu; umask 077; install -d -m 0700 ${quote(state)}; if [ ! -s ${quote(`${state}/baseline.sha256`)} ]; then ${packages}; sha256sum ${quote(`${state}/packages.before`)} | awk '{print $1}' > ${quote(`${state}/baseline.sha256.pending`)}; ${capturePaths}; if command -v systemctl >/dev/null 2>&1; then for service in docker.service docker.socket containerd.service; do systemctl is-active --quiet "$service" 2>/dev/null && : > ${quote(state)}/"$service.active" || true; systemctl is-enabled --quiet "$service" 2>/dev/null && : > ${quote(state)}/"$service.enabled" || true; done; elif command -v rc-service >/dev/null 2>&1; then for service in docker containerd; do rc-service "$service" status >/dev/null 2>&1 && : > ${quote(state)}/"$service.active" || true; rc-update show default 2>/dev/null | grep -Eq "(^|[[:space:]])$service([[:space:]]|$)" && : > ${quote(state)}/"$service.enabled" || true; done; fi; getent group docker >/dev/null 2>&1 && : > ${quote(`${state}/docker-group.existed`)} || true; command -v docker >/dev/null 2>&1 && : > ${quote(`${state}/docker-cli.existed`)} || true; mv ${quote(`${state}/baseline.sha256.pending`)} ${quote(`${state}/baseline.sha256`)}; fi`
 }
 
 function install (state, manager, method, distro) {
@@ -67,7 +67,8 @@ function install (state, manager, method, distro) {
     : method === 'official-rpm'
       ? installRpm(distro)
       : installDistribution(manager)
-  return `set -eu; state=${quote(state)}; if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && { docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null 2>&1; }; then exit 0; fi; [ ! -e "$state/docker-cli.existed" ] || { printf 'PREEXISTING_DOCKER_UNHEALTHY: repair or remove the existing Docker installation before this task\n' >&2; exit 78; }; ${installCommand}; ${packageSnapshot(manager, `${state}/packages.after`)}; comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} | cut -d= -f1 > ${quote(`${state}/packages.added`)}; ${startService(manager)}`
+  const recordAdded = `${packageSnapshot(manager, `${state}/packages.after`)}; cut -d= -f1 "$state/packages.before" | LC_ALL=C sort -u > "$state/package-names.before"; cut -d= -f1 "$state/packages.after" | LC_ALL=C sort -u > "$state/package-names.after"; comm -13 "$state/package-names.before" "$state/package-names.after" > "$state/packages.added"`
+  return `set -eu; state=${quote(state)}; if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && { docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null 2>&1; }; then exit 0; fi; [ ! -e "$state/docker-cli.existed" ] || { printf 'PREEXISTING_DOCKER_UNHEALTHY: repair or remove the existing Docker installation before this task\n' >&2; exit 78; }; trap ${quote('status=$?; trap - EXIT; ' + recordAdded + '; if [ "$status" -ne 0 ]; then printf "DOCKER_PACKAGE_INSTALL_FAILED: exit=%s; partial changes require reviewed rollback\\n" "$status" >&2; fi; exit "$status"')} EXIT; ${installCommand}; ${recordAdded}; ${startService(manager)}`
 }
 
 function installApt (distro) {
@@ -77,7 +78,7 @@ function installApt (distro) {
 
 function installRpm (distro) {
   const vendor = distro === 'fedora' ? 'fedora' : 'centos'
-  return `if command -v dnf >/dev/null 2>&1; then pm=dnf; else pm=yum; fi; "$pm" -y install dnf-plugins-core ca-certificates curl; "$pm" config-manager --add-repo https://download.docker.com/linux/${vendor}/docker-ce.repo; "$pm" -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`
+  return `if command -v dnf >/dev/null 2>&1; then pm=dnf; else pm=yum; fi; need=; [ -r /etc/pki/tls/certs/ca-bundle.crt ] || need="$need ca-certificates"; command -v curl >/dev/null 2>&1 || need="$need curl"; [ -z "$need" ] || "$pm" -y --setopt=install_weak_deps=False install $need; if [ ! -e /etc/yum.repos.d/docker-ce.repo ]; then curl --fail --location --silent --show-error --output "$state/docker-ce.repo" https://download.docker.com/linux/${vendor}/docker-ce.repo; install -m 0644 "$state/docker-ce.repo" /etc/yum.repos.d/docker-ce.repo; fi; "$pm" -y --setopt=install_weak_deps=False install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`
 }
 
 function installDistribution (manager) {
@@ -96,12 +97,13 @@ function startService (manager) {
 }
 
 function restore (state, manager) {
-  const remove = removePackages(manager, `${state}/packages.added`)
-  const restorePaths = PATHS.map(path => `key=$(printf '%s' ${quote(path)} | tr '/.' '__'); [ -e "$state/$key.existed" ] || rm -rf -- ${quote(path)}`).join('; ')
+  const remove = removePackages(manager, `${state}/packages.added`) + (['dnf', 'yum'].includes(manager) ? '; for version in 621e9f35-58adea78 060a61c51b558a7f742b77aac52feb6b621e9f35-58ade481; do if ! grep -Fxq "gpg-pubkey=$version.(none)" "$state/packages.before" && rpm -q "gpg-pubkey-$version" >/dev/null 2>&1; then rpm -e -- "gpg-pubkey-$version"; fi; done' : '')
+  const restorePaths = [...PATHS].reverse().map(path => `key=$(printf '%s' ${quote(path)} | tr '/.' '__'); [ -e "$state/$key.existed" ] || ${path === '/etc/apt/keyrings' ? `( [ ! -d ${quote(path)} ] || rmdir -- ${quote(path)} )` : `rm -rf -- ${quote(path)}`}`).join('; ')
   const service = manager === 'apk'
-    ? '[ -e "$state/docker.active" ] || rc-service docker stop >/dev/null 2>&1 || true; [ -e "$state/docker.enabled" ] || rc-update del docker default >/dev/null 2>&1 || true'
-    : '[ -e "$state/docker.active" ] || systemctl stop docker.service docker.socket containerd.service >/dev/null 2>&1 || true; [ -e "$state/docker.enabled" ] || systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true'
-  return `set -eu; [ -d ${quote(state)} ] || exit 0; state=${quote(state)}; ${service}; ${remove}; ${restorePaths}`
+    ? 'for service in docker containerd; do [ -e "$state/$service.active" ] || rc-service "$service" stop >/dev/null 2>&1 || true; [ -e "$state/$service.enabled" ] || rc-update del "$service" default >/dev/null 2>&1 || true; done'
+    : 'for service in docker.service docker.socket containerd.service; do [ -e "$state/$service.active" ] || systemctl stop "$service" >/dev/null 2>&1 || true; [ -e "$state/$service.enabled" ] || systemctl disable "$service" >/dev/null 2>&1 || true; done'
+  const group = 'if [ ! -e "$state/docker-group.existed" ] && getent group docker >/dev/null 2>&1; then members=$(getent group docker | cut -d: -f4); [ -z "$members" ] || { printf "%s\\n" "Docker group gained members; operator review required" >&2; exit 78; }; if command -v groupdel >/dev/null 2>&1; then groupdel docker; else delgroup docker; fi; fi'
+  return `set -eu; [ -d ${quote(state)} ] || exit 0; state=${quote(state)}; [ -s "$state/baseline.sha256" ] || { printf '%s\\n' 'Incomplete Docker baseline; destructive cleanup blocked' >&2; exit 78; }; actual=$(sha256sum "$state/packages.before" | awk '{print $1}'); expected=$(cat "$state/baseline.sha256"); [ "$actual" = "$expected" ] || { printf '%s\\n' 'Docker baseline checksum changed; cleanup blocked' >&2; exit 78; }; ${service}; if [ -s "$state/packages.added" ]; then while IFS= read -r package; do printf '%s\\n' "$package" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9+_.:@-]*$' || exit 78; if cut -d= -f1 "$state/packages.before" | grep -Fxq "$package"; then printf '%s\\n' 'Refusing to remove a baseline package' >&2; exit 78; fi; done < "$state/packages.added"; fi; ${remove}; ${restorePaths}; ${group}`
 }
 
 function verifyBaseline (state, manager) {
@@ -120,11 +122,10 @@ function packageSnapshot (manager, target) {
 
 function removePackages (manager, file) {
   if (manager === 'apt') return `if [ -s ${quote(file)} ]; then export DEBIAN_FRONTEND=noninteractive; xargs -r apt-get purge -y -- < ${quote(file)}; fi`
-  if (manager === 'dnf') return `if [ -s ${quote(file)} ]; then xargs -r dnf -y remove -- < ${quote(file)}; fi`
-  if (manager === 'yum') return `if [ -s ${quote(file)} ]; then xargs -r yum -y remove -- < ${quote(file)}; fi`
-  if (manager === 'zypper') return `if [ -s ${quote(file)} ]; then xargs -r zypper --non-interactive remove -u -- < ${quote(file)}; fi`
+  if (manager === 'dnf' || manager === 'yum') return `if [ -s ${quote(file)} ]; then cut -d= -f1 "$state/packages.before" | LC_ALL=C sort -u > "$state/package-names.before"; test -s "$state/package-names.before"; xargs -r ${manager} -y --setopt=clean_requirements_on_remove=False --setopt=protected_packages= "--setopt=protected_packages=glob:$state/package-names.before" remove -- < ${quote(file)}; fi`
+  if (manager === 'zypper') return `if [ -s ${quote(file)} ]; then xargs -r zypper --non-interactive remove -- < ${quote(file)}; fi`
   if (manager === 'apk') return `if [ -s ${quote(file)} ]; then xargs -r apk del -- < ${quote(file)}; fi`
-  if (manager === 'pacman') return `if [ -s ${quote(file)} ]; then xargs -r pacman -Rns --noconfirm -- < ${quote(file)}; fi`
+  if (manager === 'pacman') return `if [ -s ${quote(file)} ]; then xargs -r pacman -Rn --noconfirm -- < ${quote(file)}; fi`
   return ':'
 }
 

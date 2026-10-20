@@ -3,6 +3,19 @@ import test from 'node:test'
 import { classifyFailure, isFailureCode } from '../src/failure-signature.js'
 import { executionDiagnostics } from '../src/execution-diagnostics.js'
 
+test('Docker package and LXC runtime failures stay distinct from execution uncertainty', () => {
+  for (const [marker, code] of [['DOCKER_PACKAGE_INSTALL_FAILED', 'PACKAGE_MANAGER_FAILED'], ['DOCKER_LAB_RUNTIME_UNAVAILABLE', 'DOCKER_SERVICE_NOT_READY']]) {
+    const item = { id: 'docker-lab' }
+    const result = { exitCode: 78, stderr: marker + ': inspect recorded state', stdout: '' }
+    assert.equal(classifyFailure({ item, result }).code, code)
+    assert.ok(executionDiagnostics({ item, result }).some(value => value.code === code && value.confidence === 'confirmed'))
+    assert.deepEqual(executionDiagnostics({ item, result: { ...result, exitCode: 0 } }), [])
+    const uncertain = { ...result, exitCode: null, state: 'unknown' }
+    executionDiagnostics({ item, result: uncertain })
+    assert.equal(uncertain.state, 'unknown')
+  }
+})
+
 test('the explicit installer runtime rejection explains failure without changing an uncertain outcome', () => {
   const item = { id: 'install-intent-ai-ops', phase: 'acquire' }
   const result = { exitCode: 1, stderr: 'ERROR: Node.js 22.23.3 is installed, but Intent AI Ops requires 24.7 or newer. Upgrade it explicitly and rerun this installer.' }

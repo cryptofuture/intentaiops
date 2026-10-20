@@ -41,6 +41,7 @@ export function classifyFailure ({ item, result, error }) {
   else if (/wsl_runtime_unavailable/u.test(lower)) code = 'WSL_RUNTIME_UNAVAILABLE'
   else if (/webminai_reboot_required|reboot_required/u.test(lower)) code = 'REBOOT_REQUIRED'
   else if (/docker_service_not_ready/u.test(lower)) code = 'DOCKER_SERVICE_NOT_READY'
+  else if (/docker_lab_runtime_unavailable/u.test(lower)) code = 'DOCKER_SERVICE_NOT_READY'
   else if (/windows_interactive_user_required/u.test(lower)) code = 'WINDOWS_INTERACTIVE_USER_REQUIRED'
   else if (/\b(?:database_data_remains|recovery_baseline_changed)\b/u.test(lower)) code = 'BASELINE_RESTORATION_BLOCKED'
   else if (/\bpackage_version_mismatch\b/u.test(lower)) code = 'PACKAGE_VERSION_MISMATCH'
@@ -58,6 +59,7 @@ export function classifyFailure ({ item, result, error }) {
   else if (/address already in use|port .* already allocated|bind.*failed/u.test(lower)) code = 'PORT_CONFLICT'
   else if (/timed out|\b(?:execution|operation|connection|request) timeout\b|\btimeout (?:expired|exceeded|occurred)\b|deadline exceeded|(?:^|\n)(?:error:\s*)?timeout(?:$|[.!:])/u.test(lower)) code = 'TIMEOUT'
   else if (item.phase === 'baseline' && /drift|baseline.*(?:different|mismatch|failed)/u.test(lower)) code = 'BASELINE_DRIFT'
+  else if (/docker_package_install_failed/u.test(lower)) code = 'PACKAGE_MANAGER_FAILED'
   return {
     code,
     phase: item.phase ?? 'application',
