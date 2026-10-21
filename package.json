@@ -32,6 +32,8 @@
     "docs/execution-diagnostics.md",
     "docs/remote-common-task-recovery.md",
     "docs/ssh-connection-reuse.md",
+    "docs/magento-opensearch-images.md",
+    "docs/ghost-mysql-images.md",
     "README.md"
   ],
   "engines": {

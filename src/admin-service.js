@@ -351,14 +351,15 @@ export class AdminService {
       const recordExecutionEvent = async event => {
         heartbeat.check()
         if (event.type !== 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
-        if (remoteJournal) {
+        // Recovery callbacks must not re-enter the SSH connection they are restoring.
+        if (remoteJournal && event.type !== 'execution_recovery') {
           let baselineDigest = null
           if (event.type === 'command_completed' && commonTaskRecoverySupported(saved.catalogId, recoveryState?.manifest.platform)) {
             baselineDigest = await inspectRecoveryBaseline(this.netdata(server), saved.catalogId, taskId, plan.compatibilityManifest?.host?.family).catch(() => null)
           }
           await remoteJournal.append(event, { baselineDigest })
         }
-        await executionObserver?.(event)
+        if (event.type !== 'execution_recovery') await executionObserver?.(event)
         if (event.type === 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, event)
         if (event.type === 'execution_paused' && event.metadata?.reason === 'recovery_requires_approval') {
           const control = this.tasks.control(serverId, taskId)
@@ -437,7 +438,8 @@ export class AdminService {
         onExecutionEvent: async event => {
           heartbeat.check()
           if (event.type !== 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { ...event, metadata: { ...event.metadata, operation: 'rollback', rollbackRevision } })
-          await remoteJournal?.append(event, { operation: 'rollback' })
+          if (event.type === 'command_prepared') this.tasks.markReverting(serverId, taskId)
+          if (event.type !== 'execution_recovery') await remoteJournal?.append(event, { operation: 'rollback' })
           if (event.type === 'command_dispatched') this.tasks.appendExecutionEvent(serverId, taskId, lease.owner, { ...event, metadata: { ...event.metadata, operation: 'rollback', rollbackRevision } })
         },
         requireRevert: false
@@ -519,7 +521,9 @@ export class AdminService {
         }
       }
       if (remoteJournal && ![...this.tasks.executionState(serverId, taskId), ...this.tasks.rollbackState(serverId, taskId)].some(command => command.status === 'uncertain')) await remoteJournal.release()
-      return this.tasks.executionState(serverId, taskId)
+      const state = this.tasks.executionState(serverId, taskId)
+      if (task.status === 'running' && ![...state, ...this.tasks.rollbackState(serverId, taskId)].some(command => command.status === 'uncertain')) this.tasks.saveResults(serverId, taskId, this.tasks.get(serverId, taskId).results ?? [])
+      return state
     } finally {
       heartbeat.stop()
       this.tasks.releaseExecution(serverId, taskId, lease.owner)

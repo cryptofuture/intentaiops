@@ -63,7 +63,9 @@ Application routes currently in the catalog:
 | Home Assistant | No | Yes | Yes | Yes | Yes | Yes |
 | Intent AI Ops CLI | Host-native | Host-native, not Compose | Host-native | Host-native, not Docker | Host-native, not Colima | No |
 
-Ghost's pinned MySQL container requires x86-64-v2 on x86-64 hosts. The Linux Docker task checks CPU features before creating task files or credentials and refuses incompatible or unverifiable CPUs. Docker itself working does not guarantee that every image supports the processor. See the [official MySQL image CPU limitation](https://github.com/docker-library/mysql/issues/1055).
+Ghost's Linux Docker task prefers the pinned MySQL 8.4 official image. On x86-64 CPUs that demonstrably lack x86-64-v2, it builds a task-specific Debian image from checksum-pinned MySQL 8.4 vendor packages instead. Unknown CPU capabilities stop preparation before task files or credentials are created. Existing Ghost data is never adopted or downgraded. See [image sources and limitations](docs/ghost-mysql-images.md) and the [official MySQL image CPU limitation](https://github.com/docker-library/mysql/issues/1055).
+
+Magento's Linux Docker task also keeps the official OpenSearch image as default. Older x86-64 CPUs select a pinned Debian/Java 21 build of the official minimal OpenSearch archive, without optional vector plugins. Unknown CPU capabilities stop preparation. See [image selection, search checks and limitations](docs/magento-opensearch-images.md).
 
 Platform and maintenance tasks:
 

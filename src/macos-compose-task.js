@@ -4,9 +4,9 @@ import { buildJoomlaTask } from './joomla-task.js'
 import { buildDrupalTask } from './drupal-task.js'
 import { buildPrestaShopTask } from './prestashop-task.js'
 import { buildMoodleTask } from './moodle-task.js'
-import { buildMagentoTask } from './magento-task.js'
+import { buildMagentoTask, magentoComposeRelease } from './magento-task.js'
 import { buildN8nTask } from './n8n-task.js'
-import { buildGhostTask } from './ghost-task.js'
+import { buildGhostTask, ghostRelease } from './ghost-task.js'
 import { buildMattermostTask } from './mattermost-task.js'
 import { buildOdooTask } from './odoo-task.js'
 import { buildJellyfinTask } from './jellyfin-task.js'
@@ -57,7 +57,7 @@ export function buildMacosComposeTask (application, taskId, execution = {}, dock
   const credentials = `${home}/.webminai/credentials/${application}`
   const addressCommand = "ifconfig | awk '/^[a-z0-9]+:/{iface=$1; sub(/:$/,\"\",iface)} /inet / && $2 != \"127.0.0.1\" {print $2; exit}'"
   const linuxContext = buildLinuxComposeReferenceContext({ architecture: execution.architecture, primaryAddressCommand: addressCommand })
-  const built = build(taskId, linuxContext, { preferred: true, ready: true, installSupported: true, installMethod: 'homebrew-colima' })
+  const built = build(taskId, linuxContext, { platform: 'macos', preferred: true, ready: true, installSupported: true, installMethod: 'homebrew-colima' })
   const original = JSON.stringify(built.plan)
   const originalState = firstMatch(original, new RegExp(`/var/lib/webminai/task-state/${taskId}-[A-Za-z0-9-]+`, 'u'))
   if (!originalState) throw new Error(`${application} Compose plan does not expose a task state path`)
@@ -68,12 +68,18 @@ export function buildMacosComposeTask (application, taskId, execution = {}, dock
   const originalDataRoot = HOST_DATA_ROOTS[application] ?? null
   const dataRoot = originalDataRoot ? `${home}/.webminai/data/${application}` : null
   const paths = { home, originalState, state, originalServiceRoot, serviceRoot, originalCredentials, credentials, originalDataRoot, dataRoot }
-  const images = extractImages(built.plan.commands.find(item => item.id === 'capture-baseline')?.command ?? original)
+  const images = application === 'ghost' ? [...ghostRelease().images] : application === 'magento' ? [...magentoComposeRelease().images] : extractImages(built.plan.commands.find(item => item.id === 'capture-baseline')?.command ?? original)
 
   for (const item of [...built.plan.commands, ...built.plan.revertCommands]) {
     item.command = adapt(item.command, paths)
   }
   replace(built.plan.commands, 'capture-baseline', baseline({ state, serviceRoot, credentials, images, home }))
+  if (application === 'ghost' || application === 'magento') {
+    const capture = built.plan.commands.find(command => command.id === 'capture-baseline')
+    const project = application === 'ghost' ? 'webminai-ghost-18110' : 'webminai-magento-18108'
+    const guards = `set -eu; if [ ! -e ${quote(`${state}/baseline.ready`)} ]; then test -z "$(docker ps -aq --filter label=com.docker.compose.project=${quote(project)})"; test -z "$(docker volume ls -q --filter label=com.docker.compose.project=${quote(project)})"; test -z "$(docker network ls -q --filter label=com.docker.compose.project=${quote(project)})"; fi`
+    capture.command = `${withDocker(guards, home)}; ${capture.command}; printf '%s\\n' standard > ${quote(`${state}/image-profile`)}`
+  }
   replace(built.plan.commands, 'prepare-docker', dockerReady(state, home))
   replace(built.plan.revertCommands, 'restore-docker', withDocker(`set -eu; rm -rf -- ${quote(state)}; printf '%s\n' colima-preserved`, home))
   const credentialCommand = built.plan.commands.find(item => item.id === 'generate-credentials')

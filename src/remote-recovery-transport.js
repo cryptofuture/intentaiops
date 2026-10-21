@@ -13,7 +13,8 @@ export class RemoteRecoveryTransport {
 
   async request (operation, parameters = {}) {
     const command = await recoveryStorageCommand(this.platform, operation, parameters)
-    const result = await this.client.runCommand(command, { timeoutSeconds: 15 })
+    const readOnly = ['key', 'list', 'read', 'verification-key', 'ownership'].includes(operation)
+    const result = await this.client.runCommand(command, { timeoutSeconds: readOnly ? 15 : 60 })
     if (result.exitCode !== 0 || result.stdoutTruncated || result.stderrTruncated) {
       const reasons = {
         'Legacy remote task state is already occupied': 'legacy task state is occupied; preserve it and review a new task identity',

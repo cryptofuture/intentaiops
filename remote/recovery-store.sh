@@ -22,6 +22,19 @@ private_file() {
   [ "$(wc -c < "$1")" -le 8192 ]
 }
 
+flush() {
+  [ "$#" -gt 0 ]
+  if [ "$platform" = linux ]; then
+    for utility in sync gnusync; do
+      if "$utility" --version 2>/dev/null | grep -Fq 'GNU coreutils'; then
+        "$utility" -- "$@" "$root/.write-lock" "$root" "$parent" "$ancestor"
+        return
+      fi
+    done
+  fi
+  sync
+}
+
 [ "$(id -u)" -eq 0 ]
 command -v openssl >/dev/null
 case "$operation" in
@@ -68,9 +81,9 @@ if [ "$operation" = initialize ] && [ ! -e "$root/signing.pem" ]; then
   test ! -L "$root/signing.pem"
   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$root/.write-lock/key" 2>/dev/null
   chmod 0600 "$root/.write-lock/key"
-  sync
+  flush "$root/.write-lock/key"
   mv "$root/.write-lock/key" "$root/signing.pem"
-  sync
+  flush "$root/signing.pem"
 fi
 private_file "$root/signing.pem"
 
@@ -108,12 +121,12 @@ if [ "$operation" = rotate-key ]; then
   payload=$(openssl base64 -A -in "$root/.write-lock/rotation" | tr '+/' '-_' | tr -d '=')
   printf '{"algorithm":"ECDSA-P256-SHA256","format":"intentaiops-recovery-key-rotation","keyFingerprint":"%s","payload":"%s","signature":"%s","version":1}' "$expected" "$payload" "$signature" > "$root/.write-lock/record"
   test ! -e "$root/keys/$next_key.rotation.json"; test ! -L "$root/keys/$next_key.rotation.json"
-  sync
+  flush "$root/.write-lock/old-public" "$root/.write-lock/record" "$root/.write-lock/key"
   mv "$root/.write-lock/old-public" "$root/keys/$expected.der"
   mv "$root/.write-lock/record" "$root/keys/$next_key.rotation.json"
-  sync
+  flush "$root/keys/$expected.der" "$root/keys/$next_key.rotation.json" "$root/keys"
   mv "$root/.write-lock/key" "$root/signing.pem"
-  sync
+  flush "$root/signing.pem"
   operation=key
 fi
 
@@ -220,6 +233,7 @@ if [ "$operation" = claim ] && [ ! -e "$directory" ]; then
   done
   mkdir -m 0700 "$directory"
   printf '%s' "$execution" > "$root/task-$task"
+  flush "$root/task-$task" "$directory"
 fi
 safe_directory "$directory"
 if [ -e "$directory/head" ]; then
@@ -238,9 +252,9 @@ if [ "$operation" = takeover ]; then
   actual_owner=$(openssl dgst -sha256 "$directory/owner" | awk '{print $NF}')
   [ "$actual_owner" = "$expected_owner" ]
   printf '%s' "$owner" > "$root/.write-lock/owner"
-  sync
+  flush "$root/.write-lock/owner"
   mv "$root/.write-lock/owner" "$directory/owner"
-  sync
+  flush "$directory/owner" "$directory"
   printf '{"claimed":true}\n'
   exit 0
 fi
@@ -253,7 +267,7 @@ if [ "$operation" = claim ]; then
     test ! -L "$directory/owner"
     printf '%s' "$owner" > "$directory/owner"
   fi
-  sync
+  flush "$directory/owner" "$directory"
   printf '{"claimed":true}\n'
   exit 0
 fi
@@ -261,7 +275,7 @@ private_file "$directory/owner"
 [ "$(cat "$directory/owner")" = "$owner" ]
 if [ "$operation" = release ]; then
   rm -- "$directory/owner"
-  sync
+  flush "$directory"
   printf '{"released":true}\n'
   exit 0
 fi
@@ -283,12 +297,12 @@ signature=$(openssl base64 -A -in "$root/.write-lock/signature" | tr '+/' '-_' |
 printf '{"algorithm":"ECDSA-P256-SHA256","format":"intentaiops-remote-recovery","keyFingerprint":"%s","payload":"%s","signature":"%s","version":1}' "$fingerprint" "$payload" "$signature" > "$root/.write-lock/record"
 next=$((sequence + 1))
 test ! -e "$directory/$next.json"; test ! -L "$directory/$next.json"
-sync
+flush "$root/.write-lock/payload" "$root/.write-lock/signature" "$root/.write-lock/record"
 mv "$root/.write-lock/record" "$directory/$next.json"
-sync
+flush "$directory/$next.json" "$directory"
 hash=$(openssl dgst -sha256 "$directory/$next.json" | awk '{print $NF}')
 printf '%s %s\n' "$next" "$hash" > "$root/.write-lock/head"
-sync
+flush "$root/.write-lock/head"
 mv "$root/.write-lock/head" "$directory/head"
-sync
+flush "$directory/head" "$directory"
 cat "$directory/$next.json"

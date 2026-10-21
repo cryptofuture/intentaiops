@@ -103,6 +103,12 @@ test('direct Linux PHP route contracts produce independently valid reversible pl
       assert.equal(acquisition.timeoutMs, 60 * 60 * 1000)
       assert.equal(acquisition.retry, undefined)
     }
+    if (label === 'magento') {
+      const baseline = built.plan.commands.find(command => command.id === 'capture-baseline').command
+      assert.ok(baseline.includes('CPU_FEATURES_UNAVAILABLE'))
+      assert.ok(baseline.indexOf('CPU_FEATURES_UNAVAILABLE') < baseline.indexOf('install -d'))
+      assert.ok(baseline.includes('image-profile'))
+    }
   }
 })
 

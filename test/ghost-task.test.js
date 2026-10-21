@@ -10,24 +10,25 @@ import { validateCommandPlan } from '../src/plan-validator.js'
 const ubuntu = context('ubuntu', '24.04', 'debian', 'apt', 'systemd')
 const debian = context('debian', '13', 'debian', 'apt', 'systemd')
 
-test('Ghost checks every x86 CPU before creating baseline state', () => {
+test('Ghost selects a CPU-compatible profile before creating baseline state', () => {
   const command = buildGhostTask(7, ubuntu, { preferred: true, ready: true }).plan.commands[0].command.split('; if [ ! -s ')[0]
   const directory = mkdtempSync(path.join(os.tmpdir(), 'ghost-cpu-'))
   const file = path.join(directory, 'cpuinfo')
   const flags = 'cx16 lahf_lm popcnt pni sse4_1 sse4_2 ssse3'
   try {
     for (const [contents, expected, marker] of [
-      [`flags\t: ${flags}\n`, 0, ''],
-      [`flags: ${flags.replace('sse4_2', 'sse4_20')}\n`, 1, 'CPU_INSTRUCTION_SET_UNSUPPORTED'],
-      [`flags: ${flags}\nflags: cx16\n`, 1, 'CPU_INSTRUCTION_SET_UNSUPPORTED'],
+      [`flags\t: ${flags}\n`, 0, 'standard'],
+      [`flags: ${flags.replace('sse4_2', 'sse4_20')}\n`, 0, 'compat'],
+      [`flags: ${flags}\nflags: cx16\n`, 0, 'compat'],
       ['', 1, 'CPU_FEATURES_UNAVAILABLE']
     ]) {
       writeFileSync(file, contents)
-      const result = spawnSync('/bin/sh', ['-c', `uname () { printf x86_64; }; ${command.replace('/proc/cpuinfo', file)}`], { encoding: 'utf8' })
+      const result = spawnSync('/bin/sh', ['-c', `uname () { printf x86_64; }; ${command.replaceAll('/proc/cpuinfo', file)}; printf '%s' "$image_cpu_profile"`], { encoding: 'utf8' })
       assert.equal(result.status, expected, result.stderr)
-      if (marker) assert.ok(result.stderr.includes(marker))
+      if (expected) assert.ok(result.stderr.includes(marker))
+      else assert.equal(result.stdout, marker)
     }
-    const arm = spawnSync('/bin/sh', ['-c', `uname () { printf aarch64; }; ${command.replace('/proc/cpuinfo', '/missing-cpuinfo')}`], { encoding: 'utf8' })
+    const arm = spawnSync('/bin/sh', ['-c', `uname () { printf aarch64; }; ${command.replaceAll('/proc/cpuinfo', '/missing-cpuinfo')}`], { encoding: 'utf8' })
     assert.equal(arm.status, 0, arm.stderr)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })

@@ -384,6 +384,22 @@ test('rollback attestation uses the original revision identifier without disclos
   assert.throws(() => controller.resolve('host', task.id, view.stateVersion, pending.commandId, 'completed', 'Independent evidence', pending.rollbackRevision), /stale/u)
 })
 
+test('reviewed resolution clears interrupted status only after every uncertain apply outcome is resolved', async t => {
+  const { tasks, task, controller, calls } = await fixture(t)
+  tasks.markRunning('host', task.id)
+  const lease = tasks.acquireExecution('host', task.id, task.plan)
+  for (const commandId of ['first', 'second']) tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_dispatched', commandId, attemptId: commandId + '-attempt' })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  controller.resolve('host', task.id, tasks.stateVersion('host', task.id), 'first', 'completed', 'Authoritative remote job result verified by operator')
+  assert.equal(tasks.get('host', task.id).status, 'running')
+  assert.equal(tasks.interruptedTasks('host').length, 1)
+  controller.resolve('host', task.id, tasks.stateVersion('host', task.id), 'second', 'failed', 'Authoritative remote failure verified by operator')
+  assert.equal(tasks.get('host', task.id).status, 'partial')
+  assert.equal(tasks.interruptedTasks('host').length, 0)
+  assert.deepEqual(tasks.executionState('host', task.id).map(command => command.status), ['completed', 'failed'])
+  assert.deepEqual(calls, [])
+})
+
 test('unknown dispatch requires remote evidence or explicit attestation, never an automatic rerun', async t => {
   const { tasks, task, controller, calls, admin } = await fixture(t)
   const lease = tasks.acquireExecution('host', task.id, task.plan)

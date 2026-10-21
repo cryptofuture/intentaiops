@@ -1,5 +1,7 @@
 import { applicationDatabaseCommand } from './linux-application-database.js'
 import { applicationFileOwnershipGuard } from './linux-php-foundation.js'
+import { linuxX86V2ImageProfile } from './linux-image-cpu.js'
+import { GHOST_MYSQL_IMAGE, GHOST_MYSQL_BUILDKIT, GHOST_MYSQL_COMPAT_VERSION, ghostMysqlCompatibilityImage, ghostMysqlCompatibilityDockerfile } from './ghost-mysql-compat.js'
 
 const VERSION = '6.57.0'
 const COMPOSE_VERSION = '6.56.0'
@@ -16,12 +18,12 @@ const PROJECT = 'webminai-ghost-18110'
 const DATABASE = 'webminai_ghost_18110'
 const DATABASE_USER = 'webminai_ghost'
 const GHOST_IMAGE = 'ghost@sha256:5cb081c6be54af505f28cde86f209e8e43910da0a406226a9e5e98045388599b'
-const MYSQL_IMAGE = 'mysql@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b'
+const MYSQL_IMAGE = GHOST_MYSQL_IMAGE
 const NGINX_IMAGE = 'nginx@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
 const IMAGES = [GHOST_IMAGE, MYSQL_IMAGE, NGINX_IMAGE]
 const DPKG_PACKAGE_FORMAT = '$' + '{db:Status-Abbrev} $' + '{binary:Package} $' + '{Version}\\n'
 const DOCKER_CODENAME_FALLBACK = '$' + '{UBUNTU_CODENAME:-$VERSION_CODENAME}'
-const MYSQL_ROOT_REFERENCE = '$$' + '{MYSQL_ROOT_PASSWORD}'
+const MYSQL_PASSWORD_REFERENCE = '$$' + '{MYSQL_PASSWORD}'
 
 export function buildGhostTask (taskId, linuxContext, docker = {}) {
   if (!Number.isInteger(taskId) || taskId < 1) throw new TypeError('task id must be a positive integer')
@@ -92,27 +94,29 @@ function buildUbuntuTask (taskId, context) {
 function buildComposeTask (taskId, context, docker) {
   if (!docker.ready && docker.installMethod !== 'official-apt') throw new Error('learned Ghost Compose setup requires Docker ready or the reviewed official apt route')
   const state = `/var/lib/webminai/task-state/${taskId}-ghost-compose`
+  const profileProbe = docker.platform === 'macos' ? 'printf standard' : linuxX86V2ImageProfile()
   const commands = [
-    item('capture-baseline', 'baseline', composeBaseline(state), 'Capture Docker, image, service, and task-path state exactly once'),
+    item('capture-baseline', 'baseline', composeBaseline(state, taskId, profileProbe), 'Detect CPU image compatibility and capture Docker, image, service, and task-path state exactly once'),
     item('prepare-docker', 'packages', prepareDocker(state), 'Install Docker and Compose only when the reviewed host route requires them', ['capture-baseline'], 900000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(), 'Generate MySQL credentials on-host without emitting them', ['capture-baseline']),
-    item('write-compose', 'configure', writeCompose(), 'Write the digest-pinned Ghost, MySQL, and nginx Compose project', ['prepare-docker', 'generate-credentials']),
-    item('start-compose', 'services', startCompose(), 'Pull and start the production Ghost and MySQL services with bounded readiness', ['write-compose'], 2700000, 'job'),
-    item('verify-compose', 'verify', verifyCompose(), 'Verify Ghost version, MySQL persistence, marker access, and restart recovery', ['start-compose'], 1200000, 'job')
+    item('write-compose', 'configure', writeCompose(state, taskId, profileProbe), 'Write the reviewed Ghost project: standard maintained MySQL image, or checksum-pinned Debian MySQL build only for a CPU lacking x86-64-v2', ['prepare-docker', 'generate-credentials']),
+    item('acquire-images', 'acquire', acquireComposeImages(state, taskId, profileProbe), 'Acquire pinned images and build the maintained MySQL alternative only when CPU evidence requires it', ['write-compose'], 3600000, 'job'),
+    item('start-compose', 'services', startCompose(), 'Start the reviewed Ghost and MySQL services without pulling or building images', ['acquire-images'], 900000, 'job'),
+    item('verify-compose', 'verify', verifyCompose(state), 'Verify Ghost version, selected MySQL version, persistence, marker access, and application health', ['start-compose'], 1200000, 'job')
   ]
   const revertCommands = [
-    item('remove-compose-project', 'cleanup', removeCompose(state), 'Remove only the task-owned containers, volumes, network, and newly pulled images', [], 1200000, 'job', 'destructive'),
+    item('remove-compose-project', 'cleanup', removeCompose(state, taskId), 'Remove only the task-owned containers, builder, volumes, network, and unchanged newly acquired images', [], 1200000, 'job', 'destructive'),
     item('remove-compose-files', 'cleanup', `set -eu; rm -rf -- ${quote(SERVICE_ROOT)} ${quote(CREDENTIALS)}`, 'Remove task-owned Compose files and protected credentials', ['remove-compose-project'], 300000, undefined, 'destructive'),
     item('restore-docker', 'cleanup', restoreDocker(state), 'Restore Docker package and service state when Docker was introduced by this task', ['remove-compose-files'], 900000, 'job', 'destructive')
   ]
   return envelope({
     context,
     route: 'compose-mysql8',
-    overview: `Deploy official Ghost ${COMPOSE_VERSION}, MySQL 8, and nginx through digest-pinned Compose on port ${PORT}.`,
-    files: [state, SERVICE_ROOT, `${SERVICE_ROOT}/compose.yaml`, `${SERVICE_ROOT}/nginx.conf`, CREDENTIALS],
+    overview: `Deploy official Ghost ${COMPOSE_VERSION}, maintained MySQL 8.4 and nginx on port ${PORT}. CPUs supporting x86-64-v2 use the standard pinned image; older x86 CPUs build a pinned Debian/MySQL ${GHOST_MYSQL_COMPAT_VERSION} alternative. Existing Ghost resources are never adopted or downgraded.`,
+    files: [state, SERVICE_ROOT, `${SERVICE_ROOT}/compose.yaml`, `${SERVICE_ROOT}/nginx.conf`, `${SERVICE_ROOT}/mysql-compat/Dockerfile`, CREDENTIALS],
     commands,
     revertCommands,
-    verifyApplied: verifyCompose(),
+    verifyApplied: verifyCompose(state),
     verifyReverted: `test ! -e ${quote(SERVICE_ROOT)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && { ! command -v docker >/dev/null 2>&1 || ! docker ps -aq --filter label=com.docker.compose.project=${quote(PROJECT)} | grep -q .; }`
   })
 }
@@ -152,7 +156,7 @@ function compatibilityManifest (context, route) {
     selectedRoute: { id: route, status: route === 'no-change-incompatible' ? 'unsupported' : 'supported' },
     components: [
       { profileId: 'nodejs', selectedVersion: route.startsWith('compose') ? 'image-managed' : '22.23.1', source: route.startsWith('compose') ? 'official-container-image' : 'checksum-pinned-official-node-archive', status: route === 'no-change-incompatible' ? 'unavailable' : 'supported' },
-      { profileId: 'mysql', selectedVersion: '8', source: route.startsWith('compose') ? 'official-container-image' : 'ubuntu-package', status: route === 'no-change-incompatible' ? 'unavailable' : 'supported' },
+      { profileId: 'mysql', selectedVersion: route.startsWith('compose') ? '8.4 (hardware-selected image)' : '8', source: route.startsWith('compose') ? 'official-image-or-checksum-pinned-vendor-packages' : 'ubuntu-package', status: route === 'no-change-incompatible' ? 'unavailable' : 'supported' },
       { profileId: 'nginx', selectedVersion: 'distribution-or-image', source: 'reviewed-profile', status: route === 'no-change-incompatible' ? 'not-selected' : 'supported' }
     ]
   }
@@ -299,18 +303,18 @@ function ubuntuRestore (state, paths) {
   return join(commands)
 }
 
-function composeBaseline (state) {
+function composeImages (taskId) { return [...IMAGES, ghostMysqlCompatibilityImage(taskId), GHOST_MYSQL_BUILDKIT] }
+
+function composeBaseline (state, taskId, profileProbe) {
   return join([
-    'set -eu', composeCpuCheck(), `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, `test ! -e ${quote(SERVICE_ROOT)}`, `test ! -e ${quote(CREDENTIALS)}`,
+    'set -eu', `image_cpu_profile=$(${profileProbe})`, `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, `test ! -e ${quote(SERVICE_ROOT)}`, `test ! -e ${quote(CREDENTIALS)}`,
+    `if command -v docker >/dev/null 2>&1; then test -z "$(docker ps -aq --filter label=com.docker.compose.project=${quote(PROJECT)})"; test -z "$(docker volume ls -q --filter label=com.docker.compose.project=${quote(PROJECT)})"; test -z "$(docker network ls -q --filter label=com.docker.compose.project=${quote(PROJECT)})"; if [ "$image_cpu_profile" = compat ]; then ! docker image inspect ${quote(ghostMysqlCompatibilityImage(taskId))} >/dev/null 2>&1; fi; fi`,
     `install -d -o root -g root -m 0700 ${quote(state)}`, `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)} | LC_ALL=C sort -u > ${quote(`${state}/packages.before`)}`,
+    `printf '%s\\n' "$image_cpu_profile" > ${quote(`${state}/image-profile`)}`,
     `systemctl is-active --quiet docker 2>/dev/null && : > ${quote(`${state}/docker.active`)} || true`, `command -v docker >/dev/null 2>&1 && : > ${quote(`${state}/docker.existed`)} || true`,
-    ...IMAGES.map((image, index) => `docker image inspect ${quote(image)} >/dev/null 2>&1 && : > ${quote(`${state}/image-${index}.existed`)} || true`),
+    ...composeImages(taskId).map((image, index) => `docker image inspect ${quote(image)} >/dev/null 2>&1 && : > ${quote(`${state}/image-${index}.existed`)} || true`),
     'fi', 'printf \'%s\\n\' baseline-ready'
   ])
-}
-
-function composeCpuCheck () {
-  return 'case "$(uname -m)" in x86_64|amd64) awk -F: \'/^flags[[:space:]]*:/ { seen=1; gsub(/[[:space:]]+/, " ", $2); flags=" " $2 " "; split("cx16 lahf_lm popcnt pni sse4_1 sse4_2 ssse3", required, " "); for (i in required) if (!index(flags, " " required[i] " ")) missing=1 } END { if (!seen) { print "CPU_FEATURES_UNAVAILABLE: cannot verify Ghost MySQL image prerequisites; no changes made" > "/dev/stderr"; exit 1 } if (missing) { print "CPU_INSTRUCTION_SET_UNSUPPORTED: the pinned Ghost MySQL image requires x86-64-v2; no changes made" > "/dev/stderr"; exit 1 } }\' /proc/cpuinfo;; esac'
 }
 
 function prepareDocker (state) {
@@ -326,35 +330,47 @@ function prepareDocker (state) {
   ])
 }
 
-function writeCompose () {
+function writeCompose (state, taskId, profileProbe) {
   const compose = [
-    'services:', '  db:', `    image: ${MYSQL_IMAGE}`, '    restart: unless-stopped', `    env_file: ${CREDENTIALS}/credentials.env`, '    environment:', `      MYSQL_DATABASE: ${DATABASE}`, `      MYSQL_USER: ${DATABASE_USER}`, '    volumes:', '      - mysql_data:/var/lib/mysql', '    healthcheck:', `      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root --password=\\"${MYSQL_ROOT_REFERENCE}\\""]`, '      interval: 5s', '      timeout: 5s', '      retries: 120', '      start_period: 30s',
+    'services:', '  db:', `    image: ${MYSQL_IMAGE}`, '    restart: unless-stopped', `    env_file: ${CREDENTIALS}/credentials.env`, '    environment:', `      MYSQL_DATABASE: ${DATABASE}`, `      MYSQL_USER: ${DATABASE_USER}`, '    volumes:', '      - mysql_data:/var/lib/mysql', '    healthcheck:', `      test: ${JSON.stringify(['CMD-SHELL', `MYSQL_PWD="${MYSQL_PASSWORD_REFERENCE}" mysql --protocol=TCP -h 127.0.0.1 --user=${DATABASE_USER} --database=${DATABASE} --batch --skip-column-names --execute="SELECT 1" >/dev/null`])}`, '      interval: 5s', '      timeout: 5s', '      retries: 120', '      start_period: 30s',
     '  ghost:', `    image: ${GHOST_IMAGE}`, '    restart: unless-stopped', `    env_file: ${CREDENTIALS}/credentials.env`, '    environment:', '      NODE_ENV: production', '      database__client: mysql', '      database__connection__host: db', `      database__connection__user: ${DATABASE_USER}`, `      database__connection__database: ${DATABASE}`, '    volumes:', '      - ghost_content:/var/lib/ghost/content', '    depends_on:', '      db:', '        condition: service_healthy', '    healthcheck:', `      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:${GHOST_PORT}/blog/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]`, '      interval: 5s', '      timeout: 5s', '      retries: 120', '      start_period: 30s',
     '  nginx:', `    image: ${NGINX_IMAGE}`, '    restart: unless-stopped', '    ports:', `      - "${PORT}:${PORT}"`, '    volumes:', `      - ${SERVICE_ROOT}/nginx.conf:/etc/nginx/conf.d/default.conf:ro`, '    depends_on:', '      ghost:', '        condition: service_healthy',
     'volumes:', '  mysql_data:', '  ghost_content:'
   ].join('\n')
   const nginx = ['server {', `    listen ${PORT};`, '    server_name _;', '    location = / { default_type text/plain; return 200 "' + MARKER + '\\n"; }', '    location /blog/ {', `        proxy_pass http://ghost:${GHOST_PORT};`, '        proxy_set_header Host $host;', '        proxy_set_header X-Real-IP $remote_addr;', '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;', '        proxy_set_header X-Forwarded-Proto $scheme;', '    }', '}'].join('\n')
   return join([
-    'set -eu', `install -d -o root -g root -m 0755 ${quote(SERVICE_ROOT)}`,
+    'set -eu', `image_cpu_profile=$(cat ${quote(`${state}/image-profile`)})`, `test "$image_cpu_profile" = "$(${profileProbe})"`, `install -d -o root -g root -m 0755 ${quote(SERVICE_ROOT)}`,
     "primary=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (field=1; field<=NF; field++) if ($field == \"src\") { print $(field+1); exit }}' || true)", "[ -n \"$primary\" ] || primary=$(hostname -I 2>/dev/null | awk '{print $1}')", "case \"$primary\" in ''|*[!0-9a-fA-F:.]*) printf 'could not resolve a safe primary address\\n' >&2; exit 1;; esac",
     `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)}); root_password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_root_password`)})`,
     `umask 077; printf 'MYSQL_PASSWORD=%s\\nMYSQL_ROOT_PASSWORD=%s\\ndatabase__connection__password=%s\\nurl=http://%s:${PORT}/blog/\\nprivacy__useUpdateCheck=false\\n' "$password" "$root_password" "$password" "$primary" > ${quote(`${CREDENTIALS}/credentials.env`)}`, `chmod 0600 ${quote(`${CREDENTIALS}/credentials.env`)}`,
     `printf '%s\\n' ${compose.split('\n').map(quote).join(' ')} > ${quote(`${SERVICE_ROOT}/compose.yaml`)}`, `chmod 0644 ${quote(`${SERVICE_ROOT}/compose.yaml`)}`,
+    `case "$image_cpu_profile" in standard) :;; compat) install -d -o root -g root -m 0755 ${quote(`${SERVICE_ROOT}/mysql-compat`)}; printf '%s\\n' ${ghostMysqlCompatibilityDockerfile().split('\n').map(quote).join(' ')} > ${quote(`${SERVICE_ROOT}/mysql-compat/Dockerfile`)}; sed -i ${quote(`s!${MYSQL_IMAGE}!${ghostMysqlCompatibilityImage(taskId)}!`)} ${quote(`${SERVICE_ROOT}/compose.yaml`)};; *) exit 1;; esac`,
     `printf '%s\\n' ${nginx.split('\n').map(quote).join(' ')} > ${quote(`${SERVICE_ROOT}/nginx.conf`)}`, `chmod 0644 ${quote(`${SERVICE_ROOT}/nginx.conf`)}`,
     `docker compose -p ${quote(PROJECT)} -f ${quote(`${SERVICE_ROOT}/compose.yaml`)} config --quiet`, 'printf \'%s\\n\' compose-ready'
   ])
 }
 
-function startCompose () {
-  return join(['set -eu', `docker compose -p ${quote(PROJECT)} -f ${quote(`${SERVICE_ROOT}/compose.yaml`)} pull`, `docker compose -p ${quote(PROJECT)} -f ${quote(`${SERVICE_ROOT}/compose.yaml`)} up -d`, waitCompose('db'), waitCompose('ghost'), `curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${PORT}/ | grep -Fx ${quote(MARKER)}`])
+function acquireComposeImages (state, taskId, profileProbe) {
+  const compose = `docker compose --parallel 1 -p ${quote(PROJECT)} -f ${quote(`${SERVICE_ROOT}/compose.yaml`)}`
+  const builder = `intentaiops-ghost-mysql-${taskId}`
+  return join(['set -eu', `profile=$(cat ${quote(`${state}/image-profile`)})`, `test "$profile" = "$(${profileProbe})"`,
+    `case "$profile" in standard) ${compose} pull --quiet;; compat) ! docker image inspect ${quote(ghostMysqlCompatibilityImage(taskId))} >/dev/null 2>&1; ! docker buildx inspect ${quote(builder)} >/dev/null 2>&1; docker buildx create --name ${quote(builder)} --driver docker-container --driver-opt image=${quote(GHOST_MYSQL_BUILDKIT)} --driver-opt network=host >/dev/null; : > ${quote(`${state}/builder-created`)}; cleanup_builder() { docker buildx rm --force ${quote(builder)} >/dev/null 2>&1 || true; }; trap cleanup_builder EXIT HUP INT TERM; docker buildx build --builder ${quote(builder)} --progress quiet --network host --load --tag ${quote(ghostMysqlCompatibilityImage(taskId))} ${quote(`${SERVICE_ROOT}/mysql-compat`)}; docker image inspect ${quote(ghostMysqlCompatibilityImage(taskId))} --format '{{.Id}}' > ${quote(`${state}/compat-image.after`)}; cleanup_builder; trap - EXIT HUP INT TERM; ${compose} pull --quiet ghost nginx;; *) exit 1;; esac`,
+    "printf '%s\\n' images-ready"])
 }
 
-function verifyCompose () {
+function startCompose () {
+  const compose = `docker compose -p ${quote(PROJECT)} -f ${quote(`${SERVICE_ROOT}/compose.yaml`)}`
+  return join(['set -eu', `${compose} up -d --pull never`, waitCompose('db'), waitCompose('ghost'), `frontend_ready=; for attempt in $(seq 1 60); do if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${PORT}/ | grep -Fx ${quote(MARKER)}; then frontend_ready=yes; break; fi; sleep 2; done; [ "$frontend_ready" = yes ]`])
+}
+
+function verifyCompose (state) {
   const compose = `docker compose -p ${quote(PROJECT)} -f ${quote(`${SERVICE_ROOT}/compose.yaml`)}`
   return join([
     'set -eu', waitCompose('db'), waitCompose('ghost'),
     `${compose} exec -T ghost node -p "require('/var/lib/ghost/current/package.json').version" | grep -Fx ${quote(COMPOSE_VERSION)}`,
-    `${compose} exec -T db sh -c 'mysql -u root --password="$MYSQL_ROOT_PASSWORD" --batch --skip-column-names ${DATABASE} -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()"' | awk '$1 > 0 { ok=1 } END { exit !ok }'`,
+    `profile=$(cat ${quote(`${state}/image-profile`)}); case "$profile" in standard) expected_mysql=8.4.11;; compat) expected_mysql=${GHOST_MYSQL_COMPAT_VERSION};; *) exit 1;; esac`,
+    `${compose} exec -T db mysql --version | grep -F "Ver $expected_mysql"`,
+    `${compose} exec -T db sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -u root --batch --skip-column-names ${DATABASE} -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE()"' | awk '$1 > 0 { ok=1 } END { exit !ok }'`,
     `${compose} exec -T ghost node -e "fetch('http://127.0.0.1:${GHOST_PORT}/blog/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"`,
     `curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${PORT}/ | grep -Fx ${quote(MARKER)}`,
     `curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/blog/ >/dev/null`,
@@ -362,10 +378,10 @@ function verifyCompose () {
   ])
 }
 
-function removeCompose (state) {
+function removeCompose (state, taskId) {
   const compose = `docker compose -p ${quote(PROJECT)} -f ${quote(`${SERVICE_ROOT}/compose.yaml`)}`
-  const commands = ['set -eu', `[ -d ${quote(state)} ] || { printf '%s\n' already-reverted; exit 0; }`, `if command -v docker >/dev/null 2>&1 && [ -f ${quote(`${SERVICE_ROOT}/compose.yaml`)} ]; then ${compose} down --volumes --remove-orphans || true; fi`]
-  IMAGES.forEach((image, index) => commands.push(`if command -v docker >/dev/null 2>&1 && [ ! -e ${quote(`${state}/image-${index}.existed`)} ]; then docker image rm ${quote(image)} >/dev/null 2>&1 || true; fi`))
+  const commands = ['set -eu', `[ -d ${quote(state)} ] || { printf '%s\n' already-reverted; exit 0; }`, `profile=$(cat ${quote(`${state}/image-profile`)}); case "$profile" in standard|compat) :;; *) exit 1;; esac`, `if command -v docker >/dev/null 2>&1; then if [ -e ${quote(`${state}/builder-created`)} ]; then docker buildx rm --force ${quote(`intentaiops-ghost-mysql-${taskId}`)} >/dev/null 2>&1 || true; ! docker buildx inspect ${quote(`intentaiops-ghost-mysql-${taskId}`)} >/dev/null 2>&1; fi; if [ -f ${quote(`${SERVICE_ROOT}/compose.yaml`)} ]; then ${compose} down --volumes --remove-orphans; fi; fi`]
+  composeImages(taskId).forEach((image, index) => commands.push(`if command -v docker >/dev/null 2>&1 && [ ! -e ${quote(`${state}/image-${index}.existed`)} ]${index === 1 ? ' && [ "$profile" = standard ]' : index >= 3 ? ` && [ "$profile" = compat ] && [ -e ${quote(`${state}/builder-created`)} ]` : ''}; then ${index === 3 ? `if docker image inspect ${quote(image)} >/dev/null 2>&1; then test -s ${quote(`${state}/compat-image.after`)}; test "$(docker image inspect ${quote(image)} --format '{{.Id}}')" = "$(cat ${quote(`${state}/compat-image.after`)})"; fi; ` : ''}docker image rm ${quote(image)} >/dev/null 2>&1 || true; fi`))
   return join(commands)
 }
 

@@ -19,6 +19,55 @@ import { recoveryBaselineCommand, inspectRecoveryBaseline } from '../src/remote-
 const target = 'SHA256:' + 'a'.repeat(64)
 const options = { platform: 'linux' }
 
+test('durable recovery writes allow bounded flush time without automatic retry', async () => {
+  const calls = []
+  const transport = new RemoteRecoveryTransport({ platform: 'linux', client: { async runCommand (command, options) { calls.push(options.timeoutSeconds); return { exitCode: 0, stdout: '{"available":false}' } } } })
+  assert.equal(await transport.key(), null)
+  assert.equal(await transport.key({ initialize: true }), null)
+  assert.deepEqual(calls, [15, 60])
+})
+
+for (const mode of ['gnu', 'gnu-alias', 'portable', 'failed-fsync']) {
+  test(`recovery durability uses bounded ledger inode flushes with safe fallback: ${mode}`, async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-ledger-flush-'))
+    const trace = path.join(directory, 'flush-calls')
+    try {
+      const implementation = mode === 'portable' ? 'BusyBox' : mode === 'gnu-alias' ? 'sync (uutils coreutils) 0.10.0' : 'sync (GNU coreutils) 9.11'
+      const flush = mode === 'gnu' || mode === 'gnu-alias' ? 'test "$#" -gt 0; command sync "$@"' : mode === 'portable' ? 'test "$#" -eq 0' : 'return 1'
+      const body = `if [ "\${1-}" = --version ]; then printf '%s\\n' '${implementation}'; return 0; fi; printf '%s\\n' "$*" >> '${trace}'; ${flush}`
+      const alias = mode === 'gnu-alias' ? body.replace(implementation, 'sync (GNU coreutils) 9.7') : 'return 127'
+      const transport = new RemoteRecoveryTransport({ client: shellClient(directory, body, alias), platform: 'linux' })
+      if (mode === 'failed-fsync') {
+        await assert.rejects(transport.key({ initialize: true }))
+        assert.equal(existsSync(directory + '/parent/recovery/signing.pem'), false)
+        assert.equal(existsSync(directory + '/parent/recovery/.write-lock'), false)
+      } else {
+        assert.ok(await transport.key({ initialize: true }))
+        if (mode === 'gnu' || mode === 'gnu-alias') {
+          const plan = buildCommonTask('systemd-service', 99, options).plan
+          const state = new RemoteRecoveryState(directory + '/client')
+          state.register(commonTaskRecoveryManifest({ catalogId: 'systemd-service', taskId: 99, target, options, plan }))
+          const journal = new RemoteCommonTaskJournal({ transport, state, target, taskId: 99, plan })
+          await journal.append({ type: 'plan_approved', commandId: plan.commands[0].id })
+          await journal.release()
+        }
+      }
+      const calls = readFileSync(trace, 'utf8').trimEnd().split('\n')
+      if (mode === 'portable') assert.ok(calls.every(line => line === ''))
+      else {
+        assert.ok(calls.every(line => line.startsWith('-- ')))
+        assert.ok(calls.every(line => line.includes('/parent/recovery/.write-lock') && line.includes('/parent/recovery') && line.includes(directory)))
+        if (mode === 'gnu' || mode === 'gnu-alias') {
+          assert.ok(calls.some(line => line.includes('/.write-lock/record')))
+          assert.ok(calls.some(line => line.includes('/.write-lock/head')))
+          assert.ok(calls.some(line => line.includes('/owner')))
+          assert.ok(calls.some(line => line.includes('/task-99')))
+        }
+      }
+    } finally { rmSync(directory, { recursive: true, force: true }) }
+  })
+}
+
 test('remote storage failures explain allowlisted conflicts without disclosing arbitrary stderr', async () => {
   for (const [stderr, expected] of [
     ['Legacy remote task state is already occupied\n', /legacy task state is occupied; preserve it and review a new task identity/u],
@@ -356,19 +405,21 @@ for (const takeover of [false, true]) {
   })
 }
 
-test('signed common-task records retain transport recovery without replay or losing confirmed baseline evidence', async () => {
+test('transport recovery callbacks stay local while signed outcomes and rollback remain durable', async () => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-recovery-reconnect-'))
   try {
     const storage = shellClient(directory)
     const settings = { servers: { lab: { hostFingerprint: target } } }
-    let executed = 0
+    let executed = 0; let recovering = false
     const client = {
       async health () { return { platform: 'linux' } },
       async runCommand (command, request) {
+        assert.equal(recovering, false, 'Recovery callbacks must not re-enter their SSH transport')
         if (command.includes('intentaiops-recovery')) return storage.runCommand(command)
         if (command.includes('safe_parent ()')) return { exitCode: 0, stdout: 'SHA2-256(stdin)= ' + 'd'.repeat(64), stderr: '' }
         executed++
-        await request.onRecovery({ state: 'reconnecting', attempt: 1, attempts: 3 })
+        recovering = true
+        try { await request.onRecovery({ state: 'reconnecting', attempt: 1, attempts: 3 }) } finally { recovering = false }
         return { exitCode: 0, stdout: '', stderr: '' }
       }
     }
@@ -382,20 +433,29 @@ test('signed common-task records retain transport recovery without replay or los
     const plan = buildCommonTask('systemd-service', task.id, options).plan
     admin.saveTaskPlan('lab', task.id, plan, { catalogId: 'systemd-service', options, target })
     const connection = { settings, passphrase: 'unused', serverId: 'lab' }
-    const results = await admin.execute({ ...connection, taskId: task.id, plan, approve: async () => true })
+    const results = await admin.execute({ ...connection, taskId: task.id, plan, approve: async () => true, executionObserver: event => assert.notEqual(event.type, 'execution_recovery') })
     assert.equal(results[0].status, 'completed')
     assert.equal(results[0].recoveryRequired, true)
     assert.equal(admin.tasks.control('lab', task.id).action, 'pause')
     assert.equal(executed, 1)
     const executionId = admin.remoteRecovery.get(target, task.id).manifest.executionId
     const verified = await admin.inspectRemoteCommonTask({ ...connection, executionId })
-    assert.equal(verified.records.filter(record => record.event === 'execution_recovery').length, 2)
+    assert.equal(verified.records.filter(record => record.event === 'execution_recovery').length, 0)
+    assert.equal(admin.tasks.executionEvents('lab', task.id).filter(event => event.type === 'execution_recovery').length, 2)
     assert.equal(verified.records.at(-1).event, 'execution_paused')
     const fresh = makeAdmin('fresh')
     const proposal = await fresh.prepareRemoteCommonTaskRecovery({ ...connection, executionId, options })
     assert.ok(proposal.plan.commands.length)
     assert.equal(fresh.tasks.executionEvents('lab', proposal.taskId).length, 0)
     assert.equal(executed, 1)
+    admin.tasks.saveResults('lab', task.id, results)
+    const rollback = await admin.revertTask({ ...connection, taskId: task.id, approve: async () => true })
+    assert.equal(rollback[0].status, 'completed')
+    assert.equal(admin.tasks.get('lab', task.id).status, 'reverting')
+    assert.ok(admin.tasks.interruptedTasks('lab').some(row => row.id === task.id))
+    const afterRollback = await admin.inspectRemoteCommonTask({ ...connection, executionId })
+    assert.ok(afterRollback.records.some(record => record.operation === 'rollback' && record.event === 'command_completed'))
+    assert.ok(!afterRollback.records.some(record => record.event === 'execution_recovery'))
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
@@ -438,6 +498,35 @@ test('authoritative job reconciliation signs completion and baseline without rep
     assert.ok(regenerateCommonTaskRecovery({ ...verified, options, baselineDigest: 'd'.repeat(64) }).plan)
     await admin.reconcileTask({ ...connection, taskId: task.id })
     assert.equal(statusReads, 1)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('reconciliation clears stale running status after a ledger error without replay', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-reconcile-status-'))
+  try {
+    let reads = 0; let journals = 0
+    const admin = new AdminService({ dataRoot: directory, settings: { async decryptServer () { return { connectionUrl: 'ssh://fixture' } } } })
+    admin.netdata = () => ({ async jobStatus () { reads++; return { state: 'succeeded', exitCode: 0 } } })
+    admin.remoteTaskJournal = async () => { journals++; throw new Error('ledger unavailable') }
+    const task = admin.createTask('lab', 'Reconcile known completion')
+    const plan = buildCommonTask('systemd-service', task.id, options).plan
+    plan.commands.push({ ...plan.commands[0], id: 'pending-next', command: 'true', dependsOn: [plan.commands[0].id], risk: 'read' })
+    admin.saveTaskPlan('lab', task.id, plan)
+    admin.tasks.markRunning('lab', task.id)
+    const lease = admin.tasks.acquireExecution('lab', task.id, plan)
+    for (const type of ['command_prepared', 'command_dispatched', 'command_acknowledged']) admin.tasks.appendExecutionEvent('lab', task.id, lease.owner, { type, commandId: plan.commands[0].id, attemptId: '12345678-1234-1234-1234-123456789abc', metadata: { jobId: 'a'.repeat(32) } })
+    admin.tasks.releaseExecution('lab', task.id, lease.owner)
+    const connection = { settings: { servers: { lab: {} } }, passphrase: 'unused', serverId: 'lab', taskId: task.id }
+    await assert.rejects(admin.reconcileTask(connection), /ledger unavailable/u)
+    assert.equal(admin.tasks.executionState('lab', task.id)[0].status, 'completed')
+    assert.equal(admin.tasks.get('lab', task.id).status, 'running')
+    const states = await admin.reconcileTask(connection)
+    assert.equal(states[0].status, 'completed')
+    assert.equal(states.at(-1).status, 'pending')
+    assert.equal(admin.tasks.get('lab', task.id).status, 'partial')
+    assert.deepEqual(admin.tasks.interruptedTasks('lab'), [])
+    assert.equal(reads, 1)
+    assert.equal(journals, 1)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
@@ -745,7 +834,7 @@ test('native n8n recovery refuses unknown package families rather than guessing 
   for (const family of [undefined, '__proto__', 'unknown']) assert.throws(() => recoveryBaselineCommand('n8n-linux', 85, family), /audited package family/u)
 })
 
-function shellClient (directory) {
+function shellClient (directory, syncBody = ':', aliasBody = 'return 127') {
   const owner = os.userInfo().username
   mkdirSync(path.join(directory, 'parent'), { mode: 0o700 })
   return {
@@ -759,7 +848,7 @@ function shellClient (directory) {
         .replaceAll('-user root', '-user ' + owner)
         .replaceAll('safe_directory "$' + '{ancestor%/*}"', ':')
         .replaceAll('safe_directory "$current"', ':')
-      const result = spawnSync('/bin/bash', ['-c', 'id () { printf 0; }; sync () { :; }; export -f id sync; ' + script.replace(/^sh -c /u, 'bash -c ')], { encoding: 'utf8', timeout: 15000, shell: false, env: { ...process.env, BASH_ENV: undefined } })
+      const result = spawnSync('/bin/bash', ['-c', `id () { printf 0; }; sync () { ${syncBody}; }; gnusync () { ${aliasBody}; }; export -f id sync gnusync; ` + script.replace(/^sh -c /u, 'bash -c ')], { encoding: 'utf8', timeout: 15000, shell: false, env: { ...process.env, BASH_ENV: undefined } })
       return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr }
     }
   }

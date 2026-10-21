@@ -430,7 +430,8 @@ export class TaskStore {
   }
 
   saveRevertResults (serverId, taskId, results) {
-    const completed = Array.isArray(results) && results.length > 0 && results.every(result => result.status === 'completed')
+    const marker = this.withDatabase(serverId, database => database.prepare("SELECT metadata_json FROM execution_events WHERE task_id = ? AND type = 'rollback_completed' ORDER BY id DESC LIMIT 1").get(taskId))
+    const completed = Array.isArray(results) && results.length > 0 && results.every(result => result.status === 'completed') && (!marker || JSON.parse(marker.metadata_json).completed === true)
     return this.update(serverId, taskId, completed ? 'reverted' : 'revert_failed', {
       revertResults: results,
       revertedAt: completed ? Math.floor(Date.now() / 1000) : null

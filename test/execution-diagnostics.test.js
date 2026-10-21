@@ -18,6 +18,19 @@ const before = { availability: 'available', platform: 'linux', bootId: 'boot-a',
 const codes = observations => observations.map(value => value.code)
 const window = { uid: 'pod-a', startedAt: '2026-10-16T01:00:00Z', observedAt: '2026-10-16T02:00:00Z' }
 
+test('allowlisted Magento checks survive output redaction without confusing HTTP and execution deadlines', () => {
+  const result = { exitCode: 1, timedOut: false, stderr: 'curl: (28) Operation timed out after 60001 milliseconds\nMAGENTO_VERIFICATION_FAILED:http\nsecret-do-not-export' }
+  const diagnostics = executionDiagnostics({ result })
+  const observation = diagnostics.find(value => value.code === 'APPLICATION_HEALTH_TIMEOUT')
+  assert.equal(observation.confidence, 'confirmed')
+  assert.deepEqual(observation.evidence, { application: 'magento', check: 'http' })
+  assert.ok(!codes(diagnostics).includes('EXECUTION_TIMEOUT'))
+  assert.ok(!JSON.stringify(diagnostics).includes('secret-do-not-export'))
+  assert.ok(!codes(executionDiagnostics({ result: { ...result, exitCode: 0 } })).includes('APPLICATION_HEALTH_TIMEOUT'))
+  assert.ok(codes(executionDiagnostics({ result: { exitCode: 1, stderr: 'MAGENTO_VERIFICATION_FAILED:cache' } })).includes('APPLICATION_VERIFICATION_FAILED'))
+  assert.ok(!codes(executionDiagnostics({ result: { exitCode: 1, stderr: 'MAGENTO_VERIFICATION_FAILED:http-secret' } })).includes('APPLICATION_VERIFICATION_FAILED'))
+})
+
 test('execution outcome is independent of OOM, reboot, timeout and cancellation evidence', () => {
   const result = { state: 'unknown', exitCode: null, signal: 9 }
   const observations = executionDiagnostics({ result, before, after: { ...before, oomKills: 1 } })

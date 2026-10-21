@@ -337,6 +337,7 @@ export class OperatorController {
     try {
       this.checkVersion(hostId, taskId, expectedVersion)
       this.tasks.appendExecutionEvent(hostId, taskId, lease.owner, { type: status === 'completed' ? 'command_completed' : 'command_failed', commandId, attemptId: command.attemptId, metadata: { reconciled: true, operatorReviewed: true, evidence: '[operator attestation recorded; raw evidence withheld]', evidenceFingerprint: planFingerprint(this.sanitize(evidence)), ...(rollbackRevision ? { operation: 'rollback', rollbackRevision } : {}) } })
+      if (!rollbackRevision && task.status === 'running' && !this.tasks.executionState(hostId, taskId).some(command => command.status === 'uncertain')) this.tasks.saveResults(hostId, taskId, task.results ?? [])
     } finally { this.tasks.releaseExecution(hostId, taskId, lease.owner) }
     return this.inspect(hostId, taskId)
   }

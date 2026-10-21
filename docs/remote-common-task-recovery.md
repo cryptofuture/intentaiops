@@ -131,8 +131,16 @@ Linux uses `/var/lib/intentaiops/recovery`; FreeBSD uses
 Keys and record files are root-owned0600 beneath private0700 storage. Writable
 ancestors, symlinks and multiply linked files are rejected. A bounded atomic mkdir
 lock serializes metadata publication. A lock left by a killed metadata writer is
-not automatically deleted. POSIX publication uses ordered `sync` and rename;
-its global flush cost needs live measurement before performance claims.
+not automatically deleted. On Linux with GNU Coreutils (including Ubuntu's
+installed `gnusync` alternative), publication fsyncs the
+ledger files and their containing/ancestor directories around ordered renames,
+without flushing unrelated Docker writes. Failed fsync blocks publication.
+Other POSIX implementations retain ordered global `sync` and rename. This is
+not an automatic stale-lock recovery mechanism or a measured performance claim.
+
+Transport-progress notifications stay in the local durable journal. A reconnect
+callback must not write over the SSH connection it is restoring. Signed remote
+intent, job acknowledgements, outcomes and pause/rollback events are unchanged.
 
 Windows uses `C:\ProgramData\IntentAIOps\Recovery`, LocalSystem execution,
 SYSTEM/Administrators-only ACLs, CNG, write-through files and atomic publication.

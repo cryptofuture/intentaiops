@@ -40,6 +40,11 @@ export function executionDiagnostics ({ item = { id: 'execution' }, result = {},
     ['MEMORY_ALLOCATION_FAILED', /\bENOMEM\b|cannot allocate memory|insufficient_memory|fatal error:.*heap out of memory/iu, 'remote-command', 'The command reported a memory allocation failure; this does not prove a kernel OOM kill.']
   ]
   if (failed) {
+    const check = /MAGENTO_VERIFICATION_FAILED:(services|socket|configuration|index-marker|indexers|cron-marker|version|search|cache|http)(?:\s|$)/u.exec(text)?.[1]
+    if (check) {
+      const timeout = check === 'http' && /curl: \(28\)/u.test(text)
+      add(timeout ? 'APPLICATION_HEALTH_TIMEOUT' : 'APPLICATION_VERIFICATION_FAILED', 'confirmed', 'remote-command', timeout ? 'Magento HTTP verification reached its client deadline. This is not proof of an execution timeout or failure of earlier changes.' : `Magento verification failed at the ${check} check. Inspect that component before reviewing continuation.`, { application: 'magento', check }, 'catalog-verification')
+    }
     for (const [code, pattern, scope, explanation] of patterns) if (pattern.test(text)) add(code, 'confirmed', scope, explanation, {}, 'explicit-error')
     const failure = classifyFailure({ item, result, error })
     const explanation = failure.code === 'RUNTIME_VERSION_INCOMPATIBLE'
