@@ -679,8 +679,7 @@ This is intentionally a root administration boundary, not a restricted monitorin
 `intentaiops --web` and `intentaiops console` start the same authenticated,
 loopback-only foreground workspace. Add `--console-actions` for reviewed host
 and task controls, and `--web-port` for a fixed port. Credentials stay in the
-launch terminal. See [workspace usage and limitations](docs/web-workspace.md)
-and [third-party visual attribution](docs/muxin-provenance.md).
+launch terminal. See [workspace usage and limitations](docs/web-workspace.md).
 
 CLI and browser preparation share `src/task-preparation.js`; completion reports
 share `src/task-completion-report.js`. `OperatorWorkspace` persists asynchronous
@@ -748,6 +747,11 @@ It runs read-only, non-interactively, ephemerally, with user config and reposito
 - plugin-only `activate`: require an existing Netdata installation, update only the Intent AI Ops artifacts/configuration, and preserve pre-existing ownership.
 - `deactivate`: remove the plugin, remote key, and managed configuration. Legacy Intent AI Ops helper and sudoers files are also removed. Pre-existing Netdata is preserved.
 - `deactivate` with managed removal: uninstall Netdata only if Intent AI Ops originally installed it.
+
+POSIX deactivation refuses job directories without a durable result and never
+signals PIDs from retained job history. Reconcile unfinished work first.
+Choose **Install/update plugin only (keep existing Netdata)** to refresh an
+existing host's lifecycle runner, even when the native plugin version is unchanged.
 - `reactivate`: repeat activation at any time using system SSH.
 
 While Stage 2 is active, its managed Netdata configuration block binds the Agent API to loopback, including for a pre-existing Netdata installation. Removing Stage 2 removes that block and restores the pre-existing configuration. Intent AI Ops reaches the API only through system SSH and remote `127.0.0.1`; it does not create a local tunnel or expose port 19999.

@@ -1,3 +1,4 @@
+import { mariadbComposeBootstrap } from './mariadb-compose-bootstrap.js'
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
 import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile } from './linux-php-foundation.js'
 
@@ -109,7 +110,7 @@ function configureComposePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'pull-images', buildImagesCommand(state, taskId), 'Build the digest-verified Moodle PHP-FPM image with task-scoped BuildKit state and pull pinned nginx and MariaDB images')
   const pullImages = built.plan.commands.find(item => item.id === 'pull-images')
   pullImages.executionMode = 'job'
-  pullImages.timeoutMs = 45 * 60 * 1000
+  pullImages.timeoutMs = 60 * 60 * 1000
   delete pullImages.retry
   extendComposeBuilderCleanup(built.plan, builder)
   insertComposeSwap(built.plan, state)
@@ -492,12 +493,12 @@ function composeCommand (returnAssets = false) {
     '  db:',
     `    image: ${DATABASE_IMAGE}`,
     '    restart: unless-stopped',
+    ...mariadbComposeBootstrap(['--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci']),
     '    environment:',
     `      MARIADB_DATABASE: ${DATABASE}`,
     `      MARIADB_USER: ${DATABASE}`,
     '      MARIADB_PASSWORD_FILE: /run/secrets/db_password',
     '      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password',
-    '    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]',
     '    secrets: [db_password, db_root_password]',
     '    volumes: [db_data:/var/lib/mysql]',
     '    healthcheck:',

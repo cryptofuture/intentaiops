@@ -1,3 +1,5 @@
+import { mariadbComposeBootstrap } from './mariadb-compose-bootstrap.js'
+
 const SITE = 'wordpress'
 const PROJECT = 'webminai-wordpress-18101'
 const SERVICE_ROOT = `/opt/webminai/services/${SITE}`
@@ -31,8 +33,8 @@ export function buildWordpressComposeTask (taskId, linuxContext, docker) {
     command('prepare-docker', prepareDockerCommand(state), 'Install Docker Engine and Compose from the official apt repository only when they are not ready', ['capture-baseline']),
     command('generate-credentials', credentialsCommand(), 'Generate protected database and administrator credentials on the host', ['capture-baseline']),
     command('write-compose', composeCommand(), 'Write the pinned WordPress Compose application using file-backed secrets', ['prepare-docker', 'generate-credentials']),
-    command('pull-images', pullCommand(state), 'Pull and record the four pinned images in a dedicated bounded operation', ['write-compose']),
-    command('start-compose', startCommand(), 'Start the isolated MariaDB, WordPress PHP-FPM, and nginx services and wait for readiness', ['pull-images']),
+    command('pull-images', pullCommand(state), 'Pull and record the four pinned images in a dedicated bounded operation', ['write-compose'], 3600000, 'job'),
+    command('start-compose', startCommand(), 'Start the isolated MariaDB, WordPress PHP-FPM, and nginx services and wait for readiness', ['pull-images'], 900000, 'job'),
     command('initialize-wordpress', initializeCommand(linuxContext), 'Install WordPress and publish the compatibility marker without exposing credentials', ['start-compose']),
     command('verify-compose', verifyCommand(linuxContext), 'Verify Compose health, WordPress state, marker response, and restart persistence', ['initialize-wordpress'])
   ]
@@ -64,7 +66,7 @@ export function buildWordpressComposeTask (taskId, linuxContext, docker) {
         `Effective Docker policy: ${docker.ready ? 'ready' : `setup required through ${docker.installMethod}`}`,
         'The stable Compose project, service paths, credentials, and port 18101 are unused before execution.'
       ],
-      warnings: ['Docker-published ports interact directly with host firewall policy; this controlled test intentionally exposes only TCP port 18101.'],
+      warnings: ['Docker-published ports interact directly with host firewall policy; this controlled test intentionally exposes only TCP port 18101.', 'MariaDB uses a guarded 300-second bootstrap allowance for slow hosts. An unexpected image entrypoint layout blocks startup.'],
       requiresConfirmation: true,
       commands,
       revertCommands
@@ -134,6 +136,7 @@ function composeCommand () {
     '  db:',
     `    image: ${DATABASE_IMAGE}`,
     '    restart: unless-stopped',
+    ...mariadbComposeBootstrap(),
     '    environment:',
     '      MARIADB_DATABASE: webminai_wordpress',
     '      MARIADB_USER: webminai_wordpress',
@@ -145,10 +148,11 @@ function composeCommand () {
     '    volumes:',
     '      - db_data:/var/lib/mysql',
     '    healthcheck:',
-    '      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]',
+    `      test: ${JSON.stringify(['CMD-SHELL', 'MYSQL_PWD="$$(cat /run/secrets/db_password)" mariadb --protocol=tcp --host=127.0.0.1 --user=webminai_wordpress --database=webminai_wordpress --execute="SELECT 1" >/dev/null 2>&1'])}`,
     '      interval: 5s',
     '      timeout: 5s',
-    '      retries: 30',
+    '      retries: 120',
+    '      start_period: 20s',
     '  wordpress:',
     `    image: ${WORDPRESS_IMAGE}`,
     '    restart: unless-stopped',
@@ -223,7 +227,7 @@ function startCommand () {
     'set -eu',
     `cd ${quote(SERVICE_ROOT)}`,
     `docker compose -p ${quote(PROJECT)} up -d db wordpress nginx`,
-    `ready=; for attempt in $(seq 1 60); do if docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq db && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq wordpress && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T wordpress test -S /run/php-fpm/webminai.sock && curl --fail --silent --show-error --max-time 3 http://127.0.0.1:18101/ >/dev/null 2>&1; then ready=yes; break; fi; sleep 2; done`,
+    `ready=; for attempt in $(seq 1 60); do if services=$(docker compose -p ${quote(PROJECT)} ps --status running --services) && printf '%s\\n' "$services" | grep -Fxq db && printf '%s\\n' "$services" | grep -Fxq wordpress && printf '%s\\n' "$services" | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T wordpress test -S /run/php-fpm/webminai.sock && curl --fail --silent --show-error --max-time 3 http://127.0.0.1:18101/ >/dev/null 2>&1; then ready=yes; break; fi; sleep 2; done`,
     '[ "$ready" = yes ]',
     "printf '%s\n' compose-started"
   ].join('; ')
@@ -322,8 +326,8 @@ function restoreDockerCommand (state) {
   ].join('; ')
 }
 
-function command (id, commandText, purpose, dependsOn = []) {
-  return { id, command: commandText, purpose, risk: 'change', timeoutMs: 300000, requiresSudo: true, dependsOn }
+function command (id, commandText, purpose, dependsOn = [], timeoutMs = 300000, executionMode) {
+  return { id, command: commandText, purpose, risk: 'change', timeoutMs, requiresSudo: true, dependsOn, ...(executionMode ? { executionMode } : {}) }
 }
 
 function quote (value) {

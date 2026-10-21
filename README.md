@@ -63,6 +63,8 @@ Application routes currently in the catalog:
 | Home Assistant | No | Yes | Yes | Yes | Yes | Yes |
 | Intent AI Ops CLI | Host-native | Host-native, not Compose | Host-native | Host-native, not Docker | Host-native, not Colima | No |
 
+Ghost's pinned MySQL container requires x86-64-v2 on x86-64 hosts. The Linux Docker task checks CPU features before creating task files or credentials and refuses incompatible or unverifiable CPUs. Docker itself working does not guarantee that every image supports the processor. See the [official MySQL image CPU limitation](https://github.com/docker-library/mysql/issues/1055).
+
 Platform and maintenance tasks:
 
 | Platform | Runtime setup | Diagnostics and maintenance | Other verified tasks |

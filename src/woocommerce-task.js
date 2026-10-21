@@ -1,3 +1,4 @@
+import { mariadbComposeBootstrap } from './mariadb-compose-bootstrap.js'
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
 import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile, wordpressArtifactCommand } from './linux-php-foundation.js'
 
@@ -117,6 +118,7 @@ function wordpressCompose () {
     '  db:',
     `    image: ${DATABASE_IMAGE}`,
     '    restart: unless-stopped',
+    ...mariadbComposeBootstrap(),
     `    environment: { MARIADB_DATABASE: ${DATABASE}, MARIADB_USER: ${DATABASE}, MARIADB_PASSWORD_FILE: /run/secrets/db_password, MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password }`,
     '    secrets: [db_password, db_root_password]',
     '    volumes: [db_data:/var/lib/mysql]',

@@ -28,7 +28,6 @@
     "src",
     "web/themes",
     "docs/web-workspace.md",
-    "docs/muxin-provenance.md",
     "docs/execution-milestones.md",
     "docs/execution-diagnostics.md",
     "docs/remote-common-task-recovery.md",

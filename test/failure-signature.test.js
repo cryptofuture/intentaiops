@@ -3,6 +3,17 @@ import test from 'node:test'
 import { classifyFailure, isFailureCode } from '../src/failure-signature.js'
 import { executionDiagnostics } from '../src/execution-diagnostics.js'
 
+test('explicit CPU instruction-set failures remain distinct from exit 127 or SIGKILL', () => {
+  const item = { id: 'check-cpu', phase: 'baseline' }
+  for (const stderr of ['CPU_INSTRUCTION_SET_UNSUPPORTED: requires x86-64-v2', 'Fatal glibc error: CPU does not support x86-64-v2']) {
+    const result = { exitCode: 1, stderr }
+    assert.equal(classifyFailure({ item, result }).code, 'CPU_INSTRUCTION_SET_UNSUPPORTED')
+    assert.ok(isFailureCode('CPU_INSTRUCTION_SET_UNSUPPORTED'))
+    assert.ok(executionDiagnostics({ item, result }).some(value => value.code === 'CPU_INSTRUCTION_SET_UNSUPPORTED'))
+  }
+  for (const exitCode of [127, 137]) assert.equal(classifyFailure({ item, result: { exitCode } }).code, 'COMMAND_FAILED')
+})
+
 test('Docker package and LXC runtime failures stay distinct from execution uncertainty', () => {
   for (const [marker, code] of [['DOCKER_PACKAGE_INSTALL_FAILED', 'PACKAGE_MANAGER_FAILED'], ['DOCKER_LAB_RUNTIME_UNAVAILABLE', 'DOCKER_SERVICE_NOT_READY']]) {
     const item = { id: 'docker-lab' }
@@ -94,6 +105,23 @@ test('request timeout parameters are not timeout evidence', () => {
   for (const stderr of ['request timed out', 'execution timeout exceeded', 'deadline exceeded', 'timeout']) {
     assert.equal(classifyFailure({ item, result: { exitCode: 1, stderr } }).code, 'TIMEOUT', stderr)
   }
+})
+
+test('Docker CDN header timeout is an artifact failure, not an execution deadline', () => {
+  const item = { id: 'pull-images', phase: 'acquire' }
+  const result = { exitCode: 1, timedOut: false, stderr: 'failed to copy: httpReadSeeker: Get "https://cdn.example.test/blob?Signature=fixture-signature&Key-Pair-Id=fixture-key": net/http: timeout awaiting response headers' }
+  const failure = classifyFailure({ item, result })
+  assert.equal(failure.code, 'ARTIFACT_DOWNLOAD_FAILED')
+  assert.ok(!failure.evidence.includes('fixture-'))
+  const diagnostics = executionDiagnostics({ item, result })
+  assert.ok(diagnostics.some(value => value.code === 'CONNECTION_TIMEOUT' && value.scope === 'remote-command' && value.confidence === 'confirmed'))
+  assert.ok(diagnostics.some(value => value.code === 'ARTIFACT_DOWNLOAD_FAILED'))
+  assert.ok(!diagnostics.some(value => ['EXECUTION_TIMEOUT', 'CAUSE_UNKNOWN'].includes(value.code)))
+  assert.deepEqual(executionDiagnostics({ item, result: { ...result, exitCode: 0 } }), [])
+  assert.equal(classifyFailure({ item, result: { ...result, timedOut: true } }).code, 'TIMEOUT')
+  const uncertain = { ...result, exitCode: null, state: 'unknown' }
+  executionDiagnostics({ item, result: uncertain })
+  assert.equal(uncertain.state, 'unknown')
 })
 
 test('an explicit package version assertion retains a stable failure category', () => {

@@ -922,7 +922,7 @@ test('verified Moodle task resolves public-root nginx, PHP-FPM socket, off-web d
       assert.doesNotMatch(compose, /exec -T --user www-data -e WEBMINAI_MOODLE_URL/u)
       assert.match(built.plan.commands.find(item => item.id === 'prepare-moodle-swap').command, /fallocate -l 2G/u)
       assert.equal(pullImages.executionMode, 'job')
-      assert.equal(pullImages.timeoutMs, 45 * 60 * 1000)
+      assert.equal(pullImages.timeoutMs, 60 * 60 * 1000)
       assert.match(pullImages.command, /docker buildx build --builder 'webminai-moodle-[0-9]+' --pull --network host --load/u)
       assert.match(pullImages.command, /docker buildx rm --force 'webminai-moodle-[0-9]+'/u)
       assert.match(pullImages.command, /moby\/buildkit:buildx-stable-1/u)

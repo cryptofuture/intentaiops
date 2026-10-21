@@ -301,12 +301,16 @@ function ubuntuRestore (state, paths) {
 
 function composeBaseline (state) {
   return join([
-    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, `test ! -e ${quote(SERVICE_ROOT)}`, `test ! -e ${quote(CREDENTIALS)}`,
+    'set -eu', composeCpuCheck(), `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, `test ! -e ${quote(SERVICE_ROOT)}`, `test ! -e ${quote(CREDENTIALS)}`,
     `install -d -o root -g root -m 0700 ${quote(state)}`, `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)} | LC_ALL=C sort -u > ${quote(`${state}/packages.before`)}`,
     `systemctl is-active --quiet docker 2>/dev/null && : > ${quote(`${state}/docker.active`)} || true`, `command -v docker >/dev/null 2>&1 && : > ${quote(`${state}/docker.existed`)} || true`,
     ...IMAGES.map((image, index) => `docker image inspect ${quote(image)} >/dev/null 2>&1 && : > ${quote(`${state}/image-${index}.existed`)} || true`),
     'fi', 'printf \'%s\\n\' baseline-ready'
   ])
+}
+
+function composeCpuCheck () {
+  return 'case "$(uname -m)" in x86_64|amd64) awk -F: \'/^flags[[:space:]]*:/ { seen=1; gsub(/[[:space:]]+/, " ", $2); flags=" " $2 " "; split("cx16 lahf_lm popcnt pni sse4_1 sse4_2 ssse3", required, " "); for (i in required) if (!index(flags, " " required[i] " ")) missing=1 } END { if (!seen) { print "CPU_FEATURES_UNAVAILABLE: cannot verify Ghost MySQL image prerequisites; no changes made" > "/dev/stderr"; exit 1 } if (missing) { print "CPU_INSTRUCTION_SET_UNSUPPORTED: the pinned Ghost MySQL image requires x86-64-v2; no changes made" > "/dev/stderr"; exit 1 } }\' /proc/cpuinfo;; esac'
 }
 
 function prepareDocker (state) {

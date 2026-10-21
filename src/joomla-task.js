@@ -1,3 +1,4 @@
+import { mariadbComposeBootstrap } from './mariadb-compose-bootstrap.js'
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
 import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile } from './linux-php-foundation.js'
 
@@ -205,6 +206,7 @@ function composeCommand () {
     '  db:',
     `    image: ${DATABASE_IMAGE}`,
     '    restart: unless-stopped',
+    ...mariadbComposeBootstrap(),
     '    environment:',
     '      MARIADB_DATABASE: webminai_joomla',
     '      MARIADB_USER: webminai_joomla',

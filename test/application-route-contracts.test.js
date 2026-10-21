@@ -40,6 +40,7 @@ import { buildWindowsPrestaShopComposeTask } from '../src/windows-prestashop-com
 import { buildWooCommerceTask } from '../src/woocommerce-task.js'
 import { buildWordpressComposeTask } from '../src/wordpress-compose-task.js'
 import { buildWordpressLinuxTask } from '../src/wordpress-linux-task.js'
+import { buildMagentoTask } from '../src/magento-task.js'
 import { rootExecutionPolicy } from '../src/execution-policy.js'
 import { validateCommandPlan } from '../src/plan-validator.js'
 
@@ -84,9 +85,25 @@ test('direct Linux PHP route contracts produce independently valid reversible pl
     ['joomla', () => buildJoomlaTask(4, linux, compose)],
     ['drupal', () => buildDrupalTask(5, linux, compose)],
     ['prestashop', () => buildPrestaShopTask(6, linux, compose)],
-    ['moodle', () => buildMoodleTask(7, linux, compose)]
+    ['moodle', () => buildMoodleTask(7, linux, compose)],
+    ['magento', () => buildMagentoTask(8, linux, compose)]
   ]
-  for (const [label, build] of routes) assertReversiblePlan(build(), label)
+  for (const [label, build] of routes) {
+    const built = build()
+    assertReversiblePlan(built, label)
+    if (label !== 'wordpress-native') assert.ok(built.plan.commands.some(command => command.command.includes('Unsupported MariaDB bootstrap script')), label + ' must use the guarded MariaDB bootstrap')
+    if (label === 'prestashop') {
+      const pull = built.plan.commands.find(command => command.id === 'pull-images').command
+      assert.ok(pull.includes(' pull --quiet;'), 'Acquisition progress must not displace bounded failure output')
+      assert.ok(pull.includes('docker compose --parallel 1 -p '), 'Image acquisition must not start parallel service pulls on a small host')
+    }
+    if (label === 'moodle') {
+      const acquisition = built.plan.commands.find(command => command.id === 'pull-images')
+      assert.equal(acquisition.executionMode, 'job')
+      assert.equal(acquisition.timeoutMs, 60 * 60 * 1000)
+      assert.equal(acquisition.retry, undefined)
+    }
+  }
 })
 
 test('Linux Docker bootstrap enforces platform preconditions and emits a reversible job plan', () => {

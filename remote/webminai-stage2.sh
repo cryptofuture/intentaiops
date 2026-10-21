@@ -679,31 +679,15 @@ uninstall_managed_netdata() {
   sh "$temporary_directory/kickstart.sh" --uninstall --non-interactive
 }
 
-cancel_webminai_jobs() {
+remove_completed_webminai_jobs() {
   job_root="$STATE_DIR/jobs"
   [ -d "$job_root" ] || return 0
-
-  for pid_file in "$job_root"/*/pid; do
-    [ -f "$pid_file" ] || continue
-    job_pid=$(sed -n '1p' "$pid_file" 2>/dev/null || true)
-    case "$job_pid" in ''|*[!0-9]*) continue ;; esac
-    [ "$job_pid" -gt 1 ] || continue
-    kill -TERM "-$job_pid" 2>/dev/null || kill -TERM "$job_pid" 2>/dev/null || true
-  done
-  sleep 1
-  for pid_file in "$job_root"/*/pid; do
-    [ -f "$pid_file" ] || continue
-    job_pid=$(sed -n '1p' "$pid_file" 2>/dev/null || true)
-    case "$job_pid" in ''|*[!0-9]*) continue ;; esac
-    [ "$job_pid" -gt 1 ] || continue
-    kill -KILL "-$job_pid" 2>/dev/null || kill -KILL "$job_pid" 2>/dev/null || true
-  done
-  for controller_file in "$job_root"/*/controller.pid; do
-    [ -f "$controller_file" ] || continue
-    controller_pid=$(sed -n '1p' "$controller_file" 2>/dev/null || true)
-    case "$controller_pid" in ''|*[!0-9]*) continue ;; esac
-    [ "$controller_pid" -gt 1 ] || continue
-    kill -KILL "$controller_pid" 2>/dev/null || true
+  for job_directory in "$job_root"/*; do
+    [ -d "$job_directory" ] || continue
+    if [ ! -f "$job_directory/result" ]; then
+      echo 'Unfinished remote job: reconcile its outcome before deactivating Stage 2.' >&2
+      return 1
+    fi
   done
   rm -rf -- "$job_root"
 }
@@ -716,7 +700,7 @@ deactivate() {
     plugin_path=$(cat "$STATE_DIR/plugin-path")
   fi
 
-  cancel_webminai_jobs
+  remove_completed_webminai_jobs
   rm -f "$KEY_FILE"
   rm -f "$LEGACY_SUDOERS_FILE" "$LEGACY_ROOT_HELPER_PATH"
   if [ -n "$plugin_path" ]; then

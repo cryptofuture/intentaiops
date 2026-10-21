@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
@@ -43,16 +47,42 @@ test('stage 2 installs a setuid root plugin and a root-only host token', async (
   assert.match(source, /if \[ "\$status" = inactive \] && \[ "\$ownership" = managed \]; then/)
   assert.match(source, /plugin artifact platform mismatch/)
   assert.match(source, /"platform":"%s"/)
-  assert.match(source, /cancel_webminai_jobs\(\)/)
-  assert.match(source, /kill -TERM "-\$job_pid"/)
+  assert.match(source, /remove_completed_webminai_jobs\(\)/)
+  assert.doesNotMatch(source, /kill -TERM "-\$job_pid"/)
   assert.match(source, /rm -rf -- "\$job_root"/)
-  assert.match(source, /cancel_webminai_jobs\n {2}rm -f "\$KEY_FILE"/)
+  assert.match(source, /remove_completed_webminai_jobs\n {2}rm -f "\$KEY_FILE"/)
   assert.match(source, /NETDATA_ROOT_PLUGIN_DROPIN=\/etc\/systemd\/system\/netdata\.service\.d\/webminai-root-plugin\.conf/)
   assert.match(source, /configure_root_plugin_service\(\)/)
   assert.match(source, /CapabilityBoundingSet=~/)
   assert.match(source, /root-plugin-dropin-backup/)
   assert.match(source, /remove_root_plugin_service\n/)
   assert.doesNotMatch(source, /NOPASSWD:/)
+})
+
+test('POSIX deactivation preserves unfinished records and never signals reused completed-job PIDs', { skip: !existsSync('/bin/sh') }, async t => {
+  const source = await readFile(installer, 'utf8')
+  const cleanup = source.match(/remove_completed_webminai_jobs\(\) \{[\s\S]*?\n\}/u)[0]
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'intent-stage2-jobs-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'ignore' })
+  t.after(() => child.kill())
+  const job = path.join(directory, 'jobs', 'fixture-job')
+  await mkdir(job, { recursive: true })
+  await writeFile(path.join(job, 'pid'), String(child.pid))
+  await writeFile(path.join(job, 'controller.pid'), String(child.pid))
+  await writeFile(path.join(directory, 'action.key'), 'fixture-only')
+  const run = () => spawnSync('/bin/sh', ['-c', 'set -eu; STATE_DIR="$1"; ' + cleanup + '\nremove_completed_webminai_jobs', 'fixture', directory], { encoding: 'utf8' })
+  const unfinished = run()
+  assert.equal(unfinished.status, 1)
+  assert.match(unfinished.stderr, /reconcile its outcome/u)
+  await access(path.join(job, 'pid'))
+  await access(path.join(directory, 'action.key'))
+  await writeFile(path.join(job, 'result'), 'fixture-durable-result')
+  assert.equal(run().status, 0)
+  assert.equal(existsSync(path.join(directory, 'jobs')), false)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(child.exitCode, null)
+  assert.equal(child.signalCode, null)
 })
 
 test('Windows Stage 2 installs a LocalSystem plugin with guarded lifecycle state', async () => {

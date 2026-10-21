@@ -1,3 +1,4 @@
+import { mariadbComposeBootstrap } from './mariadb-compose-bootstrap.js'
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
 import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile } from './linux-php-foundation.js'
 
@@ -290,6 +291,7 @@ function composeCommand () {
     '  db:',
     `    image: ${DATABASE_IMAGE}`,
     '    restart: unless-stopped',
+    ...mariadbComposeBootstrap(),
     '    environment:',
     `      MARIADB_DATABASE: ${DATABASE}`,
     `      MARIADB_USER: ${DATABASE}`,
@@ -367,7 +369,7 @@ function composeCommand () {
 }
 
 function pullCommand (state) {
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} pull; docker image inspect ${quote(PRESTASHOP_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-0.after`)}; cp ${quote(`${state}/image-0.after`)} ${quote(`${state}/image-1.after`)}; docker image inspect ${quote(NGINX_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-2.after`)}; docker image inspect ${quote(DATABASE_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-3.after`)}; printf '%s\n' images-pulled`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose --parallel 1 -p ${quote(PROJECT)} pull --quiet; docker image inspect ${quote(PRESTASHOP_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-0.after`)}; cp ${quote(`${state}/image-0.after`)} ${quote(`${state}/image-1.after`)}; docker image inspect ${quote(NGINX_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-2.after`)}; docker image inspect ${quote(DATABASE_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-3.after`)}; printf '%s\n' images-pulled`
 }
 
 function startCommand () {

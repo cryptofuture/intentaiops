@@ -27,3 +27,4 @@ scripts/kubeconfig.container
 scripts/.kubernetes-stage2-action-key
 core
 core.*
+/artifacts/netbook-docker/

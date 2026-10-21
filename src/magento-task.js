@@ -1,3 +1,4 @@
+import { mariadbComposeBootstrap } from './mariadb-compose-bootstrap.js'
 const VERSION = '2.4.8-p5'
 const PORT = 18108
 const MARKER = 'WEBMINAI_MAGENTO_OK'
@@ -149,12 +150,12 @@ function composeCommand (returnAssets = false) {
     '  db:',
     `    image: ${DATABASE_IMAGE}`,
     '    restart: unless-stopped',
+    ...mariadbComposeBootstrap(['--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci', '--innodb-buffer-pool-size=128M', '--max-connections=50']),
     '    environment:',
     `      MARIADB_DATABASE: ${DATABASE}`,
     '      MARIADB_USER_FILE: /run/secrets/db_username',
     '      MARIADB_PASSWORD_FILE: /run/secrets/db_password',
     '      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password',
-    '    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--innodb-buffer-pool-size=128M", "--max-connections=50"]',
     '    secrets: [db_username, db_password, db_root_password]',
     '    volumes: [db_data:/var/lib/mysql]',
     '    healthcheck:',

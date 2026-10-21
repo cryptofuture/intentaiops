@@ -31,5 +31,12 @@ function collect (error, sections, seen) {
 export function redactDiagnosticText (text) {
   return text
     .replace(/ssh:\/\/[^\s"']+/gi, '[redacted-ssh-url]')
+    .replace(/https?:\/\/[^\s"'<>]+/gi, value => {
+      try {
+        const url = new URL(value)
+        if (!url.username && !url.password && !url.search && !url.hash) return value
+        return url.origin + url.pathname + (url.search ? '?[redacted-query]' : '') + (url.hash ? '#[redacted-fragment]' : '')
+      } catch { return '[redacted-http-url]' }
+    })
     .replace(/\b[a-f0-9]{64}\b/gi, '[redacted-64-hex]')
 }

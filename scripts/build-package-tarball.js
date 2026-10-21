@@ -32,7 +32,6 @@ try {
   }
   for (const required of [
     'LICENSE',
-    'docs/muxin-provenance.md',
     'bin/intentaiops.js',
     'src/operator-console.html',
     'src/operator-console-browser.js',

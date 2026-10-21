@@ -1,7 +1,10 @@
+import { redactDiagnosticText } from './error-details.js'
+
 const FAILURE_CODES = new Set([
   'PACKAGE_NOT_FOUND',
   'PACKAGE_VERSION_MISMATCH',
   'RUNTIME_VERSION_INCOMPATIBLE',
+  'CPU_INSTRUCTION_SET_UNSUPPORTED',
   'PACKAGE_MANAGER_FAILED',
   'PACKAGE_MANAGER_BUSY',
   'PACKAGE_CONFIGURATION_CONFLICT',
@@ -35,6 +38,7 @@ export function classifyFailure ({ item, result, error }) {
   else if (error?.netdataHttpStatus) code = 'COMMAND_FAILED'
   else if (/firmware_virtualization_disabled/u.test(lower)) code = 'FIRMWARE_VIRTUALIZATION_DISABLED'
   else if (/unsupported_windows_version/u.test(lower)) code = 'UNSUPPORTED_WINDOWS_VERSION'
+  else if (/cpu_instruction_set_unsupported|cpu does not support x86-64-v2/u.test(lower)) code = 'CPU_INSTRUCTION_SET_UNSUPPORTED'
   else if (/^error: node\.js \d+(?:\.\d+){1,2} is installed, but intent ai ops requires \d+(?:\.\d+){1,2} or newer\./mu.test(lower)) code = 'RUNTIME_VERSION_INCOMPATIBLE'
   else if (/insufficient_memory/u.test(lower)) code = 'INSUFFICIENT_MEMORY'
   else if (/slat_unavailable/u.test(lower)) code = 'SLAT_UNAVAILABLE'
@@ -50,7 +54,7 @@ export function classifyFailure ({ item, result, error }) {
   else if (/unable to locate package|no match for argument|target not found|no such package|nothing provides|package .* not found/u.test(lower)) code = 'PACKAGE_NOT_FOUND'
   else if (/apt(?:-get)?:|dnf:|yum:|apk:|pacman:|zypper:/u.test(lower) && item.phase === 'packages') code = 'PACKAGE_MANAGER_FAILED'
   else if (/checksum|sha(?:1|256|512).*(?:mismatch|failed)|digest.*(?:mismatch|failed)/u.test(lower)) code = 'CHECKSUM_MISMATCH'
-  else if (/curl: \(|wget:|download.*failed|could not resolve host/u.test(lower) && item.phase === 'acquire') code = 'ARTIFACT_DOWNLOAD_FAILED'
+  else if (/curl: \(|wget:|download.*failed|could not resolve host|httpreadseeker|timeout awaiting response headers|tls handshake timeout/u.test(lower) && item.phase === 'acquire') code = 'ARTIFACT_DOWNLOAD_FAILED'
   else if (/http\/?\d(?:\.\d)?[" ]+500|status(?: code)?[=: ]+500|http 500/u.test(lower)) code = 'APP_HTTP_500'
   else if (item.phase === 'health' && /connection refused|couldn't connect|failed to connect|timed out|empty reply/u.test(lower)) code = 'APP_HTTP_UNREACHABLE'
   else if (item.phase === 'database' && /not ready|can't connect|connection refused|authentication failed/u.test(lower)) code = 'DATABASE_NOT_READY'
@@ -74,8 +78,8 @@ export function isFailureCode (value) {
 }
 
 function safeEvidence (text) {
-  return String(text)
-    .replaceAll(/(?:password|passwd|token|secret|authorization)\s*[=:]\s*[^\s;,]+/giu, '$1=[redacted]')
+  return redactDiagnosticText(String(text))
+    .replaceAll(/(password|passwd|token|secret|authorization)\s*[=:]\s*[^\s;,]+/giu, '$1=[redacted]')
     .replaceAll(/[A-Za-z0-9_-]{48,}/gu, '[redacted-long-value]')
     .replaceAll(/[\r\n]+/gu, ' ')
     .slice(0, 500)
