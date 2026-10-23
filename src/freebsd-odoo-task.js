@@ -1,3 +1,7 @@
+import { freebsdNginxSecurityCommand } from './freebsd-nginx-security.js'
+import { freebsdInstallMissingPackages } from './freebsd-runtime-packages.js'
+import { freebsdRustEnvironment, freebsdRustPackageCommand, freebsdRustSetupCommand } from './freebsd-rust-runtime.js'
+
 const COMMIT = '57ffa1abb6e1ed481b8bccc5db5534ea0ad2c6b5'
 const ARCHIVE_SHA256 = '8b50552e622426f7260e9dd47feaeeb0c47900c7b7ce56a3101d1cb7a74f8580'
 const APP_ROOT = '/usr/local/lib/webminai-odoo-18112'
@@ -23,7 +27,8 @@ export function buildFreebsdOdooTask (taskId, freebsdExecution) {
       commands: [
         item('prepare-odoo', prepare(state), 'Capture package and identity baselines and generate database and administrator credentials on-host'),
         item('install-odoo-runtime', installRuntime(state), 'Install exact Python 3.12, PostgreSQL 17, nginx, and native build dependencies', ['prepare-odoo'], 3600000, 'job'),
-        item('install-odoo-application', installApplication(state), 'Install checksum-pinned Odoo Community source and its exact Python dependency matrix in an isolated virtual environment', ['install-odoo-runtime'], 3600000, 'job'),
+        item('install-odoo-build-toolchain', freebsdRustSetupCommand(state), 'Reuse existing Rust or install a pinned private minimal build toolchain without modifying user profiles', ['install-odoo-runtime'], 3600000, 'job'),
+        item('install-odoo-application', installApplication(state), 'Install checksum-pinned Odoo Community source and its exact Python dependency matrix in an isolated virtual environment', ['install-odoo-build-toolchain'], 3600000, 'job'),
         item('initialize-odoo-database', initializeDatabase(), 'Initialize isolated PostgreSQL and the least-privilege Odoo database role', ['install-odoo-runtime', 'prepare-odoo'], 900000, 'job'),
         item('configure-odoo', configure(), 'Initialize the Odoo database and administrator, then create rc.d and nginx services', ['install-odoo-application', 'initialize-odoo-database'], 1200000, 'job'),
         item('verify-odoo', verify(), 'Verify Odoo release, database state, HTTP marker, and restart recovery', ['configure-odoo'], 900000, 'job')
@@ -45,12 +50,16 @@ function prepareFresh (state) {
 }
 
 function installRuntime (state) {
-  return `set -eu; env ASSUME_ALWAYS_YES=yes pkg install -y python312 py312-pip-23.3.2_4 postgresql17-server-17.10 nginx git gmake pkgconf rust openldap26-client cyrus-sasl libxml2 libxslt jpeg-turbo freetype2 libffi libev; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}; python3.12 -c 'import sys; assert sys.version_info[:2] == (3, 12)'; postgres --version | grep -F '17.10'`
+  return installRuntimePackages(state) + `; ${freebsdNginxSecurityCommand(state)}`
+}
+
+function installRuntimePackages (state) {
+  return `set -eu; ${freebsdInstallMissingPackages(['python312', 'postgresql17-server', 'nginx', 'git', 'gmake', 'pkgconf', 'openldap26-client', 'cyrus-sasl', 'libxml2', 'libxslt', 'jpeg-turbo', 'freetype2', 'libffi', 'libev'])}; ${freebsdRustPackageCommand()}; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}; python3.12 -c 'import sys; assert sys.version_info[:2] == (3, 12)'; postgres --version | grep -E 'PostgreSQL[)] 17[.]'`
 }
 
 function installApplication (state) {
   const archive = `${state}/odoo-${COMMIT}.tar.gz`
-  return `set -eu; rm -rf -- ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(APP_ROOT)}; curl --fail --location --silent --show-error https://github.com/odoo/odoo/archive/${COMMIT}.tar.gz --output ${quote(archive)}; [ "$(sha256 -q ${quote(archive)})" = ${quote(ARCHIVE_SHA256)} ]; tar -xzf ${quote(archive)} -C ${quote(APP_ROOT)} --strip-components 1; python3.12 -m venv ${quote(`${APP_ROOT}/venv`)}; export CFLAGS='-I/usr/local/include' CPPFLAGS='-I/usr/local/include' LDFLAGS='-L/usr/local/lib' MAKE=gmake PIP_CACHE_DIR=${quote(`${state}/pip-cache`)} GEVENTSETUP_EMBED_LIBEV=0; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input --upgrade pip setuptools wheel; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input 'Cython==0.29.37' 'greenlet==3.0.3'; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input --no-build-isolation 'gevent==24.2.1'; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input -r ${quote(`${APP_ROOT}/requirements.txt`)}; rm -rf -- ${quote(`${state}/pip-cache`)}; ${quote(`${APP_ROOT}/venv/bin/python`)} ${quote(`${APP_ROOT}/odoo-bin`)} --version | grep -F 'Odoo Server 19.0'; chmod -R a+rX ${quote(APP_ROOT)}`
+  return `set -eu; ${freebsdRustEnvironment(state)}; rm -rf -- ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(APP_ROOT)}; curl --fail --location --silent --show-error https://github.com/odoo/odoo/archive/${COMMIT}.tar.gz --output ${quote(archive)}; [ "$(sha256 -q ${quote(archive)})" = ${quote(ARCHIVE_SHA256)} ]; tar -xzf ${quote(archive)} -C ${quote(APP_ROOT)} --strip-components 1; python3.12 -m venv ${quote(`${APP_ROOT}/venv`)}; export CFLAGS='-I/usr/local/include' CPPFLAGS='-I/usr/local/include' LDFLAGS='-L/usr/local/lib' MAKE=gmake CARGO_HOME=${quote(`${state}/cargo`)} CARGO_BUILD_JOBS=1 PIP_CACHE_DIR=${quote(`${state}/pip-cache`)} GEVENTSETUP_EMBED_LIBEV=0; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input --upgrade pip setuptools wheel; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input 'Cython==0.29.37' 'greenlet==3.0.3'; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input --no-build-isolation 'gevent==24.2.1'; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input -r ${quote(`${APP_ROOT}/requirements.txt`)}; rm -rf -- ${quote(`${state}/pip-cache`)}; ${quote(`${APP_ROOT}/venv/bin/python`)} ${quote(`${APP_ROOT}/odoo-bin`)} --version | grep -F 'Odoo Server 19.0'; chmod -R a+rX ${quote(APP_ROOT)}`
 }
 
 function initializeDatabase () {

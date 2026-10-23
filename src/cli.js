@@ -2140,6 +2140,7 @@ export async function manageExecution ({ ui, controller, serverId, taskId }) {
     const view = controller.inspect(serverId, taskId)
     const localTask = controller.tasks.get(serverId, taskId)
     const localRevisions = controller.tasks.revisions(serverId, taskId)
+    const refreshableCatalog = localTask.kind === 'catalog' && listCommonTasks({ category: 'application' }).find(definition => definition.id === localTask.catalogId && ['linux', 'freebsd'].includes(definition.platform) && (!definition.prerequisite || definition.id === 'podman-freebsd'))
     ui.clear()
     ui.banner(`Operator / ${serverId} / task #${taskId}`)
     ui.line('Task status', view.task.status)
@@ -2149,7 +2150,7 @@ export async function manageExecution ({ ui, controller, serverId, taskId }) {
       { label: 'Pause at next command boundary', value: 'pause' },
       { label: 'Ask Codex a read-only question', value: 'analyze' },
       { label: 'Revise remaining steps', value: 'propose' },
-      ...(localTask.kind === 'catalog' && listCommonTasks({ platform: 'linux', category: 'application' }).some(definition => definition.id === localTask.catalogId && !definition.prerequisite) ? [{ label: 'Refresh remaining native Linux catalog steps', value: 'refresh-catalog' }] : []),
+      ...(refreshableCatalog ? [{ label: `Refresh remaining native ${refreshableCatalog.platform === 'freebsd' ? 'FreeBSD' : 'Linux'} catalog steps`, value: 'refresh-catalog' }] : []),
       { label: 'Propose rollback of confirmed changes', value: 'propose-rollback' },
       { label: 'Reconcile durable remote outcomes', value: 'reconcile' },
       { label: 'Record independently verified uncertain outcome', value: 'resolve' },

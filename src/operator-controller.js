@@ -11,6 +11,7 @@ import { buildCommonTask, commonTaskEligibility, listCommonTasks } from './commo
 import { regenerateCatalogRevision } from './catalog-plan-revision.js'
 import { completeTaskReport } from './task-completion-report.js'
 import { withHostMutation } from './host-mutation-ownership.js'
+import { isSystemUpdateTask } from './system-update-task.js'
 
 export class OperatorController {
   constructor ({ dataRoot, settings, passphrase, adminFor, tasks, runs }) {
@@ -178,7 +179,8 @@ export class OperatorController {
   async proposeCatalogRefresh (hostId, taskId, expectedVersion) {
     this.checkVersion(hostId, taskId, expectedVersion)
     const task = this.tasks.get(hostId, taskId)
-    if (task.kind !== 'catalog' || !listCommonTasks({ platform: 'linux', category: 'application' }).some(definition => definition.id === task.catalogId && !definition.prerequisite)) throw new Error('Catalog refresh currently requires a native Linux application task')
+    const definition = listCommonTasks({ category: 'application' }).find(definition => definition.id === task.catalogId && (!definition.prerequisite || definition.id === 'podman-freebsd') && ['linux', 'freebsd'].includes(definition.platform))
+    if (task.kind !== 'catalog' || !definition) throw new Error('Catalog refresh requires a native Linux or FreeBSD application task')
     if (!this.tasks.executionEvents(hostId, taskId).length && (task.results?.length || task.status !== 'planned')) throw new Error('Legacy execution has no journal; operator investigation required')
     if (task.revertResults?.length || this.tasks.rollbackState(hostId, taskId).some(command => command.status !== 'pending')) throw new Error('Rollback has started; do not refresh deployment work')
     const execution = this.tasks.executionState(hostId, taskId)
@@ -186,9 +188,10 @@ export class OperatorController {
     return this.withAdmin(hostId, async admin => {
       const inventory = await admin.refreshInventory({ settings: this.settings, passphrase: this.passphrase, serverId: hostId })
       this.checkVersion(hostId, taskId, expectedVersion)
-      if (!inventory.webminaiLinuxContext || inventory.webminaiDocker?.preferred) throw new Error('Catalog refresh currently requires a native Linux route')
+      if (definition.platform === 'linux' && (!inventory.webminaiLinuxContext || inventory.webminaiDocker?.preferred)) throw new Error('Catalog refresh currently requires a native Linux route')
+      if (definition.platform === 'freebsd' && inventory.webminaiExecution?.platform !== 'freebsd') throw new Error('Catalog refresh requires a verified FreeBSD execution target')
       const applicationDefaults = await admin.settings.decryptApplicationDefaults({ settings: this.settings, passphrase: this.passphrase })
-      const options = { platform: 'linux', linuxContext: inventory.webminaiLinuxContext, docker: inventory.webminaiDocker, applicationDefaults }
+      const options = { platform: definition.platform, linuxContext: inventory.webminaiLinuxContext, freebsdExecution: inventory.webminaiExecution, docker: inventory.webminaiDocker, applicationDefaults }
       const eligibility = commonTaskEligibility(task.catalogId, options)
       if (!eligibility.eligible) throw new Error(`Catalog task is no longer eligible: ${eligibility.reason}`)
       const plan = regenerateCatalogRevision(task, execution, buildCommonTask(task.catalogId, task.id, options).plan)
@@ -214,6 +217,7 @@ export class OperatorController {
     this.checkVersion(hostId, taskId, expectedVersion)
     const task = this.tasks.get(hostId, taskId)
     if (task.status === 'completed') throw new Error('This plan already completed; its execution approval is consumed')
+    if (task.status === 'reverted') throw new Error('rollback has started or completed; prepare a new task instead of reusing this execution approval')
     if (!task.plan || planFingerprint(task.plan) !== fingerprint) throw new Error('explicit plan approval fingerprint required')
     if (commandIds !== undefined && (!Array.isArray(commandIds) || !commandIds.length || new Set(commandIds).size !== commandIds.length || commandIds.some(id => !task.plan.commands.some(command => command.id === id)))) throw new Error('Invalid per-command review')
     if (['running', 'reverting', 'partial', 'failed'].includes(task.status) && !this.tasks.executionEvents(hostId, taskId).length) throw new Error('legacy interrupted execution has no journal; operator investigation required')
@@ -225,10 +229,11 @@ export class OperatorController {
       if (state.some(command => ['uncertain', 'failed'].includes(command.status))) throw new Error('reconciliation or reviewed revision required')
       const completedIds = new Set(state.filter(command => command.status === 'completed').map(command => command.commandId))
       const remainingChanges = task.plan.commands.some(command => !completedIds.has(command.id) && command.risk !== 'read')
+      const oneWayMaintenance = task.kind === 'catalog' && isSystemUpdateTask(task.catalogId)
       const control = this.tasks.control(hostId, taskId)
       if (control.action === 'abort') throw new Error('execution was aborted; request a reviewed revision')
       this.tasks.setControl(hostId, taskId, 'run', originalControl.version)
-      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, requireRevert: remainingChanges, approve: async command => !commandIds || commandIds.includes(command.id), onProgress, executionObserver: event => { if (event.type === 'command_prepared') this.tasks.markRunning(hostId, taskId) }, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
+      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, requireRevert: remainingChanges && !oneWayMaintenance, approve: async command => !commandIds || commandIds.includes(command.id), onProgress, executionObserver: event => { if (event.type === 'command_prepared') this.tasks.markRunning(hostId, taskId) }, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
       const saved = this.tasks.saveResults(hostId, taskId, results)
       if (saved.status === 'completed') {
         try { await completeTaskReport({ admin, settings: this.settings, passphrase: this.passphrase, serverId: hostId, task: this.tasks.get(hostId, taskId), onProgress }) } catch { this.record({ type: 'report_unavailable', hostId, taskId, message: 'Assessment unavailable; authoritative command outcomes remain recorded' }) }

@@ -140,12 +140,13 @@ export class NetdataClient {
     const command = [
       'freebsdVersion="$(freebsd-version -ru 2>/dev/null | tr \'\\n\' \'|\' | sed \'s/|$//\')"',
       'architecture="$(uname -m)"',
+      'memoryBytes="$(sysctl -n hw.physmem 2>/dev/null || true)"',
       'jailed="$(sysctl -n security.jail.jailed 2>/dev/null || printf 0)"',
       'podmanCli=no; podmanReady=no; composeAvailable=no; composeCommand=',
       'if command -v podman >/dev/null 2>&1; then podmanCli=yes; if podman info >/dev/null 2>&1; then podmanReady=yes; fi; fi',
       'if command -v podman-compose >/dev/null 2>&1 && podman-compose version >/dev/null 2>&1; then composeAvailable=yes; composeCommand=podman-compose; fi',
-      'major="$(freebsd-version -u 2>/dev/null | sed -E \'s/^([0-9]+).*/\\1/\')"; installSupported=no; case "$major" in \'\'|*[!0-9]*) ;; *) if [ "$major" -ge 15 ] && command -v pkg >/dev/null 2>&1; then installSupported=yes; fi ;; esac',
-      'printf \'freebsdVersion=%s\\narchitecture=%s\\njailed=%s\\npodmanCli=%s\\npodmanReady=%s\\ncomposeAvailable=%s\\ncomposeCommand=%s\\ninstallSupported=%s\\n\' "$freebsdVersion" "$architecture" "$jailed" "$podmanCli" "$podmanReady" "$composeAvailable" "$composeCommand" "$installSupported"'
+      'installSupported=no; case "$(freebsd-version -r 2>/dev/null)" in 14.4-*|15.[1-9]*-*) if command -v pkg >/dev/null 2>&1; then installSupported=yes; fi ;; esac',
+      'printf \'freebsdVersion=%s\\nmemoryBytes=%s\\narchitecture=%s\\njailed=%s\\npodmanCli=%s\\npodmanReady=%s\\ncomposeAvailable=%s\\ncomposeCommand=%s\\ninstallSupported=%s\\n\' "$freebsdVersion" "$memoryBytes" "$architecture" "$jailed" "$podmanCli" "$podmanReady" "$composeAvailable" "$composeCommand" "$installSupported"'
     ].join('; ')
     const result = await this.runCommand(command, { timeoutSeconds: 15 })
     if (result.exitCode !== 0) {
@@ -160,6 +161,7 @@ export class NetdataClient {
       platform: 'freebsd',
       freebsdVersion: values.freebsdVersion || null,
       architecture: values.architecture || null,
+      memoryBytes: /^\d+$/u.test(values.memoryBytes ?? '') && Number.isSafeInteger(Number(values.memoryBytes)) ? Number(values.memoryBytes) : null,
       packageManager: 'pkg',
       serviceManager: 'rc.d',
       shell: '/bin/sh',
@@ -177,7 +179,7 @@ export class NetdataClient {
         requiresExplicitLinuxPlatform: true,
         virtualizationRequired: false,
         virtualizationAvailable: true,
-        virtualizationInstructions: 'FreeBSD Podman uses jails and VFS; CPU virtualization is not required. Install it on the outer FreeBSD 15+ host, not inside a jail.'
+        virtualizationInstructions: 'FreeBSD Podman uses jails and VFS; CPU virtualization is not required. Install it on the outer FreeBSD 14.4 or 15.1+ host, not inside a jail.'
       }
     }
   }

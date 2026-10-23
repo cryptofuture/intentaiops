@@ -157,6 +157,22 @@ test('profile preferences survive new instances and reject stale or privileged w
   assert.throws(() => store.save(version, { panes: [{ hostId: '../escape', taskId: 1 }] }), /Invalid/u)
 })
 
+test('catalog refresh is an idempotent proposal operation and never implicitly executes', async t => {
+  const { workspace, controller, calls } = await fixture(t)
+  let proposals = 0
+  controller.proposeCatalogRefresh = async (hostId, taskId, version) => {
+    assert.deepEqual([hostId, taskId, version], ['host', 1, 'current-version'])
+    proposals++
+    return { revisionId: 2, fingerprint: 'a'.repeat(64) }
+  }
+  const request = { action: 'refresh-catalog', requestKey: 'catalog-refresh-0001', hostId: 'host', taskId: 1, expectedVersion: 'current-version' }
+  const accepted = workspace.submit(request)
+  assert.equal(workspace.submit(request).id, accepted.id)
+  await workspace.pending.get(accepted.id).promise
+  assert.equal(proposals, 1)
+  assert.deepEqual(calls, [])
+})
+
 test('browser preparation is durable, idempotent and distinct from explicit canonical execution', async t => {
   const { workspace, controller, tasks, calls } = await fixture(t)
   const request = { action: 'prepare', requestKey: 'prepare-request-0001', hostId: 'host', request: 'Inspect fixture' }
@@ -265,6 +281,17 @@ test('host sessions deduplicate connection attempts and serialize terminal authe
   await assert.rejects(hosts.disconnect('first'), /active work/u)
   await second.close(); await other.close(); await hosts.close()
   assert.equal(closed, 2)
+})
+
+test('FreeBSD RAM uses Netdata in-use categories and refuses incomplete or ambiguous gauges', () => {
+  const labels = ['time', 'free', 'active', 'inactive', 'wired', 'cache', 'laundry', 'buffers']
+  const row = [Math.floor(Date.now() / 1000), 20, 20, 30, 10, 10, 5, 5]
+  const metric = normalizeMetrics('system.ram', { units: 'MiB' }, { result: { labels, data: [row] } })
+  assert.equal(metric.percentage, 40)
+  assert.match(metric.aggregation, /FreeBSD RAM in use/u)
+  for (const [names, values] of [[labels.slice(0, -1), row.slice(0, -1)], [labels, [...row.slice(0, -1), null]], [labels, [...row.slice(0, -1), -1]], [[...labels, 'active'], [...row, 5]], [labels.map(name => name === 'laundry' ? 'unknown' : name), row]]) {
+    assert.equal(normalizeMetrics('system.ram', { units: 'MiB' }, { result: { labels: names, data: [values] } }).percentage, null)
+  }
 })
 
 test('normalized metrics retain source, units, missing evidence and shared bounded sampling', async t => {

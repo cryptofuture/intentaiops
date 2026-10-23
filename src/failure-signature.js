@@ -51,7 +51,7 @@ export function classifyFailure ({ item, result, error }) {
   else if (/\bpackage_version_mismatch\b/u.test(lower)) code = 'PACKAGE_VERSION_MISMATCH'
   else if (/end of file on stdin at conffile prompt/u.test(lower)) code = 'PACKAGE_CONFIGURATION_CONFLICT'
   else if (/could not get lock \/var\/(?:lib\/(?:dpkg|apt)|cache\/apt)\/[^\n]*(?:held by process|resource temporarily unavailable)|unable to acquire the dpkg frontend lock[^\n]*another process using it/u.test(lower)) code = 'PACKAGE_MANAGER_BUSY'
-  else if (/unable to locate package|no match for argument|target not found|no such package|nothing provides|package .* not found/u.test(lower)) code = 'PACKAGE_NOT_FOUND'
+  else if (/unable to locate package|no match for argument|target not found|no such package|nothing provides|package .* not found|pkg: no packages available to install matching [^\n]* have been found in the repositories/u.test(lower)) code = 'PACKAGE_NOT_FOUND'
   else if (/apt(?:-get)?:|dnf:|yum:|apk:|pacman:|zypper:/u.test(lower) && item.phase === 'packages') code = 'PACKAGE_MANAGER_FAILED'
   else if (/checksum|sha(?:1|256|512).*(?:mismatch|failed)|digest.*(?:mismatch|failed)/u.test(lower)) code = 'CHECKSUM_MISMATCH'
   else if (/curl: \(|wget:|download.*failed|could not resolve host|httpreadseeker|timeout awaiting response headers|tls handshake timeout/u.test(lower) && item.phase === 'acquire') code = 'ARTIFACT_DOWNLOAD_FAILED'

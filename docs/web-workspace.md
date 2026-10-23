@@ -72,7 +72,11 @@ workspace becomes visible and does not reset task panes or scrollback.
 
 Host overview requests actual Netdata CPU, memory and per-filesystem series.
 Collectors and units are discovered, not fabricated. Samples show source,
-timestamp, aggregation and unavailable/stale states. Filesystems are not
+timestamp, aggregation and unavailable/stale states. FreeBSD RAM uses Netdata's
+[in-use calculation](https://github.com/netdata/netdata/blob/v2.12.0/src/health/health.d/ram.conf):
+active, wired, laundry and buffers divided by all seven reported RAM categories.
+The gauge explains its calculation and stays unavailable if required categories
+are missing or ambiguous. Filesystems are not
 combined into a misleading single disk gauge. Queries are scoped to the target
 Netdata node, not its streamed children. Filesystem capacity may describe a
 host-mounted filesystem rather than a container storage quota. Requests share a bounded host

@@ -6,23 +6,26 @@ export function buildFreebsdPodmanBootstrapTask (taskId, execution = {}, docker 
   if (execution.platform !== 'freebsd') throw new Error('Podman bootstrap requires a FreeBSD execution inventory')
   if (docker.preference === 'disabled') throw new Error('Podman is disabled by this host Docker preference; enable Automatic or Enable Docker preference first')
   if (execution.docker?.hostIsContainer || docker.hostIsContainer) throw new Error('reviewed FreeBSD Podman installation is unavailable inside a jail')
-  if (!docker.ready && execution.docker?.installSupported !== true && docker.installSupported !== true) throw new Error('reviewed Podman installation requires FreeBSD 15 or newer on a non-jailed host')
+  if (!docker.ready && execution.docker?.installSupported !== true && docker.installSupported !== true) throw new Error('reviewed Podman installation requires FreeBSD 14.4 or 15.1+ on a non-jailed host')
   const state = `/var/db/webminai/task-state/${taskId}-freebsd-podman`
   return {
     plan: {
       summary: 'Install and verify Podman Compose on FreeBSD',
       changeOverview: 'Confirm the native FreeBSD jail runtime requirements, capture package/path/module state, install Podman Suite and the packaged podman-compose implementation, and verify an isolated Linux-container workload.',
-      modifiedFiles: [state, ...PATHS, '/etc/fstab', '/etc/sysctl.conf', '/etc/rc.conf'],
+      modifiedFiles: [state, ...PATHS, '/etc/fstab', '/etc/sysctl.conf', '/etc/rc.conf', '/etc/pf.conf'],
       assumptions: ['FreeBSD Podman uses jails and VFS storage; CPU hardware virtualization and nested virtualization are not required.'],
-      warnings: ['FreeBSD Podman support is reviewed only for FreeBSD 15+ non-jailed hosts. The runtime is root-equivalent and application images must explicitly target a compatible Linux platform where required.'],
+      warnings: ['FreeBSD Podman support is reviewed only for FreeBSD 14.4 or 15.1+ non-jailed hosts. The runtime is root-equivalent and application images must explicitly target a compatible Linux platform where required.'],
       requiresConfirmation: true,
       commands: [
-        item('validate-freebsd-container-host', preflight(), 'Require FreeBSD 15+, a non-jailed host, pkg, and the native jail/VFS prerequisites before mutation'),
+        item('validate-freebsd-container-host', preflight(), 'Require FreeBSD 14.4 or 15.1+, a non-jailed host, pkg, and the native jail/VFS prerequisites before mutation'),
         item('capture-podman-baseline', capture(state), 'Capture package, path, fdescfs, kernel-module, and service state exactly once', ['validate-freebsd-container-host']),
         item('install-podman-suite', install(state), 'Install Podman Suite and podman-compose and initialize required FreeBSD facilities', ['capture-podman-baseline'], 1200000, 'job'),
-        item('verify-podman-suite', verify(), 'Verify Podman info, Compose, and a disposable container', ['install-podman-suite'], 600000, 'job')
+        item('configure-podman-storage', configureStorage(state), 'Configure VFS only for new task-owned storage; preserve existing container settings', ['install-podman-suite']),
+        item('configure-podman-network', configureNetwork(state), 'Preserve existing PF policy or initialize reviewed NAT-only rules when no policy exists', ['configure-podman-storage']),
+        item('verify-podman-suite', verify(), 'Verify Podman info, Compose, and a disposable container', ['configure-podman-network'], 600000, 'job')
       ],
       revertCommands: [
+        item('restore-podman-network', restoreNetwork(state), 'Restore only unchanged task-created NAT policy after every container has stopped', [], 30000, undefined, 'destructive'),
         item('restore-podman-baseline', restore(state), 'Remove only packages, paths, mounts, and configuration introduced by this task', [], 1200000, 'job', 'destructive'),
         item('verify-podman-baseline', verifyBaseline(state), 'Require exact package and owned-path baseline restoration', ['restore-podman-baseline']),
         item('remove-podman-task-state', `set -eu; rm -rf -- ${quote(state)}`, 'Remove task-owned baseline after exact comparison', ['verify-podman-baseline'], 30000, undefined, 'destructive')
@@ -40,7 +43,7 @@ function preflight () {
     '[ "$(uname -s)" = FreeBSD ]',
     'major=$(freebsd-version -u | sed -E \'s/^([0-9]+).*/\\1/\')',
     'case "$major" in ""|*[!0-9]*) printf \'FREEBSD_VERSION_UNSUPPORTED: could not identify FreeBSD\n\' >&2; exit 78;; esac',
-    '[ "$major" -ge 15 ] || { printf \'FREEBSD_VERSION_UNSUPPORTED: Podman common task requires FreeBSD 15 or newer; upgrade the host before retrying\n\' >&2; exit 78; }',
+    'case "$(freebsd-version -r)" in 14.4-*|15.[1-9]*-*) ;; *) printf \'FREEBSD_VERSION_UNSUPPORTED: Podman common task requires a reviewed FreeBSD 14.4 or 15.1+ kernel\\n\' >&2; exit 78;; esac',
     '[ "$(sysctl -n security.jail.jailed 2>/dev/null || printf 0)" = 0 ] || { printf \'FREEBSD_JAIL_UNSUPPORTED: install Podman on the outer FreeBSD host; nested jail delegation is not enabled for this common task\n\' >&2; exit 78; }',
     'command -v pkg >/dev/null',
     "printf '%s\n' 'FREEBSD_NATIVE_CONTAINERS: Podman uses jails and VFS; VT-x, AMD-V, and nested virtualization are not required'"
@@ -53,11 +56,23 @@ function capture (state) {
 }
 
 function install (state) {
-  return `set -eu; state=${quote(state)}; env ASSUME_ALWAYS_YES=yes pkg install -y ${PACKAGES.join(' ')}; pkg query '%n=%v' | LC_ALL=C sort > "$state/packages.after"; comm -13 "$state/packages.before" "$state/packages.after" | cut -d= -f1 > "$state/packages.added"; if ! mount | grep -Eq ' on /dev/fd .*fdescfs'; then mount -t fdescfs fdesc /dev/fd; : > "$state/fdescfs.added-mount"; fi; if ! grep -Eq '^[[:space:]]*fdesc[[:space:]]+/dev/fd[[:space:]]+fdescfs' /etc/fstab; then printf '%s\n' 'fdesc /dev/fd fdescfs rw 0 0' >> /etc/fstab; : > "$state/fdescfs.added-config"; fi; if ! test -c /dev/pf; then kldload pf; : > "$state/pf.added-module"; fi; sysctl net.pf.filter_local=1 >/dev/null; if ! grep -Eq '^[[:space:]]*net[.]pf[.]filter_local=1([[:space:]]|$)' /etc/sysctl.conf; then printf '%s\n' 'net.pf.filter_local=1' >> /etc/sysctl.conf; : > "$state/pf-filter.added-config"; fi; if ! kldstat -q -m linux; then service linux onestart >/dev/null; : > "$state/linux.added-module"; fi; sysrc podman_enable=YES >/dev/null; service podman start >/dev/null 2>&1 || true; install -d -m 0700 /var/db/containers/tmp`
+  return `set -eu; state=${quote(state)}; if ! kldstat -q -m fdescfs && [ "$(freebsd-version -k)" != "$(freebsd-version -r)" ]; then printf 'REBOOT_REQUIRED: boot the installed kernel before initializing Podman kernel facilities\\n' >&2; exit 78; fi; env ASSUME_ALWAYS_YES=yes pkg install -y ${PACKAGES.join(' ')}; pkg query '%n=%v' | LC_ALL=C sort > "$state/packages.after"; awk -F= 'FILENAME == ARGV[1] {before[$1]=1; next} !($1 in before) {print $1}' "$state/packages.before" "$state/packages.after" > "$state/packages.added"; if ! mount | grep -Eq ' on /dev/fd .*fdescfs'; then mount -t fdescfs fdesc /dev/fd; : > "$state/fdescfs.added-mount"; fi; if ! grep -Eq '^[[:space:]]*fdesc[[:space:]]+/dev/fd[[:space:]]+fdescfs' /etc/fstab; then printf '%s\n' 'fdesc /dev/fd fdescfs rw 0 0' >> /etc/fstab; : > "$state/fdescfs.added-config"; fi; if ! test -c /dev/pf; then kldload pf; : > "$state/pf.added-module"; fi; sysctl net.pf.filter_local=1 >/dev/null; if ! grep -Eq '^[[:space:]]*net[.]pf[.]filter_local=1([[:space:]]|$)' /etc/sysctl.conf; then printf '%s\n' 'net.pf.filter_local=1' >> /etc/sysctl.conf; : > "$state/pf-filter.added-config"; fi; if ! kldstat -q -m linux; then service linux onestart >/dev/null; : > "$state/linux.added-module"; fi; sysrc podman_enable=YES >/dev/null; service podman start >/dev/null 2>&1 || true; install -d -m 0700 /var/db/containers/tmp`
+}
+
+function configureStorage (state) {
+  return `set -eu; state=${quote(state)}; if [ -e "$state/_usr_local_etc_containers.existed" ] || [ -e "$state/_var_db_containers.existed" ]; then printf 'Existing container storage settings preserved\\n'; exit 0; fi; test ! -L /usr/local/etc/containers; test ! -L /usr/local/etc/containers/storage.conf; install -d -m 0755 /usr/local/etc/containers; printf '[storage]\\ndriver = "vfs"\\nrunroot = "/var/run/containers/storage"\\ngraphroot = "/var/db/containers/vfs-storage"\\n' > /usr/local/etc/containers/storage.conf; chmod 0644 /usr/local/etc/containers/storage.conf`
 }
 
 function verify () {
   return "set -eu; podman info >/dev/null; podman-compose version >/dev/null; podman run --rm --os=linux docker.io/library/alpine:3.23 /bin/sh -c 'printf podman-ready' | grep -Fxq podman-ready"
+}
+
+function configureNetwork (state) {
+  return `set -eu; LC_ALL=C; export LC_ALL; state=${quote(state)}; test ! -L "$state"; install -d -m 0700 "$state"; test ! -L /etc/pf.conf; if [ -e /etc/pf.conf ]; then if pfctl -s info | grep -q '^Status: Enabled' && pfctl -sn | grep -Fq 'nat-anchor "cni-rdr/*"' && pfctl -sn | grep -Fq 'rdr-anchor "cni-rdr/*"' && pfctl -s Tables | grep -Eq '^[[:space:]]*cni-nat[[:space:]]*$'; then printf 'Existing PF policy preserved\\n'; exit 0; fi; printf 'PODMAN_NETWORK_REVIEW_REQUIRED: existing PF policy needs operator-reviewed CNI integration\\n' >&2; exit 78; fi; if pfctl -s info | grep -q '^Status: Enabled' || [ -n "$(pfctl -sr)" ] || [ -n "$(pfctl -sn)" ]; then printf 'PODMAN_NETWORK_REVIEW_REQUIRED: refusing to replace active PF policy\\n' >&2; exit 78; fi; interface=$(route -n get default | awk '$1 == "interface:" {print $2}'); printf '%s\\n' "$interface" | grep -Eq '^[A-Za-z][A-Za-z0-9_.:-]{0,31}$' || exit 78; test ! -L /etc/rc.conf; test "$(stat -f '%u' /etc/rc.conf)" = 0; cp -p /etc/rc.conf "$state/pf-rc.conf.before"; chmod 0600 "$state/pf-rc.conf.before"; stat -f '%u:%g:%Lp' /etc/rc.conf > "$state/pf-rc.metadata"; sha256 -q /etc/rc.conf > "$state/pf-rc.before.sha256"; (pfctl -sr; pfctl -sn) | sha256 -q > "$state/pf-rules.before"; temporary=$(mktemp /etc/.intentaiops-pf.XXXXXX); trap 'rm -f -- "$temporary"' EXIT; printf 'table <cni-nat>\\nnat on %s inet from <cni-nat> to any -> (%s)\\nrdr-anchor "cni-rdr/*"\\nnat-anchor "cni-rdr/*"\\n' "$interface" "$interface" > "$temporary"; pfctl -nf "$temporary"; ln "$temporary" /etc/pf.conf; : > "$state/pf-created"; sha256 -q /etc/pf.conf > "$state/pf-config.sha256"; pfctl -f /etc/pf.conf; (pfctl -sr; pfctl -sn) | sha256 -q > "$state/pf-rules.applied"; pfctl -e; printf '\\n# Intent AI Ops task-owned Podman networking\\npf_enable="YES"\\n' >> /etc/rc.conf; sha256 -q /etc/rc.conf > "$state/pf-rc.applied.sha256"`
+}
+
+function restoreNetwork (state) {
+  return `set -eu; state=${quote(state)}; [ -e "$state/pf-created" ] || exit 0; test ! -L /etc/pf.conf; test ! -L /etc/rc.conf; test ! -L "$state/pf-rc.conf.before"; [ "$(sha256 -q "$state/pf-rc.conf.before")" = "$(cat "$state/pf-rc.before.sha256")" ] || { printf 'BASELINE_RESTORATION_BLOCKED: saved rc.conf changed\\n' >&2; exit 78; }; [ "$(stat -f '%u:%g:%Lp' /etc/rc.conf)" = "$(cat "$state/pf-rc.metadata")" ] || exit 78; rc=$(sha256 -q /etc/rc.conf); [ "$rc" = "$(cat "$state/pf-rc.before.sha256")" ] || [ "$rc" = "$(cat "$state/pf-rc.applied.sha256" 2>/dev/null || true)" ] || { printf 'BASELINE_RESTORATION_BLOCKED: rc.conf changed\\n' >&2; exit 78; }; [ "$(sha256 -q /etc/pf.conf)" = "$(cat "$state/pf-config.sha256")" ] || { printf 'BASELINE_RESTORATION_BLOCKED: PF configuration changed\\n' >&2; exit 78; }; [ -z "$(podman ps -q)" ] || { printf 'BASELINE_RESTORATION_BLOCKED: containers still depend on PF\\n' >&2; exit 78; }; current=$( (pfctl -sr; pfctl -sn) | sha256 -q); [ "$current" = "$(cat "$state/pf-rules.before")" ] || [ "$current" = "$(cat "$state/pf-rules.applied" 2>/dev/null || true)" ] || { printf 'BASELINE_RESTORATION_BLOCKED: active PF policy changed\\n' >&2; exit 78; }; if pfctl -s info | grep -q '^Status: Enabled'; then pfctl -d; fi; pfctl -f /dev/null; rm -f -- /etc/pf.conf; cat "$state/pf-rc.conf.before" > /etc/rc.conf`
 }
 
 function restore (state) {

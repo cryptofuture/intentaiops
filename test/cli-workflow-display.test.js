@@ -138,6 +138,22 @@ test('plan rendering shows every complete apply and revert command without ANSI 
   assert.equal(hasSgr(output.text), false)
 })
 
+test('CLI catalog refresh matches controller eligibility for native FreeBSD, Linux and the Podman prerequisite', async () => {
+  for (const [kind, catalogId, label] of [['catalog', 'ghost-freebsd', 'FreeBSD'], ['catalog', 'odoo-freebsd', 'FreeBSD'], ['catalog', 'podman-freebsd', 'FreeBSD'], ['catalog', 'ghost-linux', 'Linux'], ['catalog', 'unknown-fixture', null], ['ordinary', 'ghost-freebsd', null]]) {
+    const { ui } = plainUi()
+    ui.choose = async (_prompt, options) => {
+      const action = options.find(option => option.value === 'refresh-catalog')
+      assert.equal(action?.label ?? null, label ? `Refresh remaining native ${label} catalog steps` : null)
+      return null
+    }
+    const controller = {
+      tasks: { get: () => ({ kind, catalogId }), revisions: () => [] },
+      inspect: () => ({ task: { status: 'partial' }, commands: [], revisions: [] })
+    }
+    await manageExecution({ ui, controller, serverId: 'fixture-host', taskId: 1 })
+  }
+})
+
 test('local operator reviews show stored commands rather than sanitized browser projections', async () => {
   for (const action of ['inspect', 'propose', 'refresh-catalog', 'review-revision', 'resume']) {
     const { ui, output } = plainUi()

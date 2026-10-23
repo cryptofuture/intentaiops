@@ -8,7 +8,7 @@ import { AdminService } from '../src/admin-service.js'
 import { OperatorController } from '../src/operator-controller.js'
 import { startOperatorConsole } from '../src/operator-console.js'
 import { planFingerprint } from '../src/execution-journal.js'
-import { executeApprovedPlan } from '../src/plan-validator.js'
+import { executeApprovedPlan, validateCommandPlan } from '../src/plan-validator.js'
 import { MultiHostService } from '../src/multi-host-service.js'
 import { buildCommonTask } from '../src/common-tasks.js'
 import { CodexPlanner } from '../src/codex-planner.js'
@@ -30,6 +30,29 @@ async function fixture (t) {
   const controller = new OperatorController({ dataRoot: root, tasks, settings: { servers: { host: {} }, clusters: { cluster: { desiredStage2: 'active' } } }, adminFor: async () => admin })
   return { root, tasks, task, controller, calls, admin }
 }
+
+test('reviewed catalog maintenance keeps the CLI one-way policy without exempting AI plans', async t => {
+  for (const kind of ['catalog', 'ai']) {
+    const { controller, tasks, admin } = await fixture(t)
+    const created = tasks.create('host', 'Current-release maintenance', { kind, ...(kind === 'catalog' ? { catalogId: 'system-update-freebsd' } : {}) })
+    const update = buildCommonTask('system-update-freebsd', created.id, { platform: 'freebsd' }).plan
+    tasks.savePlan('host', created.id, update)
+    let requireRevert
+    admin.execute = async options => {
+      requireRevert = options.requireRevert
+      validateCommandPlan(options.plan, { executionIdentity: 'root' }, { requireRevert })
+      return options.plan.commands.map(item => ({ id: item.id, status: 'completed', result: { exitCode: 0, stdout: '', stderr: '' } }))
+    }
+    const view = controller.inspect('host', created.id)
+    if (kind === 'catalog') {
+      await controller.resume('host', created.id, view.stateVersion, view.fingerprint)
+      assert.equal(requireRevert, false)
+    } else {
+      await assert.rejects(controller.resume('host', created.id, view.stateVersion, view.fingerprint), /requires revert commands/u)
+      assert.equal(requireRevert, true)
+    }
+  }
+})
 
 test('a rejected execution preflight does not leave unstarted browser work running', async t => {
   const { controller, tasks, task, admin, calls } = await fixture(t)
@@ -159,6 +182,31 @@ test('native catalog refresh requires fresh approval and resume, preserves basel
   const events = tasks.allExecutionEvents('host', created.id)
   assert.equal(events.filter(event => event.type === 'command_completed' && event.commandId === 'capture-baseline').length, 1)
   assert.equal(events.filter(event => event.type === 'command_failed' && event.commandId === 'install-stack').length, 1)
+})
+
+test('FreeBSD catalog refresh preserves completed steps and requires separate approval', async t => {
+  const { tasks, admin, controller, calls } = await fixture(t)
+  const execution = { platform: 'freebsd' }
+  admin.refreshInventory = async () => ({ webminaiExecution: execution })
+  admin.settings.decryptApplicationDefaults = async () => ({})
+  admin.workspace.loadRules = async () => ({ policy: { executionIdentity: 'root' } })
+  admin.plan = async () => { throw new Error('AI must not be called') }
+  const created = tasks.create('host', 'Deploy n8n', { kind: 'catalog', catalogId: 'n8n-freebsd' })
+  const original = buildCommonTask('n8n-freebsd', created.id, { platform: 'freebsd', freebsdExecution: execution }).plan
+  tasks.savePlan('host', created.id, original)
+  const lease = tasks.acquireExecution('host', created.id, original)
+  for (const command of original.commands.slice(0, 2)) tasks.appendExecutionEvent('host', created.id, lease.owner, { type: 'command_completed', commandId: command.id, attemptId: command.id })
+  tasks.appendExecutionEvent('host', created.id, lease.owner, { type: 'command_failed', commandId: original.commands[2].id, attemptId: 'network-failure' })
+  tasks.releaseExecution('host', created.id, lease.owner)
+  const before = controller.inspect('host', created.id)
+  const proposal = await controller.proposeCatalogRefresh('host', created.id, before.stateVersion)
+  const revision = tasks.revisions('host', created.id).find(item => item.id === proposal.revisionId)
+  assert.equal(revision.approved, 0)
+  assert.deepEqual(revision.plan.commands.slice(0, 2), original.commands.slice(0, 2))
+  assert.deepEqual(revision.plan.revertCommands, original.revertCommands)
+  assert.notEqual(revision.plan.commands[2].id, original.commands[2].id)
+  assert.deepEqual(tasks.get('host', created.id).plan, original)
+  assert.deepEqual(calls, [])
 })
 
 test('catalog refresh rejects stale inventory decisions and non-native targets without mutating history', async t => {
@@ -445,7 +493,10 @@ test('approved rollback is journaled, never repeated, and prevents deployment co
   assert.deepEqual(calls, ['echo revised'])
   assert.equal(tasks.get('host', task.id).status, 'reverted')
   approved = controller.inspect('host', task.id)
+  const events = tasks.allExecutionEvents('host', task.id)
+  controller.adminFor = async () => { throw new Error('Reverted work must not open a remote session') }
   await assert.rejects(controller.resume('host', task.id, approved.stateVersion, approved.fingerprint), /rollback has started/u)
+  assert.deepEqual(tasks.allExecutionEvents('host', task.id), events)
 })
 
 test('rollback checks uncertain outcomes after acquiring execution ownership', async t => {

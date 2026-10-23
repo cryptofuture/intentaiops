@@ -2,8 +2,10 @@ import { test, expect } from '@playwright/test'
 import { launchLabCli } from './lab-cli.js'
 
 const enabled = Boolean(process.env.INTENT_WEB_SHELL_TEST === '1' && process.env.INTENT_WEB_HOST && process.env.INTENT_WEB_DATA_ROOT && process.env.VAULT_TEST)
+const platform = process.env.INTENT_WEB_SHELL_PLATFORM ?? 'Linux'
+if (!['Linux', 'FreeBSD', 'Darwin'].includes(platform)) throw new Error('Unsupported POSIX shell test platform')
 let cli
-test.describe('opt-in actual browser SSH shell on the Linux lab', () => {
+test.describe('opt-in actual browser SSH shell on a disposable POSIX host', () => {
   test.skip(!enabled, 'Also set INTENT_WEB_SHELL_TEST=1 to approve opening a real shell for read-only commands')
   test.beforeAll(async () => { test.setTimeout(120000); cli = await launchLabCli({ actions: true }) })
   test.afterAll(async () => { await cli?.close() })
@@ -23,7 +25,7 @@ test.describe('opt-in actual browser SSH shell on the Linux lab', () => {
     await page.keyboard.type("printf 'INTENT_BROWSER_SHELL_OK\\n'; uname -s; stty size; uptime")
     await page.keyboard.press('Enter')
     await expect(page.locator('.browser-terminal')).toContainText('INTENT_BROWSER_SHELL_OK')
-    await expect(page.locator('.browser-terminal')).toContainText('Linux')
+    await expect(page.locator('.browser-terminal')).toContainText(platform)
     await expect(page.locator('.browser-terminal')).toContainText('load average')
     const resized = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/shell') && response.request().method() === 'POST' && response.request().postDataJSON()?.action === 'resize')
     await page.setViewportSize({ width: 1100, height: 850 })
@@ -43,10 +45,10 @@ test.describe('opt-in actual browser SSH shell on the Linux lab', () => {
     await page.locator('.theme').filter({ has: page.getByText('Muxin Dusk', { exact: true }) }).click()
     await page.getByRole('button', { name: 'Use selected palette' }).click()
     await page.locator('.browser-terminal textarea').focus()
-    await page.keyboard.type("printf 'INTENT_DARK_THEME_OK\\n'")
+    await page.keyboard.type("printf '\\033[2J\\033[HINTENT_DARK_THEME_OK\\n'; uname -s; stty size; uptime")
     await page.keyboard.press('Enter')
     await expect(page.locator('.browser-terminal')).toContainText('INTENT_DARK_THEME_OK')
-    const screenshot = info.outputPath('linux-ssh-shell.png')
+    const screenshot = info.outputPath(platform.toLowerCase() + '-ssh-shell.png')
     await expect(page.locator('.shell-sessions')).toHaveCSS('margin-top', '12px')
     await page.screenshot({ path: screenshot, fullPage: true, maskColor: '#808080', mask: [page.locator('.tree-task:visible'), page.locator('.task-tabs:visible')] })
     page.once('dialog', dialog => dialog.accept())

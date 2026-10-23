@@ -3,6 +3,14 @@ import test from 'node:test'
 import { classifyFailure, isFailureCode } from '../src/failure-signature.js'
 import { executionDiagnostics } from '../src/execution-diagnostics.js'
 
+test('FreeBSD pkg missing exact package is an authoritative package failure, not a transport diagnosis', () => {
+  const item = { id: 'install-jellyfin-runtime' }
+  const result = { exitCode: 1, stderr: "pkg: No packages available to install matching 'jellyfin-10.11.11' have been found in the repositories" }
+  assert.equal(classifyFailure({ item, result }).code, 'PACKAGE_NOT_FOUND')
+  assert.ok(executionDiagnostics({ item, result }).some(value => value.code === 'PACKAGE_NOT_FOUND' && value.confidence === 'confirmed'))
+  assert.deepEqual(executionDiagnostics({ item, result: { ...result, exitCode: 0 } }), [])
+})
+
 test('explicit CPU instruction-set failures remain distinct from exit 127 or SIGKILL', () => {
   const item = { id: 'check-cpu', phase: 'baseline' }
   for (const stderr of ['CPU_INSTRUCTION_SET_UNSUPPORTED: requires x86-64-v2', 'Fatal glibc error: CPU does not support x86-64-v2']) {

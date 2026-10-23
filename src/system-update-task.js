@@ -134,7 +134,7 @@ function freebsdRoute (taskId) {
     modifiedFiles: [state, '/var/db/freebsd-update', '/var/db/pkg', '/boot', '/usr'],
     commands: [
       item('capture-update-baseline', capture, 'Capture FreeBSD kernel/userland identity and exact package versions', 'change', 120000),
-      item('install-current-release-updates', update, 'Install same-release FreeBSD base patches and all configured pkg updates without rebooting', 'change', 300000, ['capture-update-baseline']),
+      item('install-current-release-updates', update, 'Install same-release FreeBSD base patches and all configured pkg updates without rebooting', 'change', 3600000, ['capture-update-baseline'], 'job'),
       item('report-system-update', summarize, 'Record package changes, kernel reboot need, and newer official FreeBSD releases', 'read', 300000, ['install-current-release-updates'])
     ]
   }

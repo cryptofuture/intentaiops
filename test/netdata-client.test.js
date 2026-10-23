@@ -79,12 +79,24 @@ test('FreeBSD execution inventory recognizes ready Podman Compose on a non-jail 
   }
   const inventory = await client.freebsdExecutionInventory()
   assert.equal(inventory.platform, 'freebsd')
+  assert.equal(inventory.memoryBytes, null)
   assert.equal(inventory.docker.runtime, 'podman')
   assert.equal(inventory.docker.installSupported, true)
   assert.equal(inventory.docker.composeCommand, 'podman-compose')
   assert.equal(inventory.docker.requiresExplicitLinuxPlatform, true)
   assert.equal(inventory.docker.virtualizationRequired, false)
   assert.match(inventory.docker.virtualizationInstructions, /jails and VFS/u)
+})
+
+test('FreeBSD inventory exposes only bounded numeric physical memory values', async () => {
+  const client = new NetdataClient({ ssh: {}, connectionUrl: 'ssh://freebsd.example', actionKey: ACTION_KEY })
+  for (const [value, expected] of [['4294967296', 4294967296], ['-1', null], ['invalid', null], ['99999999999999999999999', null]]) {
+    client.runCommand = async command => {
+      assert.match(command, /sysctl -n hw[.]physmem/u)
+      return { exitCode: 0, stdout: `memoryBytes=${value}\n`, stderr: '' }
+    }
+    assert.equal((await client.freebsdExecutionInventory()).memoryBytes, expected)
+  }
 })
 
 test('macOS execution inventory distinguishes Homebrew availability from hypervisor support', async () => {

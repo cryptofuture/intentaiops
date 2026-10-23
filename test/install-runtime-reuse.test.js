@@ -8,6 +8,34 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { buildIntentAiOpsInstallTask } from '../src/intent-ai-ops-install-task.js'
 
+test('FreeBSD installer verifies SQLite and limits npm 12 lifecycle approval to its native dependencies', () => {
+  for (const version of ['11.9.0', '12.0.2']) {
+    const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-freebsd-installer-'))
+    try {
+      const tools = path.join(directory, 'tools')
+      const install = path.join(directory, 'install')
+      const runtime = path.join(install, 'runtime/bin')
+      const scripts = path.join(install, 'npm/lib/node_modules/intent-ai-ops/scripts')
+      mkdirSync(tools)
+      mkdirSync(runtime, { recursive: true })
+      for (const command of ['mkdir', 'cut', 'dirname', 'chmod']) symlinkSync(existsSync(`/usr/bin/${command}`) ? `/usr/bin/${command}` : `/bin/${command}`, path.join(tools, command))
+      symlinkSync(process.execPath, path.join(runtime, 'node'))
+      writeFileSync(path.join(tools, 'uname'), '#!/bin/sh\nprintf FreeBSD\n', { mode: 0o700 })
+      writeFileSync(path.join(tools, 'pkg'), '#!/bin/sh\n[ "$1" = info ] || exit 99\n', { mode: 0o700 })
+      writeFileSync(path.join(tools, 'python3.12'), '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+      mkdirSync(scripts, { recursive: true })
+      writeFileSync(path.join(scripts, 'install-better-sqlite3.js'), `require('node:assert/strict').equal(process.env.PYTHON, ${JSON.stringify(path.join(tools, 'python3.12'))}); require('node:fs').writeFileSync(${JSON.stringify(path.join(directory, 'sqlite-verified'))}, 'verified')`)
+      writeFileSync(path.join(runtime, 'npm'), `#!/bin/sh\nif [ "$1" = --version ]; then printf '${version}'; exit 0; fi\nprintf '%s\\n' "$@" > '${directory}/npm-arguments'\n`, { mode: 0o700 })
+      const result = spawnSync('/bin/sh', [fileURLToPath(new URL('../scripts/install.sh', import.meta.url))], { encoding: 'utf8', env: { ...process.env, PYTHON: '', PATH: tools, INTENTAI_OPS_INSTALL_ROOT: install, INTENTAI_OPS_BIN_DIR: path.join(directory, 'bin'), INTENTAI_OPS_PACKAGE_URL: '/fixture/package.tgz' } })
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(readFileSync(path.join(directory, 'sqlite-verified'), 'utf8'), 'verified')
+      const argumentsText = readFileSync(path.join(directory, 'npm-arguments'), 'utf8')
+      assert.equal(argumentsText.includes('--allow-scripts=better-sqlite3,node-pty'), version.startsWith('12.'))
+      assert.ok(!argumentsText.includes('dangerously-allow-all-scripts'))
+    } finally { rmSync(directory, { recursive: true, force: true }) }
+  }
+})
+
 test('default POSIX package download verifies its checksum and npm receives only the staged local archive', { skip: process.platform === 'win32' }, () => {
   for (const scenario of ['valid', 'corrupt', 'unavailable', 'malformed']) {
     const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-cli-download-'))

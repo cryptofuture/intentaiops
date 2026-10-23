@@ -8,6 +8,7 @@ export function normalizeMetrics (context, metadata, response) {
   const observedAt = new Date(row[0] * 1000).toISOString()
   const series = labels.slice(1).map((dimension, i) => ({ dimension: String(dimension).slice(0, 160), value: Number.isFinite(row[i + 1]) ? row[i + 1] : null }))
   let percentage = null
+  let memoryCalculation = null
   if (context === 'system.cpu' && ['%', 'percentage'].includes(units)) {
     const idle = series.find(s => s.dimension === 'idle')
     if (idle?.value !== null && idle) percentage = 100 - idle.value
@@ -17,8 +18,13 @@ export function normalizeMetrics (context, metadata, response) {
     const used = series.find(s => s.dimension === 'used')
     const total = series.reduce((v, s) => v + (s.value ?? 0), 0)
     if (used?.value !== null && used && total > 0 && series.every(s => s.value !== null)) percentage = used.value / total * 100
+    const freebsdDimensions = ['free', 'active', 'inactive', 'wired', 'cache', 'laundry', 'buffers']
+    if (!used && total > 0 && series.length === freebsdDimensions.length && freebsdDimensions.every(name => series.filter(s => s.dimension === name).length === 1) && series.every(s => s.value !== null && s.value >= 0)) {
+      percentage = series.filter(s => ['active', 'wired', 'laundry', 'buffers'].includes(s.dimension)).reduce((sum, s) => sum + s.value, 0) / total * 100
+      memoryCalculation = 'FreeBSD RAM in use: (active + wired + laundry + buffers) / total reported RAM'
+    }
   }
-  return { state: Date.now() - Date.parse(observedAt) > 30000 ? 'stale' : 'available', source: 'Netdata /api/v3/data', context, units: String(units ?? 'unknown').slice(0, 32), observedAt, aggregation: context === 'disk.space' ? 'per-filesystem dimensions, not a fleet-wide gauge' : 'latest 5-second average', percentage: percentage !== null && percentage >= 0 && percentage <= 100 ? percentage : null, series: series.slice(0, 100) }
+  return { state: Date.now() - Date.parse(observedAt) > 30000 ? 'stale' : 'available', source: 'Netdata /api/v3/data', context, units: String(units ?? 'unknown').slice(0, 32), observedAt, aggregation: context === 'disk.space' ? 'per-filesystem dimensions, not a fleet-wide gauge' : 'latest 5-second average' + (memoryCalculation ? '; ' + memoryCalculation : ''), percentage: percentage !== null && percentage >= 0 && percentage <= 100 ? percentage : null, series: series.slice(0, 100) }
 }
 
 export class OperatorMetrics {

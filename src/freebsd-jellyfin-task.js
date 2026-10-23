@@ -38,7 +38,7 @@ function prepareFresh (state) {
 }
 
 function installRuntime (state) {
-  return `set -eu; env ASSUME_ALWAYS_YES=yes pkg install -y jellyfin-${VERSION} nginx curl ca_root_nss; [ "$(pkg query '%v' jellyfin)" = ${VERSION} ]; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}`
+  return `set -eu; env ASSUME_ALWAYS_YES=yes pkg update; package_version=$(pkg -o REPO_AUTOUPDATE=false rquery '%v' jellyfin | LC_ALL=C sort -u); case "$package_version" in ''|*[!0-9._,]*) printf 'PACKAGE_VERSION_MISMATCH: ambiguous Jellyfin package version\\n' >&2; exit 78;; esac; printf '%s\\n' "$package_version" | LC_ALL=C grep -Eq '^${VERSION.replaceAll('.', '[.]')}(_[0-9]+)?(,[0-9]+)?$' || { printf 'PACKAGE_VERSION_MISMATCH: unsupported Jellyfin upstream version\\n' >&2; exit 78; }; env ASSUME_ALWAYS_YES=yes pkg install -y "jellyfin-$package_version" nginx curl ca_root_nss; [ "$(pkg query '%v' jellyfin)" = "$package_version" ]; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}`
 }
 
 function deploy () {

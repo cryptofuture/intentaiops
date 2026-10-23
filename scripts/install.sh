@@ -14,6 +14,22 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
   exit 0
 fi
 
+ensure_freebsd_packages () {
+  missing_packages=
+  for package do
+    pkg info -e "$package" >/dev/null 2>&1 || missing_packages="$missing_packages $package"
+  done
+  if [ -n "$missing_packages" ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+      pkg install -y $missing_packages
+    else
+      command -v sudo >/dev/null 2>&1 || { printf '%s\n' 'ERROR: FreeBSD package installation requires root or sudo.' >&2; exit 1; }
+      sudo pkg install -y $missing_packages
+    fi
+  fi
+}
+
+system_name=$(uname -s)
 mkdir -p "$INSTALL_ROOT" "$BIN_DIRECTORY"
 
 if ! command -v node >/dev/null 2>&1 && [ -x "$INSTALL_ROOT/runtime/bin/node" ] && [ -x "$INSTALL_ROOT/runtime/bin/npm" ] && "$INSTALL_ROOT/runtime/bin/node" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 24 || (major === 24 && minor >= 7) ? 0 : 1)'; then
@@ -32,8 +48,8 @@ if command -v node >/dev/null 2>&1; then
   command -v npm >/dev/null 2>&1 || { printf '%s\n' 'ERROR: npm is missing from the installed Node.js runtime.' >&2; exit 1; }
   NODE_COMMAND=$(command -v node)
   NPM_COMMAND=$(command -v npm)
+  if [ "$system_name" = FreeBSD ]; then ensure_freebsd_packages python312 gmake; fi
 else
-  system_name=$(uname -s)
   if [ "$system_name" = Linux ] && [ -f /etc/alpine-release ]; then
     if [ "$(id -u)" -eq 0 ]; then
       apk add --no-cache nodejs npm
@@ -45,12 +61,7 @@ else
     NPM_COMMAND=$(command -v npm)
     "$NODE_COMMAND" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 24 || (major === 24 && minor >= 7) ? 0 : 1)' || { printf '%s\n' 'ERROR: Alpine requires Node.js 24.7 or newer.' >&2; exit 1; }
   elif [ "$system_name" = FreeBSD ]; then
-    if [ "$(id -u)" -eq 0 ]; then
-      pkg install -y node24 npm-node24 python312 gmake
-    else
-      command -v sudo >/dev/null 2>&1 || { printf '%s\n' 'ERROR: FreeBSD Node installation requires root or sudo.' >&2; exit 1; }
-      sudo pkg install -y node24 npm-node24 python312 gmake
-    fi
+    ensure_freebsd_packages node24 npm-node24 python312 gmake
     NODE_COMMAND=/usr/local/bin/node
     NPM_COMMAND=/usr/local/bin/npm
   else
@@ -91,7 +102,20 @@ fi
 PATH=$(dirname "$NODE_COMMAND"):$PATH
 export PATH
 export NODE_OPTIONS="${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000"
-"$NPM_COMMAND" install --global --prefix "$INSTALL_ROOT/npm" "$PACKAGE_URL"
+if [ "$system_name" = FreeBSD ] && [ -z "${PYTHON:-}" ]; then
+  PYTHON=$(command -v python3.12)
+  export PYTHON
+fi
+set --
+npm_major=$("$NPM_COMMAND" --version | cut -d. -f1)
+case "$npm_major" in
+  ''|*[!0-9]*) ;;
+  *) if [ "$npm_major" -ge 12 ]; then set -- --allow-scripts=better-sqlite3,node-pty; fi ;;
+esac
+"$NPM_COMMAND" install --global --prefix "$INSTALL_ROOT/npm" "$@" "$PACKAGE_URL"
+if [ "$(uname -s)" = FreeBSD ]; then
+  "$NODE_COMMAND" "$INSTALL_ROOT/npm/lib/node_modules/intent-ai-ops/scripts/install-better-sqlite3.js"
+fi
 printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$NODE_COMMAND" "$INSTALL_ROOT/npm/lib/node_modules/intent-ai-ops/bin/intentaiops.js" > "$BIN_DIRECTORY/intentaiops"
 printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$NODE_COMMAND" "$INSTALL_ROOT/npm/lib/node_modules/intent-ai-ops/bin/intentops.js" > "$BIN_DIRECTORY/intentops"
 chmod 0755 "$BIN_DIRECTORY/intentaiops" "$BIN_DIRECTORY/intentops"

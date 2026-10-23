@@ -136,6 +136,8 @@ test('maintenance catalog installs current-release updates without reboot or rel
   assert.match(linux.find(item => item.id === 'install-current-release-updates').command, /apt-get -y .* dist-upgrade/u)
   assert.match(linux.find(item => item.id === 'install-current-release-updates').command, /zypper --non-interactive update/u)
   const freebsd = buildCommonTask('system-update-freebsd', 222, { platform: 'freebsd' }).plan.commands
+  assert.equal(freebsd.find(item => item.id === 'install-current-release-updates').executionMode, 'job')
+  assert.equal(freebsd.find(item => item.id === 'install-current-release-updates').timeoutMs, 3600000)
   assert.match(freebsd.find(item => item.id === 'report-system-update').command, /installed-userland-before/u)
   assert.match(freebsd.find(item => item.id === 'report-system-update').command, /full-base-update-log/u)
   const windows = buildCommonTask('system-update-windows', 221, { platform: 'windows' }).plan.commands
@@ -190,6 +192,17 @@ test('Intent AI Ops installer is the last application task on every host platfor
     assert.equal(validateCommandPlan(built.plan, rootExecutionPolicy({})), built.plan)
     assert.match(built.plan.commands.find(command => command.id === 'install-intent-ai-ops').command, /raw\.githubusercontent\.com/u)
     assert.equal(built.plan.revertCommands.length, 1)
+    if (platform === 'freebsd') {
+      const install = built.plan.commands.find(command => command.id === 'install-intent-ai-ops').command
+      const rollback = built.plan.revertCommands[0].command
+      assert.match(install, /if \[ ! -e "\$state\/packages[.]before" \]/u)
+      assert.match(install, /trap 'status=\$\?/u)
+      assert.match(install, /packages[.]after/u)
+      assert.match(rollback, /test -s "\$state\/packages[.]before"; test -s "\$state\/packages[.]after"/u)
+      assert.match(rollback, /comm -13/u)
+      assert.match(rollback, /grep -Ev/u)
+      assert.doesNotMatch(rollback, /pkg delete -f|pkg delete[^;]+\|\| true/u)
+    }
     if (platform !== 'windows') {
       const install = built.plan.commands.find(command => command.id === 'install-intent-ai-ops').command
       for (const marker of ['owns-root', 'installed']) {
@@ -341,7 +354,8 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd', docker: { daemonReachable: true, composeAvailable: true } }
   })
   assert.equal(validateCommandPlan(jellyfin.plan, rootExecutionPolicy({})), jellyfin.plan)
-  assert.match(jellyfin.plan.commands.find(item => item.id === 'install-jellyfin-runtime').command, /jellyfin-10\.11\.11/u)
+  assert.match(jellyfin.plan.commands.find(item => item.id === 'install-jellyfin-runtime').command, /jellyfin-\$package_version/u)
+  assert.ok(jellyfin.plan.commands.find(item => item.id === 'install-jellyfin-runtime').command.includes('^10[.]11[.]11(_[0-9]+)?(,[0-9]+)?$'))
   assert.match(jellyfin.plan.commands.find(item => item.id === 'prepare-jellyfin').command, /\[ ! -d .*99-jellyfin-freebsd.* \] \|\| exit 0/u)
   assert.match(jellyfin.plan.commands.find(item => item.id === 'deploy-jellyfin').command, /Startup\/Complete/u)
   assert.match(jellyfin.verifyApplied, /System\/Info\/Public/u)
@@ -350,7 +364,7 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd', docker: { daemonReachable: true, composeAvailable: true } }
   })
   assert.equal(validateCommandPlan(mattermost.plan, rootExecutionPolicy({})), mattermost.plan)
-  assert.match(mattermost.plan.commands.find(item => item.id === 'install-mattermost-runtime').command, /mattermost-server-11\.7\.3_1/u)
+  assert.match(mattermost.plan.commands.find(item => item.id === 'install-mattermost-runtime').command, /mattermost-server-11\.7\.10_1/u)
   assert.match(mattermost.plan.commands.find(item => item.id === 'initialize-mattermost-admin').command, /system_admin/u)
   assert.match(mattermost.verifyApplied, /api\/v4\/system\/ping/u)
   const n8n = buildCommonTask('n8n-freebsd', 101, {
@@ -358,7 +372,7 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd', docker: { daemonReachable: true, composeAvailable: true } }
   })
   assert.equal(validateCommandPlan(n8n.plan, rootExecutionPolicy({})), n8n.plan)
-  assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-runtime').command, /node24-24\.18\.0/u)
+  assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-runtime').command, /for package in 'node24' 'npm-node24'/u)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /n8n@2\.33\.7/u)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /SQLITE_DQS/u)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /-Bsymbolic/u)
@@ -378,7 +392,7 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd' }
   })
   assert.equal(validateCommandPlan(odoo.plan, rootExecutionPolicy({})), odoo.plan)
-  assert.match(odoo.plan.commands.find(item => item.id === 'install-odoo-runtime').command, /postgresql17-server-17\.10/u)
+  assert.match(odoo.plan.commands.find(item => item.id === 'install-odoo-runtime').command, /'postgresql17-server' 'nginx'/u)
   assert.equal(odoo.plan.commands.find(item => item.id === 'install-odoo-runtime').timeoutMs, 3600000)
   assert.match(odoo.plan.commands.find(item => item.id === 'install-odoo-application').command, /GEVENTSETUP_EMBED_LIBEV=0/u)
   assert.match(odoo.plan.commands.find(item => item.id === 'configure-odoo').command, /CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1/u)
@@ -389,7 +403,7 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd' }
   })
   assert.equal(validateCommandPlan(homeAssistant.plan, rootExecutionPolicy({})), homeAssistant.plan)
-  assert.match(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-runtime').command, /python314-3\.14\.7/u)
+  assert.match(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-runtime').command, /'python314' 'py314-sqlite3'/u)
   assert.match(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-application').command, /uv==0\.11\.31/u)
   assert.match(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-application').command, /application-installed/u)
   assert.doesNotMatch(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-runtime').command, /pkg clean/u)
@@ -401,9 +415,9 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd' }
   })
   assert.equal(validateCommandPlan(magento.plan, rootExecutionPolicy({})), magento.plan)
-  assert.match(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /php84-8\.4\.24/u)
+  assert.match(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /'php84' 'php84-composer'/u)
   assert.equal(magento.plan.commands.find(item => item.id === 'install-magento-runtime').timeoutMs, 3600000)
-  assert.match(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /opensearch219-2\.19\.5/u)
+  assert.match(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /'opensearch219' 'valkey8'/u)
   assert.match(magento.plan.commands.find(item => item.id === 'install-magento-source').command, /application-installed/u)
   assert.match(magento.plan.commands.find(item => item.id === 'initialize-magento').command, /application-initialized/u)
   assert.doesNotMatch(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /pkg clean/u)
@@ -477,9 +491,12 @@ test('Linux Docker and FreeBSD Podman common tasks expose actionable platform pr
     docker: { platform: 'freebsd', preference: 'auto', ready: false, installSupported: true, installMethod: 'freebsd-podman-linux' }
   })
   assert.equal(validateCommandPlan(freebsd.plan, rootExecutionPolicy({})), freebsd.plan)
-  assert.match(freebsd.plan.commands[0].command, /FreeBSD 15 or newer/u)
+  assert.match(freebsd.plan.commands[0].command, /FreeBSD 14[.]4 or 15[.]1\+/u)
   assert.match(freebsd.plan.commands[0].command, /nested virtualization are not required/u)
   assert.match(freebsd.plan.commands.find(item => item.id === 'install-podman-suite').command, /podman-suite py312-podman-compose/u)
+  const podmanInstall = freebsd.plan.commands.find(item => item.id === 'install-podman-suite').command
+  assert.ok(podmanInstall.includes('REBOOT_REQUIRED'))
+  assert.ok(podmanInstall.indexOf('REBOOT_REQUIRED') < podmanInstall.indexOf('pkg install'), 'Reject missing matching kernel facilities before package changes')
   assert.match(freebsd.plan.revertCommands.find(item => item.id === 'verify-podman-baseline').command, /\[ ! -d .*121-freebsd-podman.* \] \|\|/u)
 })
 

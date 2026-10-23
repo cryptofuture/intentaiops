@@ -1,3 +1,6 @@
+import { freebsdNginxSecurityCommand } from './freebsd-nginx-security.js'
+import { freebsdInstallMissingPackages } from './freebsd-runtime-packages.js'
+
 const VERSION = '2.4.8-p5'
 const ARCHIVE_SHA256 = 'c3da9206254d8c7bc383f7a0187b07671d0fc7c1a5e6a11307fe6c2b57d8c8b9'
 const APP_ROOT = '/usr/local/lib/webminai-magento-18108'
@@ -51,8 +54,12 @@ function prepareFresh (state) {
 }
 
 function installRuntime (state) {
-  const extensions = ['bcmath', 'ctype', 'curl', 'dom', 'fileinfo', 'filter', 'ftp', 'gd', 'iconv', 'intl', 'mbstring', 'mysqli', 'opcache', 'pdo', 'pdo_mysql', 'phar', 'posix', 'session', 'simplexml', 'soap', 'sockets', 'sodium', 'tokenizer', 'xml', 'xmlreader', 'xmlwriter', 'xsl', 'zip', 'zlib'].map(name => `php84-${name}-8.4.24`).join(' ')
-  return `set -eu; env ASSUME_ALWAYS_YES=yes pkg install -y php84-8.4.24 php84-composer-2.10.2 ${extensions} mariadb114-server-11.4.12 opensearch219-2.19.5 valkey8-8.1.8 nginx; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}; php -r 'exit(PHP_VERSION_ID >= 80400 && PHP_VERSION_ID < 80500 ? 0 : 1);'; COMPOSER_ALLOW_SUPERUSER=1 composer --version | grep -F '2.10.2'; /usr/local/libexec/mariadbd --version | grep -F '11.4.12'; /usr/local/lib/opensearch/bin/opensearch --version | grep -F '2.19.5'; valkey-server --version | grep -F '8.1.8'`
+  return installRuntimePackages(state) + `; ${freebsdNginxSecurityCommand(state)}`
+}
+
+function installRuntimePackages (state) {
+  const extensions = ['bcmath', 'ctype', 'curl', 'dom', 'fileinfo', 'filter', 'ftp', 'gd', 'iconv', 'intl', 'mbstring', 'mysqli', 'opcache', 'pdo', 'pdo_mysql', 'phar', 'posix', 'session', 'simplexml', 'soap', 'sockets', 'sodium', 'tokenizer', 'xml', 'xmlreader', 'xmlwriter', 'xsl', 'zip', 'zlib'].map(name => `php84-${name}`)
+  return `set -eu; ${freebsdInstallMissingPackages(['php84', 'php84-composer', ...extensions, 'mariadb114-server', 'opensearch219', 'valkey8', 'nginx'])}; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}; php -r 'exit(PHP_VERSION_ID >= 80400 && PHP_VERSION_ID < 80500 ? 0 : 1);'; COMPOSER_ALLOW_SUPERUSER=1 composer --version | grep -E '(^|[^0-9])2[.]10[.]'; /usr/local/libexec/mariadbd --version | grep -E '(^|[^0-9])11[.]4[.]'; /usr/local/lib/opensearch/bin/opensearch --version | grep -E '(^|[^0-9])2[.]19[.]'; valkey-server --version | grep -E '(^|[^0-9])8[.]1[.]'`
 }
 
 function installSource (state) {

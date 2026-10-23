@@ -4,10 +4,12 @@ import { launchLabCli } from './lab-cli.js'
 const hostId = process.env.INTENT_WEB_HOST
 const dataRoot = process.env.INTENT_WEB_DATA_ROOT
 const enabled = Boolean(hostId && dataRoot && process.env.VAULT_TEST)
+const platform = process.env.INTENT_WEB_SHELL_PLATFORM ?? 'Linux'
+if (!['Linux', 'FreeBSD', 'Darwin'].includes(platform)) throw new Error('Unsupported POSIX lab platform')
 let cli, launch, hostSnapshot
 const errors = new WeakMap()
 
-test.describe('opt-in existing Linux lab, actual CLI and read-only browser', () => {
+test.describe('opt-in existing POSIX lab, actual CLI and read-only browser', () => {
   test.skip(!enabled, 'Requires INTENT_WEB_HOST, existing INTENT_WEB_DATA_ROOT and VAULT_TEST')
   test.beforeAll(async () => {
     test.setTimeout(120000)
@@ -26,7 +28,7 @@ test.describe('opt-in existing Linux lab, actual CLI and read-only browser', () 
   })
   test.afterEach(async ({ page }, info) => {
     if (!errors.has(page)) return
-    const screenshot = info.outputPath('linux-lab.png')
+    const screenshot = info.outputPath(platform.toLowerCase() + '-lab.png')
     await page.screenshot({ path: screenshot, fullPage: true, maskColor: '#808080', mask: [page.locator('pre:visible'), page.locator('code:visible'), page.locator('.tree-task:visible'), page.locator('.task-tabs:visible')] })
     expect(errors.get(page)).toEqual([])
   })

@@ -227,8 +227,9 @@ Failure details now separate **what happened** from **why it may have happened**
 
 Use **Review a pending plan revision** to reopen a proposal you did not approve earlier. Approval leaves execution paused; **Review and resume** is a separate step.
 
-If a native Linux application failed and its catalog recipe has been fixed,
-choose **Refresh remaining native Linux catalog steps**. This rebuilds remaining
+If a native Linux or FreeBSD application failed and its catalog recipe has been
+fixed, choose **Refresh remaining native Linux catalog steps** or **Refresh
+remaining native FreeBSD catalog steps**. This rebuilds remaining
 steps from local catalog code without an AI call. Review the new plan, approve,
 then resume. It preserves completed commands and the original rollback, and
 refuses uncertain work or incompatible catalog changes. This requires local task

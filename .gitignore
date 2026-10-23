@@ -28,3 +28,4 @@ scripts/.kubernetes-stage2-action-key
 core
 core.*
 /artifacts/netbook-docker/
+/artifacts/freebsd-common/

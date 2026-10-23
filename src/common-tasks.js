@@ -259,7 +259,7 @@ const DEFINITIONS = [
   {
     id: 'podman-freebsd',
     label: 'Install Podman Suite and Compose on FreeBSD',
-    description: 'Reviewed FreeBSD 15+ non-jail Podman installation with jail/VFS preflight, package/path baseline, container verification, and rollback.',
+    description: 'Reviewed FreeBSD 14.4 or 15.1+ non-jail Podman installation with jail/VFS preflight, package/path baseline, container verification, and rollback.',
     category: 'application',
     platform: 'freebsd',
     prerequisite: true,
@@ -658,7 +658,7 @@ export function commonTaskEligibility (catalogId, options = {}) {
     if (docker.preference === 'disabled') return { eligible: false, reason: 'container runtime disabled by host preference' }
     if (catalogId === 'docker-linux' && !docker.ready && (!docker.installSupported || !['official-apt', 'official-rpm', 'distribution-packages'].includes(docker.installMethod))) return { eligible: false, reason: 'no reviewed Docker installation route' }
     const freebsdExecution = options.freebsdExecution ?? options.inventory?.webminaiExecution
-    if (catalogId === 'podman-freebsd' && !docker.ready && freebsdExecution?.docker?.installSupported !== true && docker.installSupported !== true) return { eligible: false, reason: 'requires FreeBSD 15+ outside a jail' }
+    if (catalogId === 'podman-freebsd' && !docker.ready && freebsdExecution?.docker?.installSupported !== true && docker.installSupported !== true) return { eligible: false, reason: 'requires FreeBSD 14.4 or 15.1+ outside a jail' }
   }
 
   if (platform === 'windows' && !definition.prerequisite && !['brave-windows', 'intent-ai-ops-windows'].includes(catalogId) && !docker.ready) {
