@@ -13,7 +13,7 @@ const APPLICATIONS = {
   'home-assistant': { build: buildFreebsdHomeAssistantTask, port: 18115, subnet: 115, services: ['webminai_home_assistant', 'nginx'], sourceBuild: 'python', qualified: ['14.4', '15.1'] },
   magento: { build: buildFreebsdMagentoTask, port: 18108, subnet: 108, services: ['webminai_magento_mysql', 'opensearch', 'valkey', 'php_fpm', 'cron', 'nginx'], qualified: ['14.4', '15.1'] },
   ghost: { build: buildFreebsdGhostTask, port: 18110, subnet: 110, services: ['webminai_ghost_mysql', 'webminai_ghost', 'nginx'], sourceBuild: 'node', qualified: ['15.1'] },
-  n8n: { build: buildFreebsdN8nTask, port: 18109, subnet: 109, services: ['webminai_n8n', 'nginx'], sourceBuild: 'node', verifyInside: true, qualified: [] },
+  n8n: { build: buildFreebsdN8nTask, port: 18109, subnet: 109, services: ['webminai_n8n', 'nginx'], sourceBuild: 'node', verifyInside: true, qualified: ['14.4', '15.1'] },
   mattermost: { build: buildFreebsdMattermostTask, port: 18111, subnet: 111, services: ['postgresql', 'webminai_mattermost', 'nginx'], ipc: true, qualified: ['15.1'] },
   jellyfin: { build: buildFreebsdJellyfinTask, port: 18113, subnet: 113, services: ['jellyfin', 'nginx'], mlock: true, qualified: ['14.4', '15.1'] }
 }

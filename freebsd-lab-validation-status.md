@@ -1,5 +1,88 @@
 # FreeBSD common-task lab validation
 
+## n8n Podman qualification COMPLETE: 2026-10-24 20:47 UTC
+
+- Existing normal vault and both saved host identities were reused. No vault
+  recreation, credential replacement or new test vault was needed.
+- Both 15.1 and 14.4 task 41 completed all 15 approved steps. The verified
+  profile covers n8n 2.33.7, source-built SQLite, private health, persistence,
+  service/container restart and the public browser health marker. Both saved
+  screenshots were inspected. Full workflow UI/owner onboarding is not covered.
+- Both consumed-approval probes rejected duplicate execution without changing
+  the execution journal. 15.1 additionally exercised connection recovery:
+  the existing job result was reconciled, execution paused and the remaining
+  steps resumed only after separate review, without replaying installation.
+- Reviewed rollbacks completed on both releases, with exact package, account,
+  task-path and original root-profile baselines restored. Both local tasks and
+  harness records are `reverted`; both hosts have no remaining containers.
+  Free space returned to 9.3 GiB (14.4) and 12 GiB (15.1).
+- 14.4's original Automatic preference was restored through the actual CLI
+  and visually confirmed. 15.1 retains its original Enabled preference.
+  No lab runner or interactive CLI driver remains active.
+- n8n now selects Podman in Automatic on independently qualified amd64 14.4
+  and 15.1 RELEASE targets with a ready runtime. Disabled/native behavior,
+  unsupported versions/architectures, missing runtime and nested-jail guards
+  remain tested. Ghost/Mattermost 14.4 qualification is separate and unchanged.
+- Final checks passed: all 800 automated tests, lint, typecheck, whitespace and
+  Linux/x64 installed-package smoke. Rebuilt `dist/intent-ai-ops.tgz` SHA-256:
+  `11af17a40f8fd16a8751827332e6a709e81efdd809bf8cb7ccbeedd35843a95d`.
+  No native plugin protocol or binary change was required.
+- Limits: no n8n workflow UI/authentication or application host-reboot test;
+  no universal repeated-apply assertion. FreeBSD's upstream Podman port remains
+  experimental. Cold downloads can exceed an approved job's one-hour budget;
+  confirm outcome and inner-process quiescence before reviewed continuation.
+
+## n8n 15.1 PASS; 14.4 active: 2026-10-24 19:48 UTC
+
+- 15.1 task 41 completed all 15 commands. n8n 2.33.7, native SQLite,
+  private health, persistence, service/container restart and external browser
+  marker passed. Screenshot inspected in
+  `artifacts/browser-screenshots/freebsd-apps/` (marker, not workflow UI).
+- Connection recovery observed the existing installation job to completion
+  and paused for approval without replay. Separately reviewed resume operation
+  `b61d6123-1892-41f9-a2a7-ee8748c78858` completed remaining commands.
+  Consumed approval was rejected with the journal unchanged.
+- Reviewed rollback `9a1b9292-33af-464b-b932-f32e0455e387` completed; exact
+  packages, accounts, task paths and original root profiles were restored.
+- 14.4 was changed from Automatic to Enabled through the actual CLI solely
+  for candidate testing. Restore Automatic after its reviewed cycle/cleanup.
+  Fresh candidate runner tool session 97860 is active. No duplicate runner.
+- 14.4 candidate task 41, execution operation
+  `55982e64-2465-4cd8-9bfd-6c16d83cbf2c`, passed six commands and is resolving
+  dependencies. Keep the runner alive; no duplicate acquisition. The original
+  host preference is Automatic and still needs restoration after testing.
+- Later progress: 14.4 passed dependency resolution plus compiler/header/linker
+  probes (nine completed commands). Locked n8n installation is active, with
+  application files growing and several GiB still available. No failure or
+  application pass is recorded yet. Current runner remains session 97860.
+- n8n Automatic routing is now promoted for 15.1 only, with route-matrix and
+  unavailable/unknown-target regressions passing (28 focused tests). 14.4 still
+  requires Enabled until its own cycle passes. Full workflow UI/authentication
+  and host-boot qualification are not claimed. Rebuild the package after the
+  final qualification changes; the earlier artifact predates promotion.
+
+## Resumed after local runtime restart: 2026-10-24 19:25 UTC
+
+- Existing normal vault unlocks with current `VAULT_TEST`; both saved FreeBSD
+  hosts remain present. No vault recreation or host replacement was needed.
+- Old local runner no longer exists. Task 41 is partial: seven completed
+  commands, including dependency resolution (45 minutes), and an authoritative
+  compiler-acquisition timeout. Before continuation, authenticated read-only
+  inspection found no inner acquisition process and `pkg check -d -a` passed.
+  LLVM is not installed; its partial archive remains available to pkg.
+- Separately reviewed `--refresh-failed` continuation is active in tool session
+  6123, execution operation `ba19b035-44f2-41d7-b3ac-5a74f5dbefab`. Completed
+  history and original baselines are preserved. Never launch a duplicate.
+- Compiler/header and linker probes subsequently passed. Locked application
+  installation is now active, preserving the completed dependency lock; npm
+  is unpacking dependencies. Root filesystem still has several GiB available.
+  All 800 automated tests, lint, typecheck and package-install smoke passed
+  again after restart. The reference's outdated automatic-n8n-retry paragraph
+  was corrected to match the current one-hour, separately reviewed policy.
+- 14.4 remains unchanged with no n8n candidate task and 9.3 GiB available.
+  n8n application, restart/browser and exact rollback qualification remain
+  pending on both releases. No route promotion is justified yet.
+
 ## n8n Podman qualification ACTIVE: 2026-10-24 16:26 UTC
 
 - Latest task 41 milestone: six of fifteen commands completed. Fresh runtime
@@ -6424,3 +6507,101 @@ cleanup is complete as described above.
 - 2026-10-24T15:52:54.262Z webminai-freebsd-15-1/n8n-freebsd: reviewed execution requested for #41
 
 - 2026-10-24T15:52:54.266Z webminai-freebsd-15-1: execute accepted 5b949b50-e58f-4c55-8331-62889d79286c, task 41
+
+- 2026-10-24T18:10:39.010Z webminai-freebsd-15-1: execute completed
+
+- 2026-10-24T18:10:39.026Z webminai-freebsd-15-1/n8n-freebsd: task #41 partial; command prepare-podman-build-dependencies, reason TIMEOUT; no retry or rollback dispatched
+
+- 2026-10-24T18:10:39.029Z STOPPED: Expected values to be strictly equal: + actual - expected + 'partial' - 'completed'
+
+- 2026-10-24T19:25:00.451Z webminai-freebsd-15-1: host-connect accepted 12f3e577-36d8-4f20-90ee-eaa0d31b608b, task -
+
+- 2026-10-24T19:25:02.459Z webminai-freebsd-15-1: host-connect completed
+
+- 2026-10-24T19:25:04.329Z webminai-freebsd-15-1: inventory and 18 catalog eligibility decisions saved
+
+- 2026-10-24T19:25:05.708Z webminai-freebsd-15-1: refresh-catalog accepted 1a5d9e82-17da-48b4-8b6f-c33739d36a62, task 41
+
+- 2026-10-24T19:25:07.720Z webminai-freebsd-15-1: refresh-catalog completed
+
+- 2026-10-24T19:25:07.722Z webminai-freebsd-15-1/n8n-freebsd: regenerated remaining catalog steps; completed history and original baseline preserved
+
+- 2026-10-24T19:25:07.733Z webminai-freebsd-15-1: approve accepted d15df323-51c5-4470-ba9b-0ef313249d35, task 41
+
+- 2026-10-24T19:25:07.750Z webminai-freebsd-15-1: approve completed
+
+- 2026-10-24T19:25:07.771Z webminai-freebsd-15-1/n8n-freebsd: reviewed execution requested for #41
+
+- 2026-10-24T19:25:07.775Z webminai-freebsd-15-1: execute accepted ba19b035-44f2-41d7-b3ac-5a74f5dbefab, task 41
+
+- 2026-10-24T19:46:24.578Z webminai-freebsd-15-1: execute completed
+
+- 2026-10-24T19:46:24.602Z webminai-freebsd-15-1/n8n-freebsd: safe-boundary pause confirmed; completed commands preserved, remaining commands await separate review; no application pass claimed
+
+- 2026-10-24T19:47:26.840Z webminai-freebsd-15-1: host-connect accepted 911db2f2-b92c-4519-a33d-04edb489f0fb, task -
+
+- 2026-10-24T19:47:28.850Z webminai-freebsd-15-1: host-connect completed
+
+- 2026-10-24T19:47:30.252Z webminai-freebsd-15-1: inventory and 18 catalog eligibility decisions saved
+
+- 2026-10-24T19:47:30.893Z webminai-freebsd-15-1/n8n-freebsd: separately reviewing paused task #41; completed commands and original baselines preserved
+
+- 2026-10-24T19:47:30.917Z webminai-freebsd-15-1/n8n-freebsd: reviewed execution requested for #41
+
+- 2026-10-24T19:47:30.922Z webminai-freebsd-15-1: resume accepted b61d6123-1892-41f9-a2a7-ee8748c78858, task 41
+
+- 2026-10-24T19:47:54.967Z webminai-freebsd-15-1: resume completed
+
+- 2026-10-24T19:47:54.981Z webminai-freebsd-15-1/n8n-freebsd: apply and catalog verification passed
+
+- 2026-10-24T19:47:56.579Z webminai-freebsd-15-1/n8n-freebsd: PASS external browser rendering and same-origin assets after container restart; screenshot saved
+
+- 2026-10-24T19:47:56.586Z webminai-freebsd-15-1: execute accepted 42d84dc4-4ff7-418e-8936-cfaa72731745, task 41
+
+- 2026-10-24T19:47:56.591Z webminai-freebsd-15-1: execute failed; This plan already completed; its execution approval is consumed
+
+- 2026-10-24T19:47:56.594Z webminai-freebsd-15-1/n8n-freebsd: PASS repeated execution rejected; approved work and journal remain unchanged
+
+- 2026-10-24T19:47:56.598Z webminai-freebsd-15-1: rollback accepted 9a1b9292-33af-464b-b932-f32e0455e387, task 41
+
+- 2026-10-24T19:48:02.609Z webminai-freebsd-15-1: rollback completed
+
+- 2026-10-24T19:48:02.621Z webminai-freebsd-15-1/n8n-freebsd: rollback completed; baseline assertions pending
+
+- 2026-10-24T19:48:03.045Z webminai-freebsd-15-1/n8n-freebsd: PASS reviewed apply/rollback and exact package baseline; broader repeated-apply assertions remain separate
+
+- 2026-10-24T19:48:33.328Z webminai-freebsd-14-4: host-connect accepted f45c12df-f962-4f3d-9f27-4bdea3de9aff, task -
+
+- 2026-10-24T19:48:35.337Z webminai-freebsd-14-4: host-connect completed
+
+- 2026-10-24T19:48:36.527Z webminai-freebsd-14-4: inventory and 18 catalog eligibility decisions saved
+
+- 2026-10-24T19:48:37.266Z webminai-freebsd-14-4: prepare accepted 491e73b5-dceb-44cc-846e-f2dc95062333, task -
+
+- 2026-10-24T19:48:39.269Z webminai-freebsd-14-4: prepare completed
+
+- 2026-10-24T19:48:39.270Z webminai-freebsd-14-4/n8n-freebsd: prepared #41
+
+- 2026-10-24T19:48:39.902Z webminai-freebsd-14-4/n8n-freebsd: reviewed execution requested for #41
+
+- 2026-10-24T19:48:39.906Z webminai-freebsd-14-4: execute accepted 55982e64-2465-4cd8-9bfd-6c16d83cbf2c, task 41
+
+- 2026-10-24T20:45:12.936Z webminai-freebsd-14-4: execute completed
+
+- 2026-10-24T20:45:12.954Z webminai-freebsd-14-4/n8n-freebsd: apply and catalog verification passed
+
+- 2026-10-24T20:45:14.444Z webminai-freebsd-14-4/n8n-freebsd: PASS external browser rendering and same-origin assets after container restart; screenshot saved
+
+- 2026-10-24T20:45:14.456Z webminai-freebsd-14-4: execute accepted da0ebddd-10ad-4b10-ab82-01aee0a388c2, task 41
+
+- 2026-10-24T20:45:14.462Z webminai-freebsd-14-4: execute failed; This plan already completed; its execution approval is consumed
+
+- 2026-10-24T20:45:14.467Z webminai-freebsd-14-4/n8n-freebsd: PASS repeated execution rejected; approved work and journal remain unchanged
+
+- 2026-10-24T20:45:14.471Z webminai-freebsd-14-4: rollback accepted 93c67796-838a-41aa-88ae-118b222af77f, task 41
+
+- 2026-10-24T20:45:20.484Z webminai-freebsd-14-4: rollback completed
+
+- 2026-10-24T20:45:20.501Z webminai-freebsd-14-4/n8n-freebsd: rollback completed; baseline assertions pending
+
+- 2026-10-24T20:45:20.993Z webminai-freebsd-14-4/n8n-freebsd: PASS reviewed apply/rollback and exact package baseline; broader repeated-apply assertions remain separate

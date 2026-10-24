@@ -111,13 +111,16 @@ The [upstream FreeBSD port remains experimental](https://podman.io/docs/installa
 
 On the validated FreeBSD 14.4/15.1 amd64 hosts, Automatic selects Podman for
 WordPress, WooCommerce, Joomla, Drupal, PrestaShop, Moodle, Nextcloud, Odoo,
-Home Assistant, Magento and Jellyfin when their reviewed runtime is ready.
+Home Assistant, Magento, n8n and Jellyfin when their reviewed runtime is ready.
 Ghost and Mattermost also select Automatic on independently qualified 15.1.
-n8n on both releases, plus Ghost and Mattermost on 14.4, have explicit Enabled
+Ghost and Mattermost on 14.4 have explicit Enabled
 Podman candidates pending live qualification. Disabled retains native routes.
-The n8n Podman candidate checks for 8 GiB available on its storage filesystem
+The n8n Podman route checks for 8 GiB available on its storage filesystem
 before reserving resources. Cold-build space includes LLVM, npm caches and
 unpacked dependencies, not just the final application.
+Its qualification covers private service health, SQLite persistence, service
+and container restart, a public health marker and reviewed rollback, not the
+workflow UI or owner onboarding.
 Intent AI Ops itself
 installs on the host. Platform and runtime safety checks still apply.
 

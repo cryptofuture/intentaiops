@@ -289,7 +289,7 @@ test('FreeBSD Automatic selects every available Podman route while retaining exp
         validateCommandPlan(plan, rootExecutionPolicy({}))
         const commands = plan.commands.map(command => command.command).join('\n')
         const candidateEnabled = preference === 'enabled' && application.id !== 'intent-ai-ops-freebsd'
-        const additionalQualified = application.id === 'jellyfin-freebsd' || (['ghost-freebsd', 'mattermost-freebsd'].includes(application.id) && release.startsWith('15.1-'))
+        const additionalQualified = ['jellyfin-freebsd', 'n8n-freebsd'].includes(application.id) || (['ghost-freebsd', 'mattermost-freebsd'].includes(application.id) && release.startsWith('15.1-'))
         assert.equal(/\bpodman(?:-compose)?\s/u.test(commands), containerApps.has(application.id) || candidateEnabled || additionalQualified, `${release}/${preference ?? 'default'}/${application.id}`)
         assert.doesNotMatch(commands, /\bdocker(?:-compose)?\s/u)
       }

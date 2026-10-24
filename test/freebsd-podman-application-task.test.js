@@ -71,7 +71,7 @@ test('new FreeBSD Podman routes isolate native graphs and select Automatic only 
       }
       for (const preference of ['auto', 'enabled', 'disabled']) {
         const plan = buildCommonTask(`${application}-freebsd`, 42, { platform: 'freebsd', freebsdExecution: context, docker: { preference } }).plan
-        const qualified = application === 'jellyfin' || (['ghost', 'mattermost'].includes(application) && release.startsWith('15.1-'))
+        const qualified = ['jellyfin', 'n8n'].includes(application) || (['ghost', 'mattermost'].includes(application) && release.startsWith('15.1-'))
         assert.equal(plan.commands[0].id === 'prepare-podman-application', preference === 'enabled' || (preference === 'auto' && qualified))
       }
       for (const command of [...built.plan.commands, ...built.plan.revertCommands]) assert.equal(spawnSync('/bin/sh', ['-n', '-c', command.command]).status, 0, command.id)
@@ -392,7 +392,7 @@ for (const application of ['odoo', 'home-assistant', 'magento']) {
 
 test('Automatic retains native applications on unqualified or unavailable Podman targets', () => {
   for (const context of [{ ...execution, freebsdVersion: '15.2-RELEASE' }, { ...execution, architecture: 'aarch64' }, { ...execution, docker: {} }, { ...execution, docker: { ready: true, hostIsContainer: true } }]) {
-    for (const application of ['odoo', 'home-assistant', 'magento']) {
+    for (const application of ['odoo', 'home-assistant', 'magento', 'n8n']) {
       const built = buildCommonTask(`${application}-freebsd`, 42, { platform: 'freebsd', freebsdExecution: context, docker: { preference: 'auto' } })
       assert.equal(built.plan.commands[0].id, `prepare-${application}`)
     }
