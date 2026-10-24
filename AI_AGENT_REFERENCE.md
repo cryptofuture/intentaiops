@@ -4,6 +4,196 @@ This is the detailed operational and development reference for AI coding agents 
 
 Agents should treat the implementation, schemas, and tests as authoritative when this document and the code differ. Before changing behavior, trace the relevant service and preserve the project boundaries: system OpenSSH owns transport, secrets stay outside Codex context and task history, commands remain approval-gated, and remote administration runs through the signed Stage 2 plugin. Prefer focused changes backed by the existing cross-platform tests and live validation scripts.
 
+### FreeBSD Podman application qualification
+
+The operator marked FreeBSD support complete for the accepted amd64 14.4/15.1
+catalog scope. Do not turn that status into claims for untested OS versions,
+pristine installs or individual application cold boots. In Automatic, all ten
+existing verified container application routes select Podman when ready. Ghost,
+n8n, Mattermost and Jellyfin now have explicit Enabled candidates in the same
+wrapper, with per-app/per-release live qualification. Jellyfin passed on both
+14.4 and 15.1; Ghost and Mattermost passed on 15.1. These select Automatic on
+their qualified releases; the other new app/release pairs remain native in
+Automatic until qualified. Disabled retains native routes. The Intent CLI
+continues to install on the host.
+Explicit Disabled rejects container-only tasks in the shared catalog builder
+and eligibility list, while preserving native routes where implemented.
+
+The lab installation checks use the actual CLI with `VAULT_TEST`, reviewed
+controller operations and signed Stage 2 jobs. CLI installation and rollback
+passed independently on 14.4 and 15.1. Podman checks distinguish preservation of
+an existing runtime from installation with its packages/configuration/storage
+absent; the latter does not imply a pristine OS or fresh-boot kernel test.
+Use `--installation-checks` with one explicit `--host` and either
+`--task=intent-ai-ops-freebsd` or `--task=podman-freebsd` in
+`scripts/validate-freebsd-cli-lab.js`. Add `--absent-runtime` only after separately
+reviewed preparation and with the original runtime safely archived. Separate
+ignored checkpoints preserve older task identities instead of resetting them.
+Never start an absent-runtime test by deleting existing images or configuration.
+See `freebsd-lab-validation-status.md` for live results and mandatory restoration.
+
+Podman baseline capture marks a pre-existing binary. Its package installation
+and rollback must not call the runtime rc start/stop path in that case: the
+FreeBSD rc script controls restart-policy containers, not a daemon with a status
+operation. Existing storage and PF policy remain guarded and operator-reviewed.
+Bootstrap enables `linux_enable` for Linux-image persistence and preserves a
+protected, hashed rc.conf snapshot for exact rollback, including absent defaults.
+Unexpected configuration drift blocks restoration. Existing Linux modules are
+identified by kernel-file name, not an unrelated module identifier. Rollback
+does not unload pre-existing Linux facilities.
+
+Live host reboots passed on both 14.4 and 15.1 with owned native/Linux probes:
+boot identities changed, counters persisted and advanced exactly once, external
+HTTP and signed Stage 2 returned, and a durable job result predating reboot was
+retrievable. No post-boot start command was issued. This validates runtime boot
+persistence, not a full reboot cycle of every application. Pristine-OS testing
+requires a clean VM; rebooting an existing host does not provide that evidence.
+The upstream port is still experimental per https://podman.io/docs/installation.
+
+The four new candidates keep the native task graphs inside owned containers.
+Node source builds select/probe C/C++ headers/linking without borrowing the
+Python/Rust pipeline; build-only caches are removed through guarded paths and
+private logs are retained. Mattermost uses a new SysV shared-memory namespace
+for PostgreSQL, never host IPC. n8n private health/SQLite checks run inside its
+container. Ghost uses the validated public address and health-only loopback
+redirect handling; do not add public Host headers to package downloads.
+n8n Podman cold builds require at least 8 GiB available on Podman's actual
+storage filesystem before reserving application resources. LLVM, npm metadata,
+downloaded archives and unpacked dependencies all contribute to peak use.
+Low capacity and unavailable measurements have separate preflight failure codes.
+Do not use FreeBSD's root reserve as the normal build budget. Review unused
+lab caches or increase disk capacity; never prune unrelated images or volumes.
+n8n uses npm's eight per-origin download sockets, private integrity-checked
+caches and bounded fetch retries. This is not segmented downloading of each
+file. Native dependency builds retain their existing concurrency limits; no
+aria2 dependency or unverified cache-prefetch path is introduced. Node container
+compiler acquisition uses the validator's maximum one-hour job budget. A cold
+LLVM transfer exceeded that limit; this does not authorize automatic replay. A timed-out
+outer job can leave inner package work alive; wait for quiescence and inspect
+installed prerequisites before separately reviewing continuation.
+n8n dependency resolution and installation are separate one-hour jobs. Resolution
+uses `--package-lock-only --ignore-scripts --save-exact`; installation validates
+the exact n8n version and script allowlist, then uses `npm ci --ignore-scripts`.
+Only SQLite is explicitly rebuilt afterward. A failed installation does not
+discard a completed resolution or rewrite its lock. New phases apply to fresh
+plans; completed historical command definitions remain immutable.
+Ghost cold rendering was observed at about five seconds. Its shared native
+readiness probe allows ten seconds per request, with 60 attempts and the
+existing command deadline unchanged; three-second probes caused false failures.
+The existing n8n profile publishes a health marker, not owner onboarding or a
+full workflow UI. Mattermost qualification follows its native API/admin/marker
+profile, not a full web frontend. Jellyfin media/transcoding and hardware access
+remain unverified. See the live checkpoint before claiming candidate completion.
+
+Jellyfin's .NET runtime needs jail memory locking. Only its owned container
+requests `org.freebsd.jail.allow.mlock=true`, with an explicit 64 KiB process
+memlock limit; creation checks the actual jail flag and saved limit. The fixed
+service-user `--version` probe runs before the respawning daemon. Older runtimes
+that ignore the annotation fail closed before package installation. This uses
+the upstream [ocijail annotation contract](https://github.com/dfr/ocijail/blob/main/ocijail/create.cpp),
+not privileged mode, a global sysctl change or a host jail-policy override.
+The observed CLI returns exit 1 with its valid version text. The shared native
+probe accepts 0/1 only with the exact pinned response; mixed errors and crash
+statuses fail. Container-restart verification waits for `/health`, not just
+service PIDs. Live 14.4/15.1 checks include completed onboarding, marker/version,
+the rendered login form, service/container restarts and exact-baseline rollback.
+Authentication, playback, transcoding and device access remain unverified.
+Jellyfin runtime acquisition uses an explicit one-hour durable-job budget after
+the cold 14.4 transfer exceeded the previous 30 minutes. An outer timeout can
+leave inner pkg work alive: wait for process quiescence and inspect packages
+before a newly approved continuation. Never infer completion or replay from
+the timeout alone; retain original baselines and the timeout history.
+
+Odoo, Home Assistant and Magento resolve an explicit candidate container route
+when the saved runtime preference is `enabled`. Automatic now prefers the
+qualified routes only on ready, non-jail amd64 FreeBSD
+14.4 and 15.1 RELEASE hosts.
+Disabled stays native; unqualified targets/applications stay native in Auto.
+`src/freebsd-podman-application-task.js` wraps the trusted
+native command graph with separately identified container commands, preserving
+approval, signed durable jobs, dependencies, source checksums and health checks.
+Only the HTTP port is published. No host configuration, runtime socket or
+devices are mounted. Credentials are mounted from a private task directory;
+application packages, accounts and data remain in the container writable layer.
+Images contain no generated credentials. A fixed entrypoint restores the
+application services after a verified container restart. The wrapper uses and
+validates `restart=always`, matching the FreeBSD rc boot service; manually stopped
+containers can restart after host boot. Full application-specific host-reboot
+startup is not yet claimed. Removal checks ownership labels on every resource before
+mutation and retains records on inspection errors. This does not make native
+FreeBSD dependencies equivalent to upstream Linux Docker support.
+
+Source builds retain separate mode-0600 logs per attempt in the protected
+native task-state directory. Only a bounded tail is returned through normal
+redaction. A failed child stops immediately; logging does not suppress shell
+error handling. Python builds in minimal images need both a compiler and
+FreeBSD development headers. The candidate installs those only inside its
+container, checks C/C++ syntax, and clears downloaded package/source archives
+without removing installed packages or touching the host package cache.
+After successful acquisition, a separate reviewed step removes private
+Rust/Cargo build caches, preserving application files, credentials and build
+logs. Odoo requests a private `sysvshm=new` namespace at container creation for
+PostgreSQL, never inherited host IPC or `allow.sysvipc`.
+Allow extra temporary disk headroom for native source builds: the 14.4 Home
+Assistant build consumed the lab filesystem's normal free space before finished
+dependencies released their temporary files. Its recorded build succeeded, so
+that observation alone must not be classified as an ENOSPC failure.
+Home Assistant's pinned uv build uses a temporary `sys/time.h` compatibility
+include guarded against assembly input, with C/assembly probes before building.
+Do not replace this with a global forced C header or suppress compiler errors.
+Unpackaged source tests are removed only after checksum-verified extraction.
+Python 3.14 extension builds also set `LDSHARED` to the selected compiler with
+the observed FreeBSD shared-link flags; overriding `CC` alone leaves CFFI
+trying to invoke an absent `cc` in minimal images.
+Home Assistant initialization uses its private loopback backend. Public nginx
+onboarding mutation paths are blocked on both proxy aliases, so an external
+client cannot claim the first administrator while initialization is pending.
+
+Host-side HTTP verification checks the published mapping and connects directly
+to the jail using curl `--connect-to`, preserving the public Host header.
+This avoids the lab's unavailable host NAT reflection; it is not proof of
+external reachability. Qualification includes a separate external browser
+check. Odoo, Home Assistant and Magento passed this plus restart and reviewed
+rollback independently on both 14.4 and 15.1. Home Assistant qualification covers
+the core web service, not FFmpeg/media, cloud, hardware or device integrations.
+
+Magento's inner HTTP check connects to loopback with its validated public Host,
+avoiding canonical redirects through unavailable jail-to-host NAT reflection.
+Its nginx configuration loads mime.types; public asset directories grant www
+group access without opening protected configuration or credentials. After a
+container restart, a bounded gate waits for service PIDs and PHP's socket before
+the full native health checks. The same service-readiness gate protects Odoo and
+Home Assistant from racing their asynchronous entrypoints. Browser qualification rejects wrong CSS/JS MIME
+even with HTTP 200 and requires an applied storefront stylesheet. A visible CMS
+marker alone is insufficient; the lab caught an otherwise unstyled false pass.
+
+The 14.4 runtime image needs FreeBSD-utilities inside its owned build, with
+--no-hosts for base-package installation. Its development packages differ from
+15.1: FreeBSD-libbsm-dev, FreeBSD-runtime-dev and FreeBSD-openssl-lib-dev supply
+the observed audit, zlib and TLS files. These prerequisites passed Odoo and Home
+Assistant's 14.4 qualification; Magento's separate package stack also passed. They do
+not alter host repositories or trust settings.
+
+The lab exposed a VFS root with mode 0550 even after build-time normalization.
+The entrypoint and reviewed setup normalize only the owned container's `/` to
+0755, then verify non-root execution before installing the application. Host
+storage and jail isolation are unchanged. Reviewed continuation checks image,
+mounts, port, network and ownership before reusing a partially created container.
+Upstream still labels the [FreeBSD Podman port experimental](https://podman.io/docs/installation#installing-on-freebsd).
+
+Run a separate opt-in matrix with the actual unlocked binary:
+`node scripts/validate-freebsd-cli-lab.js --approve-live-tests --podman-candidates --host=webminai-freebsd-15-1 --task=odoo-freebsd`.
+It stores independent checkpoints and exact baselines in
+`artifacts/freebsd-podman/`, rather than reusing task IDs from a lost vault.
+Select `home-assistant-freebsd` or `magento-freebsd` for the other candidates.
+Candidate cycles also require Playwright Chromium, or set
+`INTENT_BROWSER_EXECUTABLE` to an installed Chrome executable. They verify the
+actual external frontend and same-origin assets after container restart before
+reviewed rollback. Screenshots stay in ignored `artifacts/browser-screenshots/`.
+Existing remote identities are skipped without dispatch. Do not switch a
+partially applied native installation to Podman as a substitute for reviewed
+cleanup of its host changes.
+
 Use this document to locate setup examples, security invariants, platform notes, lab scripts, common-task validation, and release checks. Do not copy test credentials, connection strings, claim tokens, generated service credentials, or vault material into prompts, logs, fixtures, or documentation.
 
 Intent AI Ops is an early application core for AI-assisted administration over system SSH. It does not install an AI agent on controlled hosts. The local application asks Codex to prepare a structured command plan, validates that plan, requests approval, then sends approved commands through a signed native Netdata function.

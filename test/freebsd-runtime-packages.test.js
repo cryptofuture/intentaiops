@@ -3,14 +3,68 @@ import assert from 'node:assert/strict'
 import { buildCommonTask, commonTaskEligibility } from '../src/common-tasks.js'
 import { validateCommandPlan } from '../src/plan-validator.js'
 import { freebsdContainerImages } from '../src/freebsd-php-runtime.js'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { runInNewContext } from 'node:vm'
 import { freebsdMariaDbReadyCommand } from '../src/freebsd-wordpress-task.js'
 import { freebsdNginxSecurityCommand } from '../src/freebsd-nginx-security.js'
-import { freebsdInstallMissingPackages } from '../src/freebsd-runtime-packages.js'
+import { freebsdInstallMissingPackages, freebsdInstallCompilerIfMissing, freebsdCompilerEnvironment, freebsdSourceCompilerEnvironment, freebsdBuildLog } from '../src/freebsd-runtime-packages.js'
+
+test('source builds select versioned LLVM archive tools without altering system tools', () => {
+  for (const mode of ['system', 'llvm19', 'missing-archive']) {
+    const fixture = `command() { case "$2" in cc|c++) printf '/usr/bin/%s' "$2"; return 0;; ar|ranlib|nm|strip|ld) if [ '${mode}' = system ]; then printf '/usr/bin/%s' "$2"; return 0; fi;; llvm-ar19|llvm-ranlib19|llvm-nm19|llvm-strip19|ld.lld19) if [ '${mode}' = llvm19 ]; then printf '/usr/local/bin/%s' "$2"; return 0; fi;; esac; return 1; }; `
+    const result = spawnSync('/bin/sh', ['-c', 'set -eu; ' + fixture + freebsdSourceCompilerEnvironment() + '; printf "%s|%s|%s" "$AR" "$RANLIB" "$LD"'], { encoding: 'utf8' })
+    if (mode === 'missing-archive') {
+      assert.equal(result.status, 78)
+      assert.match(result.stderr, /BUILD_ARCHIVER_UNAVAILABLE/u)
+    } else {
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(result.stdout, mode === 'system' ? '/usr/bin/ar|/usr/bin/ranlib|/usr/bin/ld' : '/usr/local/bin/llvm-ar19|/usr/local/bin/llvm-ranlib19|/usr/local/bin/ld.lld19')
+    }
+  }
+})
+
+test('private build logs retain separate attempts, bounded error tails and child errexit', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-freebsd-build-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const state = '/var/lib/webminai/task-state/9-odoo-freebsd'
+  const failure = "i=0; while [ $i -lt 200 ]; do printf '%080d\\n' 0; i=$((i+1)); done; printf ACTUAL_COMPILER_ERROR >&2; false; printf UNEXPECTED_AFTER_FAILURE"
+  const failed = spawnSync('/bin/sh', ['-c', freebsdBuildLog(state, failure).replaceAll(state, root)], { encoding: 'utf8' })
+  assert.equal(failed.status, 1)
+  assert.match(failed.stderr, /ACTUAL_COMPILER_ERROR/u)
+  assert.doesNotMatch(failed.stderr, /UNEXPECTED_AFTER_FAILURE/u)
+  assert.ok(Buffer.byteLength(failed.stderr) < 4096)
+  const passed = spawnSync('/bin/sh', ['-c', freebsdBuildLog(state, 'printf build-ok').replaceAll(state, root)], { encoding: 'utf8' })
+  assert.equal(passed.status, 0, passed.stderr)
+  assert.equal(passed.stdout, 'build-ok')
+  const logs = await readdir(root)
+  assert.equal(logs.length, 2)
+  for (const log of logs) assert.equal((await stat(path.join(root, log))).mode & 0o777, 0o600)
+  assert.ok((await Promise.all(logs.map(log => readFile(path.join(root, log), 'utf8')))).some(log => log.length > 16000 && log.includes('ACTUAL_COMPILER_ERROR') && !log.includes('UNEXPECTED_AFTER_FAILURE')))
+  assert.throws(() => freebsdBuildLog('/tmp/../escape', 'true'))
+  assert.throws(() => freebsdBuildLog(state, 'true\nINTENTAI_OPS_BUILD\nfalse'))
+})
+
+test('native compiler selection supports minimal containers and preserves an existing system compiler', () => {
+  for (const mode of ['system', 'llvm19', 'missing']) {
+    const fixture = `command() { case "$2" in cc|c++) if [ '${mode}' = system ]; then printf '/usr/bin/%s' "$2"; return 0; fi;; clang19|clang++19) if [ '${mode}' = llvm19 ]; then printf '/usr/local/bin/%s' "$2"; return 0; fi;; esac; return 1; }; `
+    const result = spawnSync('/bin/sh', ['-c', 'set -eu; ' + fixture + freebsdCompilerEnvironment() + '; printf "%s|%s|%s" "$CC" "$CXX" "$CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER"'], { encoding: 'utf8' })
+    if (mode === 'missing') {
+      assert.equal(result.status, 78)
+      assert.match(result.stderr, /BUILD_COMPILER_UNAVAILABLE/u)
+    } else {
+      assert.equal(result.status, 0, result.stderr)
+      const compiler = mode === 'system' ? '/usr/bin/cc' : '/usr/local/bin/clang19'
+      assert.equal(result.stdout.split('|')[0], compiler)
+      assert.equal(result.stdout.split('|')[2], compiler)
+    }
+  }
+  const existing = spawnSync('/bin/sh', ['-c', 'set -eu; command() { return 0; }; pkg() { exit 99; }; ' + freebsdInstallCompilerIfMissing()], { encoding: 'utf8' })
+  assert.equal(existing.status, 0, 'A normal FreeBSD host must not acquire another compiler')
+  assert.match(freebsdInstallCompilerIfMissing(), /for package in 'llvm19'/u)
+})
 
 test('FreeBSD runtime acquisition reuses installed prerequisites rather than explicitly upgrading them', () => {
   const command = freebsdInstallMissingPackages(['python312', 'gmake', 'node22'])
@@ -240,11 +294,15 @@ test('FreeBSD native runtime requests stay within versioned package families whi
       const acquisition = plan.commands.find(item => item.id === `install-${application}-application`).command
       assert.ok(acquisition.includes('--network-family-autoselection-attempt-timeout=2000'))
       if (application === 'n8n') {
+        const resolution = plan.commands.find(item => item.id === 'resolve-n8n-dependencies').command
+        assert.deepEqual(plan.commands.find(item => item.id === 'install-n8n-application').dependsOn, ['resolve-n8n-dependencies'])
+        assert.ok(resolution.includes('install --package-lock-only --ignore-scripts --save-exact'))
+        assert.ok(acquisition.includes('ci --ignore-scripts --prefer-offline'))
         assert.ok(acquisition.includes('--max-old-space-size=1536'))
         assert.ok(acquisition.includes('npm_config_foreground_scripts=true npm_config_jobs=1 MAKEFLAGS=-j1'))
         assert.ok(acquisition.indexOf('--max-old-space-size=1536') < acquisition.indexOf('npm --prefix'))
-        assert.ok(acquisition.includes('allowScripts:{sqlite3:true}'))
-        const manifest = acquisition.split('node -e ')[1].split('; export NODE_OPTIONS')[0]
+        assert.ok(resolution.includes('allowScripts:{sqlite3:true}'))
+        const manifest = resolution.split('node -e ')[1].split('; npm --prefix')[0]
         let written
         runInNewContext(manifest.slice(1, -1).replaceAll("'\\''", "'"), {
           require: name => {
@@ -253,15 +311,36 @@ test('FreeBSD native runtime requests stay within versioned package families whi
           }
         })
         assert.equal(written.private, true)
+        assert.equal(written.dependencies.n8n, '2.33.7')
         assert.deepEqual(written.allowScripts, { sqlite3: true })
         assert.ok(!acquisition.includes('dangerously-allow-all-scripts'))
-        assert.ok(acquisition.indexOf('INSUFFICIENT_MEMORY') < acquisition.indexOf('rm -rf'))
-        assert.ok(acquisition.indexOf("rm -rf -- '/usr/local/lib/webminai-n8n-18109/node_modules'") < acquisition.indexOf('npm --prefix'))
-        assert.ok(acquisition.includes("test ! -L '/usr/local/lib/webminai-n8n-18109/node_modules'"))
-        assert.ok(acquisition.indexOf('test ! -e') < acquisition.indexOf('rm -rf'))
+        assert.ok(resolution.indexOf('INSUFFICIENT_MEMORY') < resolution.indexOf('rm -rf'))
+        assert.ok(resolution.indexOf("rm -rf -- '/usr/local/lib/webminai-n8n-18109/node_modules'") < resolution.indexOf('npm --prefix'))
+        assert.ok(resolution.includes("test ! -L '/usr/local/lib/webminai-n8n-18109/node_modules'"))
+        assert.ok(resolution.indexOf('test ! -e') < resolution.indexOf('rm -rf'))
+        assert.ok(!acquisition.includes("rm -f -- '/usr/local/lib/webminai-n8n-18109/package-lock.json'"))
+        const lockCheck = acquisition.split('node -e ')[1].split('; npm --prefix')[0]
+        const manifestFixture = { private: true, dependencies: { n8n: '2.33.7' }, allowScripts: { sqlite3: true } }
+        const lockFixture = { lockfileVersion: 3, packages: { '': { dependencies: { n8n: '2.33.7' } }, 'node_modules/n8n': { version: '2.33.7' } } }
+        for (const change of [null, 'manifest-version', 'lock-version', 'extra-script', 'extra-dependency']) {
+          const root = structuredClone(manifestFixture)
+          const lock = structuredClone(lockFixture)
+          if (change === 'manifest-version') root.dependencies.n8n = '^2.33.7'
+          if (change === 'lock-version') lock.packages['node_modules/n8n'].version = '2.33.8'
+          if (change === 'extra-script') root.allowScripts.unreviewed = true
+          if (change === 'extra-dependency') root.dependencies.unreviewed = '1.0.0'
+          const check = () => runInNewContext(lockCheck.slice(1, -1).replaceAll("'\\''", "'"), {
+            require: name => {
+              assert.equal(name, 'node:fs')
+              return { readFileSync: file => JSON.stringify(file.endsWith('/package-lock.json') ? lock : root) }
+            }
+          })
+          if (change) assert.throws(check, /N8N_LOCK_MISMATCH/u)
+          else assert.doesNotThrow(check)
+        }
         assert.ok(!acquisition.includes('--build-from-source'))
         assert.ok(acquisition.indexOf('npm rebuild sqlite3 --no-audit') < acquisition.indexOf('node -e "require(\'sqlite3\')"'))
-        assert.ok(acquisition.includes('--prefer-offline --maxsockets=4 --fetch-retries=4'))
+        assert.ok(acquisition.includes('--prefer-offline --maxsockets=8 --fetch-retries=4'))
         assert.ok(acquisition.includes('INSUFFICIENT_MEMORY'))
         assert.ok(acquisition.indexOf('sysctl -n hw.physmem') < acquisition.indexOf('npm --prefix'))
         const guard = acquisition.slice(acquisition.indexOf('set -eu; memory='), acquisition.indexOf('test -f'))

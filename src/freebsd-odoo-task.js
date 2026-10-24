@@ -1,5 +1,5 @@
 import { freebsdNginxSecurityCommand } from './freebsd-nginx-security.js'
-import { freebsdInstallMissingPackages } from './freebsd-runtime-packages.js'
+import { freebsdInstallMissingPackages, freebsdSourceCompilerEnvironment, freebsdBuildLog } from './freebsd-runtime-packages.js'
 import { freebsdRustEnvironment, freebsdRustPackageCommand, freebsdRustSetupCommand } from './freebsd-rust-runtime.js'
 
 const COMMIT = '57ffa1abb6e1ed481b8bccc5db5534ea0ad2c6b5'
@@ -13,6 +13,7 @@ const NGINX_CONFIG = '/usr/local/etc/nginx/nginx.conf'
 const DATABASE = 'webminai_odoo_18112'
 const DATABASE_USER = 'webminai_odoo'
 const MARKER = 'WEBMINAI_ODOO_OK'
+const HEALTH_PATH = '/__intentaiops-health'
 
 export function buildFreebsdOdooTask (taskId, freebsdExecution) {
   if (freebsdExecution?.platform !== 'freebsd') throw new Error('FreeBSD Odoo requires a FreeBSD execution inventory')
@@ -22,7 +23,7 @@ export function buildFreebsdOdooTask (taskId, freebsdExecution) {
       summary: 'Deploy a learned reversible native FreeBSD Odoo Community service',
       changeOverview: `Install pinned Odoo Community 19.0 source ${COMMIT.slice(0, 12)} with Python 3.12, isolated PostgreSQL 17, rc.d, protected credentials, and nginx on port 18112.`,
       modifiedFiles: [state, APP_ROOT, DATA_ROOT, CREDENTIALS, ODOO_RC, POSTGRES_RC, NGINX_CONFIG],
-      assumptions: ['FreeBSD 15.1 amd64 with pkg and rc.d', 'Odoo 19 supports Python 3.10+ and PostgreSQL 13+; the pinned branch requirements include Python 3.12 selectors.'],
+      assumptions: ['FreeBSD 14.4 or 15.1 amd64 with pkg and rc.d', 'Odoo 19 supports Python 3.10+ and PostgreSQL 13+; the pinned branch requirements include Python 3.12 selectors.'],
       warnings: ['Odoo documents Linux, Windows, and macOS source installation but not FreeBSD. This learned native route is Intent AI Ops-tested and not an upstream-supported FreeBSD package.', 'PDF header/footer rendering is not tested because the upstream-compatible wkhtmltopdf build is unavailable in this isolated lab route.'],
       commands: [
         item('prepare-odoo', prepare(state), 'Capture package and identity baselines and generate database and administrator credentials on-host'),
@@ -35,7 +36,7 @@ export function buildFreebsdOdooTask (taskId, freebsdExecution) {
       ],
       revertCommands: [item('remove-odoo', remove(state), 'Remove only task-owned Odoo, PostgreSQL, credentials, identities, and packages', [], 1800000, 'job', 'destructive')]
     },
-    verifyApplied: `set -eu; ${primaryAddress()}; curl --fail --silent --show-error --max-time 20 http://$address:18112/ | grep -Fx ${MARKER}; curl --fail --location --silent --show-error --max-time 20 http://$address:18112/odoo/web/login >/dev/null`,
+    verifyApplied: `set -eu; ${primaryAddress()}; curl --fail --silent --show-error --max-time 20 http://$address:18112${HEALTH_PATH} | grep -Fx ${MARKER}; curl --fail --location --silent --show-error --max-time 20 http://$address:18112/web/login >/dev/null`,
     verifyReverted: `test ! -e ${quote(APP_ROOT)} && test ! -e ${quote(DATA_ROOT)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && ! pkg info -e postgresql17-server >/dev/null 2>&1 && ! pkg info -e nginx >/dev/null 2>&1`,
     stateProbe: `test -e ${quote(state)} && printf applied || printf absent`
   }
@@ -59,7 +60,7 @@ function installRuntimePackages (state) {
 
 function installApplication (state) {
   const archive = `${state}/odoo-${COMMIT}.tar.gz`
-  return `set -eu; ${freebsdRustEnvironment(state)}; rm -rf -- ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(APP_ROOT)}; curl --fail --location --silent --show-error https://github.com/odoo/odoo/archive/${COMMIT}.tar.gz --output ${quote(archive)}; [ "$(sha256 -q ${quote(archive)})" = ${quote(ARCHIVE_SHA256)} ]; tar -xzf ${quote(archive)} -C ${quote(APP_ROOT)} --strip-components 1; python3.12 -m venv ${quote(`${APP_ROOT}/venv`)}; export CFLAGS='-I/usr/local/include' CPPFLAGS='-I/usr/local/include' LDFLAGS='-L/usr/local/lib' MAKE=gmake CARGO_HOME=${quote(`${state}/cargo`)} CARGO_BUILD_JOBS=1 PIP_CACHE_DIR=${quote(`${state}/pip-cache`)} GEVENTSETUP_EMBED_LIBEV=0; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input --upgrade pip setuptools wheel; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input 'Cython==0.29.37' 'greenlet==3.0.3'; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input --no-build-isolation 'gevent==24.2.1'; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input -r ${quote(`${APP_ROOT}/requirements.txt`)}; rm -rf -- ${quote(`${state}/pip-cache`)}; ${quote(`${APP_ROOT}/venv/bin/python`)} ${quote(`${APP_ROOT}/odoo-bin`)} --version | grep -F 'Odoo Server 19.0'; chmod -R a+rX ${quote(APP_ROOT)}`
+  return freebsdBuildLog(state, `set -eu; ${freebsdRustEnvironment(state)}; ${freebsdSourceCompilerEnvironment()}; rm -rf -- ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(APP_ROOT)}; curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 30 --silent --show-error https://github.com/odoo/odoo/archive/${COMMIT}.tar.gz --output ${quote(archive)}; [ "$(sha256 -q ${quote(archive)})" = ${quote(ARCHIVE_SHA256)} ]; tar -xzf ${quote(archive)} -C ${quote(APP_ROOT)} --strip-components 1; rm -f -- ${quote(archive)}; python3.12 -m venv ${quote(`${APP_ROOT}/venv`)}; export CFLAGS='-I/usr/local/include' CPPFLAGS='-I/usr/local/include' LDFLAGS='-L/usr/local/lib' MAKE=gmake CARGO_HOME=${quote(`${state}/cargo`)} CARGO_BUILD_JOBS=1 PIP_CACHE_DIR=${quote(`${state}/pip-cache`)} GEVENTSETUP_EMBED_LIBEV=0; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input --upgrade pip setuptools wheel; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input 'Cython==0.29.37' 'greenlet==3.0.3'; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input --no-build-isolation 'gevent==24.2.1'; ${quote(`${APP_ROOT}/venv/bin/pip`)} install --disable-pip-version-check --no-input -r ${quote(`${APP_ROOT}/requirements.txt`)}; rm -rf -- ${quote(`${state}/pip-cache`)}; ${quote(`${APP_ROOT}/venv/bin/python`)} ${quote(`${APP_ROOT}/odoo-bin`)} --version | grep -F 'Odoo Server 19.0'; chmod -R a+rX ${quote(APP_ROOT)}`)
 }
 
 function initializeDatabase () {
@@ -138,13 +139,13 @@ chmod 0755 ${quote(ODOO_RC)}; cat > ${quote(NGINX_CONFIG)} <<'CONF'
 user www www;
 worker_processes 1;
 events { worker_connections 256; }
-http { server { listen 18112; location = / { default_type text/plain; return 200 "${MARKER}\n"; } location /odoo/ { proxy_pass http://127.0.0.1:8069/; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $scheme; } } }
+http { map $http_upgrade $connection_upgrade { default upgrade; '' close; } server { listen 18112; location = ${HEALTH_PATH} { default_type text/plain; return 200 "${MARKER}\n"; } location /odoo/ { proxy_pass http://127.0.0.1:8069/; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $scheme; } location / { proxy_pass http://127.0.0.1:8069; proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection $connection_upgrade; } } }
 CONF
 chmod 0644 ${quote(NGINX_CONFIG)}; service webminai_odoo status >/dev/null 2>&1 && service webminai_odoo restart || service webminai_odoo start; ${waitOdoo()}; nginx -t; service nginx status >/dev/null 2>&1 && service nginx onerestart || service nginx onestart`
 }
 
 function verify () {
-  return `set -eu; ${quote(`${APP_ROOT}/venv/bin/python`)} ${quote(`${APP_ROOT}/odoo-bin`)} --version | grep -F 'Odoo Server 19.0'; ${waitOdoo()}; password=$(cat ${quote(`${CREDENTIALS}/database_password`)}); PGPASSWORD="$password" psql -h 127.0.0.1 -p 55433 -U ${DATABASE_USER} -d ${DATABASE} -Atqc "SELECT count(*) FROM ir_module_module" | awk '$1 > 0 { ok=1 } END { exit !ok }'; curl --fail --silent --show-error http://127.0.0.1:18112/ | grep -Fx ${quote(MARKER)}; curl --fail --location --silent --show-error http://127.0.0.1:18112/odoo/web/login >/dev/null; service webminai_odoo restart; ${waitOdoo()}; service webminai_odoo_postgresql restart; service webminai_odoo restart; ${waitOdoo()}`
+  return `set -eu; ${quote(`${APP_ROOT}/venv/bin/python`)} ${quote(`${APP_ROOT}/odoo-bin`)} --version | grep -F 'Odoo Server 19.0'; ${waitOdoo()}; password=$(cat ${quote(`${CREDENTIALS}/database_password`)}); PGPASSWORD="$password" psql -h 127.0.0.1 -p 55433 -U ${DATABASE_USER} -d ${DATABASE} -Atqc "SELECT count(*) FROM ir_module_module" | awk '$1 > 0 { ok=1 } END { exit !ok }'; curl --fail --silent --show-error http://127.0.0.1:18112${HEALTH_PATH} | grep -Fx ${quote(MARKER)}; curl --fail --location --silent --show-error http://127.0.0.1:18112/web/login >/dev/null; service webminai_odoo restart; ${waitOdoo()}; service webminai_odoo_postgresql restart; service webminai_odoo restart; ${waitOdoo()}`
 }
 
 function remove (state) {

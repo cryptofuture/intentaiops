@@ -149,11 +149,11 @@ function removeApplication (state) {
 }
 
 function waitGhost () {
-  return 'ready=; for attempt in $(jot 180); do curl --fail --location --silent --show-error --max-time 3 http://127.0.0.1:2368/blog/ >/dev/null 2>&1 && { ready=yes; break; }; sleep 2; done; [ "$ready" = yes ]'
+  return 'ready=; for attempt in $(jot 60); do curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:2368/blog/ >/dev/null 2>&1 && { ready=yes; break; }; sleep 2; done; [ "$ready" = yes ]'
 }
 
 function primaryAddress () {
-  return 'interface=$(route -n get default | awk \'/interface:/{print $2; exit}\'); address=$(ifconfig "$interface" inet | awk \'/inet /{print $2; exit}\'); [ -n "$address" ]'
+  return 'address=$(printenv WEBMINAI_PUBLIC_ADDRESS || true); if [ -z "$address" ]; then interface=$(route -n get default | awk \'/interface:/{print $2; exit}\'); address=$(ifconfig "$interface" inet | awk \'/inet /{print $2; exit}\'); fi; printf "%s\\n" "$address" | awk -F. \'NF != 4 {exit 1} {for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || length($i)>3 || $i+0>255) exit 1}\''
 }
 
 function item (id, command, purpose, dependsOn = [], timeoutMs = 300000, executionMode = null, risk = 'change') {

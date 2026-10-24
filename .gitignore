@@ -29,3 +29,5 @@ core
 core.*
 /artifacts/netbook-docker/
 /artifacts/freebsd-common/
+/artifacts/freebsd-podman/
+/artifacts/freebsd-installation/

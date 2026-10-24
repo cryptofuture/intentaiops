@@ -22,6 +22,8 @@ const FAILURE_CODES = new Set([
   'FIRMWARE_VIRTUALIZATION_DISABLED',
   'UNSUPPORTED_WINDOWS_VERSION',
   'INSUFFICIENT_MEMORY',
+  'INSUFFICIENT_DISK',
+  'DISK_CAPACITY_UNAVAILABLE',
   'SLAT_UNAVAILABLE',
   'WSL_RUNTIME_UNAVAILABLE',
   'REBOOT_REQUIRED',
@@ -41,6 +43,8 @@ export function classifyFailure ({ item, result, error }) {
   else if (/cpu_instruction_set_unsupported|cpu does not support x86-64-v2/u.test(lower)) code = 'CPU_INSTRUCTION_SET_UNSUPPORTED'
   else if (/^error: node\.js \d+(?:\.\d+){1,2} is installed, but intent ai ops requires \d+(?:\.\d+){1,2} or newer\./mu.test(lower)) code = 'RUNTIME_VERSION_INCOMPATIBLE'
   else if (/insufficient_memory/u.test(lower)) code = 'INSUFFICIENT_MEMORY'
+  else if (/insufficient_disk/u.test(lower)) code = 'INSUFFICIENT_DISK'
+  else if (/disk_capacity_unavailable/u.test(lower)) code = 'DISK_CAPACITY_UNAVAILABLE'
   else if (/slat_unavailable/u.test(lower)) code = 'SLAT_UNAVAILABLE'
   else if (/wsl_runtime_unavailable/u.test(lower)) code = 'WSL_RUNTIME_UNAVAILABLE'
   else if (/webminai_reboot_required|reboot_required/u.test(lower)) code = 'REBOOT_REQUIRED'

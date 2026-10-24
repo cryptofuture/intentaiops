@@ -41,6 +41,7 @@ import { buildFreebsdGhostTask } from './freebsd-ghost-task.js'
 import { buildFreebsdOdooTask } from './freebsd-odoo-task.js'
 import { buildFreebsdHomeAssistantTask } from './freebsd-home-assistant-task.js'
 import { buildFreebsdMagentoTask } from './freebsd-magento-task.js'
+import { buildFreebsdPodmanApplicationTask, isVerifiedFreebsdPodmanApplication } from './freebsd-podman-application-task.js'
 import { buildMacosColimaBootstrapTask } from './macos-colima-bootstrap-task.js'
 import { buildMacosWordpressComposeTask } from './macos-wordpress-compose-task.js'
 import { buildMacosComposeTask } from './macos-compose-task.js'
@@ -327,7 +328,7 @@ const DEFINITIONS = [
     description: 'Build the exact FreeBSD-port Jellyfin runtime with protected onboarding, isolated storage, nginx, health, and rollback on port 18113.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdJellyfinTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('jellyfin', buildFreebsdJellyfinTask, taskId, definition, options)
   },
   {
     id: 'mattermost-freebsd',
@@ -335,7 +336,7 @@ const DEFINITIONS = [
     description: 'Install the current FreeBSD Mattermost port with PostgreSQL 17, protected bootstrap credentials, nginx, health, and rollback on port 18111.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdMattermostTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('mattermost', buildFreebsdMattermostTask, taskId, definition, options)
   },
   {
     id: 'n8n-freebsd',
@@ -343,7 +344,7 @@ const DEFINITIONS = [
     description: 'Install exact n8n with FreeBSD Node.js 24, protected encryption state, SQLite persistence, rc.d, health, and rollback on port 18109.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdN8nTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('n8n', buildFreebsdN8nTask, taskId, definition, options)
   },
   {
     id: 'ghost-freebsd',
@@ -351,7 +352,7 @@ const DEFINITIONS = [
     description: 'Install exact Ghost with FreeBSD Node.js 22, isolated Oracle MySQL 8, protected database credentials, rc.d, nginx, health, and rollback on port 18110.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdGhostTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('ghost', buildFreebsdGhostTask, taskId, definition, options)
   },
   {
     id: 'odoo-freebsd',
@@ -359,7 +360,7 @@ const DEFINITIONS = [
     description: 'Install pinned Odoo Community 19 source with Python 3.12, isolated PostgreSQL 17, protected administrator credentials, rc.d, nginx, health, and rollback on port 18112.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdOdooTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('odoo', buildFreebsdOdooTask, taskId, definition, options)
   },
   {
     id: 'home-assistant-freebsd',
@@ -367,7 +368,7 @@ const DEFINITIONS = [
     description: 'Build pinned Home Assistant Core with Python 3.14, isolated configuration, protected onboarding credentials, rc.d, nginx, health, and rollback on port 18115.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdHomeAssistantTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('home-assistant', buildFreebsdHomeAssistantTask, taskId, definition, options)
   },
   {
     id: 'magento-freebsd',
@@ -375,7 +376,7 @@ const DEFINITIONS = [
     description: 'Build pinned Magento Open Source with PHP 8.4-FPM over a Unix socket, isolated MariaDB, OpenSearch, Valkey, protected administrator credentials, cron, nginx, health, and rollback on port 18108.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdMagentoTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('magento', buildFreebsdMagentoTask, taskId, definition, options)
   },
   {
     id: 'colima-macos',
@@ -719,6 +720,16 @@ export function buildCandidatePlanningContext (catalogIds, taskId, options = {})
   })
 }
 
+function buildFreebsdApplicationRoute (application, nativeBuilder, taskId, definition, options) {
+  const execution = options.freebsdExecution ?? options.inventory?.webminaiExecution
+  const docker = options.docker ?? options.inventory?.webminaiDocker ?? {}
+  const preferPodman = docker.preference === 'enabled' || ((docker.preference ?? 'auto') === 'auto' && isVerifiedFreebsdPodmanApplication(application, execution))
+  const built = preferPodman
+    ? buildFreebsdPodmanApplicationTask(application, taskId, execution)
+    : nativeBuilder(taskId, execution)
+  return { ...built, definition }
+}
+
 export function buildCommonTask (catalogId, taskId, options = {}) {
   const { platform = 'linux' } = options
   if (!Number.isInteger(taskId) || taskId < 1) throw new TypeError('task id must be a positive integer')
@@ -730,6 +741,9 @@ export function buildCommonTask (catalogId, taskId, options = {}) {
     definition.build(taskId, definition, { ...options, platform }),
     options.applicationDefaults
   )
+  if (platform === 'freebsd' && definition.category === 'application' && (options.docker ?? options.inventory?.webminaiDocker)?.preference === 'disabled' && built.plan.commands.some(command => /\bpodman(?:-compose)?\s/u.test(command.command))) {
+    throw new Error('Podman is disabled by this host preference and this task has no native-only route')
+  }
   const diagnostic = definition.category === 'diagnostic'
   const foundationIds = catalogFoundationIds(catalogId, options)
   return {

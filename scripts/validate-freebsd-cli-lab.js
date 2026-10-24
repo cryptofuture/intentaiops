@@ -14,14 +14,23 @@ import { rootExecutionPolicy } from '../src/execution-policy.js'
 import { stageInstallSource } from './validate-linux-common-tasks.js'
 import { freebsdNginxSecurityCommand } from '../src/freebsd-nginx-security.js'
 import { parallelMap } from '../src/multi-host-service.js'
+import { verifyFreebsdPodmanBrowser } from '../browser-checks/freebsd-podman-apps.js'
 
 assert.ok(process.argv.includes('--approve-live-tests'), 'Explicit live-lab approval required')
 assert.ok(process.env.VAULT_TEST, 'VAULT_TEST required')
 const hosts = ['webminai-freebsd-14-4', 'webminai-freebsd-15-1']
 const option = name => process.argv.find(value => value.startsWith(`--${name}=`))?.slice(name.length + 3)
 const selectedHost = option('host'); const selectedTask = option('task')
-const flags = new Set(['--approve-live-tests', '--parallel-hosts', '--verify-replay-guards', '--update-stage2', '--cleanup-confirmed-failure', '--retest-cleaned', '--retest-reverted', '--resume-prepared', '--refresh-failed', '--reconcile-only', '--repair-network', '--restore-network', '--repair-ghost-nginx', '--restore-ghost-security', '--keep-runtime', '--restore-runtime', '--setup-only', '--include-maintenance', '--replace-undispatched'])
-assert.ok(process.argv.slice(2).every(argument => flags.has(argument) || ['--resume-paused', '--refresh-paused'].includes(argument) || argument.startsWith('--host=') || argument.startsWith('--task=')), 'Unknown lab option')
+const podmanCandidates = process.argv.includes('--podman-candidates')
+const installationChecks = process.argv.includes('--installation-checks')
+const absentRuntime = process.argv.includes('--absent-runtime')
+assert.ok(!installationChecks || (!podmanCandidates && selectedHost && ['podman-freebsd', 'intent-ai-ops-freebsd'].includes(selectedTask)), 'Installation checks require one explicit runtime or CLI task and separate state')
+const flags = new Set(['--approve-live-tests', '--podman-candidates', '--retest-preflight', '--parallel-hosts', '--verify-replay-guards', '--update-stage2', '--cleanup-confirmed-failure', '--retest-cleaned', '--retest-reverted', '--resume-prepared', '--refresh-failed', '--reconcile-only', '--repair-network', '--restore-network', '--repair-ghost-nginx', '--restore-ghost-security', '--keep-runtime', '--restore-runtime', '--setup-only', '--include-maintenance', '--replace-undispatched'])
+assert.ok(process.argv.slice(2).every(argument => flags.has(argument) || ['--installation-checks', '--absent-runtime', '--resume-paused', '--refresh-paused'].includes(argument) || argument.startsWith('--host=') || argument.startsWith('--task=')), 'Unknown lab option')
+assert.ok(!absentRuntime || (installationChecks && selectedTask === 'podman-freebsd'), 'Absent-runtime checks require the isolated Podman installation workflow')
+assert.ok(!podmanCandidates || (selectedHost && ['odoo-freebsd', 'home-assistant-freebsd', 'magento-freebsd', 'ghost-freebsd', 'n8n-freebsd', 'mattermost-freebsd', 'jellyfin-freebsd'].includes(selectedTask) && process.argv.slice(2).every(argument => ['--approve-live-tests', '--podman-candidates', '--cleanup-confirmed-failure', '--retest-reverted', '--retest-preflight', '--refresh-failed', '--refresh-paused', '--resume-paused', '--resume-prepared', '--replace-undispatched'].includes(argument) || argument.startsWith('--host=') || argument.startsWith('--task='))), 'Podman candidates require one explicit supported host/application and isolated candidate state')
+assert.ok(!podmanCandidates || ['--cleanup-confirmed-failure', '--retest-reverted', '--retest-preflight', '--refresh-failed', '--refresh-paused', '--resume-paused', '--resume-prepared', '--replace-undispatched'].filter(flag => process.argv.includes(flag)).length <= 1, 'Choose one candidate recovery operation')
+assert.ok(!process.argv.includes('--retest-preflight') || (podmanCandidates && !process.argv.includes('--refresh-failed') && !process.argv.includes('--resume-prepared')), 'Preflight retest requires one isolated candidate without continuation flags')
 const updatePlugin = process.argv.includes('--update-stage2')
 const parallelHosts = process.argv.includes('--parallel-hosts')
 const verifyReplayGuards = process.argv.includes('--verify-replay-guards')
@@ -43,13 +52,13 @@ const repairGhostNginx = process.argv.includes('--repair-ghost-nginx')
 const restoreGhostSecurity = process.argv.includes('--restore-ghost-security')
 assert.ok(!restoreGhostSecurity || (selectedHost === 'webminai-freebsd-15-1' && selectedTask === 'ghost-freebsd' && process.argv.slice(2).every(argument => ['--approve-live-tests', '--restore-ghost-security'].includes(argument) || argument.startsWith('--host=') || argument.startsWith('--task='))), 'Security staging cleanup requires the explicit reverted 15.1 Ghost task and no other operation')
 assert.ok(!repairGhostNginx || (selectedHost === 'webminai-freebsd-15-1' && selectedTask === 'ghost-freebsd' && process.argv.slice(2).every(argument => ['--approve-live-tests', '--repair-ghost-nginx'].includes(argument) || argument.startsWith('--host=') || argument.startsWith('--task='))), 'nginx security repair requires the explicit paused 15.1 Ghost task and no other operation')
-assert.ok(!refreshPaused || (selectedHost && selectedTask && process.argv.slice(2).every(argument => ['--approve-live-tests', '--refresh-paused'].includes(argument) || argument.startsWith('--host=') || argument.startsWith('--task='))), 'Paused catalog refresh requires one explicit task and no other operation')
-assert.ok(!resumePaused || (selectedHost && selectedTask && process.argv.slice(2).every(argument => ['--approve-live-tests', '--resume-paused'].includes(argument) || argument.startsWith('--host=') || argument.startsWith('--task='))), 'Paused continuation requires one explicit task and no other operation')
+assert.ok(!refreshPaused || (selectedHost && selectedTask && process.argv.slice(2).every(argument => ['--approve-live-tests', '--refresh-paused', '--podman-candidates'].includes(argument) || argument.startsWith('--host=') || argument.startsWith('--task='))), 'Paused catalog refresh requires one explicit task and no other operation')
+assert.ok(!resumePaused || (selectedHost && selectedTask && process.argv.slice(2).every(argument => ['--approve-live-tests', '--resume-paused', '--podman-candidates'].includes(argument) || argument.startsWith('--host=') || argument.startsWith('--task='))), 'Paused continuation requires one explicit task and no other operation')
 assert.ok(!(repairNetwork && restoreNetwork), 'Choose network setup or restoration, not both')
 assert.ok(!(repairNetwork || restoreNetwork) || (selectedHost === 'webminai-freebsd-14-4' && selectedTask === 'podman-freebsd' && !restoreRuntime && !keepRuntime && !retestReverted && !reconcileOnly && !refreshRemaining && !resumePrepared && !cleanupFailure && !retestCleaned && !updatePlugin), 'Network repair requires the explicit 14.4 Podman prerequisite')
 assert.ok(!reconcileOnly || (selectedHost && selectedTask && !restoreRuntime && !keepRuntime && !retestReverted && !refreshRemaining && !resumePrepared && !cleanupFailure && !retestCleaned && !updatePlugin), 'Reconciliation requires one explicit saved task')
 assert.ok(!restoreRuntime || (selectedHost && selectedTask === 'podman-freebsd' && !keepRuntime && !retestReverted && !refreshRemaining && !resumePrepared && !cleanupFailure && !retestCleaned && !updatePlugin), 'Runtime restoration requires one explicit retained Podman task')
-assert.ok(!retestReverted || (selectedHost === 'webminai-freebsd-14-4' && ['jellyfin-freebsd', 'n8n-freebsd'].includes(selectedTask) && !keepRuntime && !refreshRemaining && !resumePrepared && !cleanupFailure && !retestCleaned && !updatePlugin), 'Reverted retest is limited to the inspected 14.4 Jellyfin or n8n cycle')
+assert.ok(!retestReverted || ((podmanCandidates || (selectedHost === 'webminai-freebsd-14-4' && ['jellyfin-freebsd', 'n8n-freebsd'].includes(selectedTask))) && !keepRuntime && !refreshRemaining && !resumePrepared && !cleanupFailure && !retestCleaned && !updatePlugin), 'Reverted retest is limited to the inspected 14.4 Jellyfin or n8n cycle, or an isolated Podman candidate')
 assert.ok(!keepRuntime || (selectedHost && selectedTask === 'podman-freebsd' && !resumePrepared && !cleanupFailure && !retestCleaned && !updatePlugin), 'Retained runtime requires an explicit Podman task')
 assert.ok(!refreshRemaining || ((selectedHost || parallelHosts) && selectedTask && !resumePrepared && !cleanupFailure && !retestCleaned && !updatePlugin), 'Catalog continuation requires one explicit failed task')
 assert.ok(!updatePlugin || process.argv.includes('--setup-only'), 'Plugin updates must be separate from application execution')
@@ -58,12 +67,22 @@ assert.ok(!retestCleaned || (selectedHost && selectedTask && !cleanupFailure && 
 assert.ok(!resumePrepared || (selectedHost && selectedTask && !cleanupFailure && !retestCleaned && !updatePlugin), 'Resuming preparation requires one explicit host and task')
 assert.ok(!selectedHost || hosts.includes(selectedHost))
 assert.ok(!selectedTask || listCommonTasks({ platform: 'freebsd' }).some(task => task.id === selectedTask))
-const directory = path.resolve('artifacts/freebsd-common')
+const directory = path.resolve(installationChecks ? 'artifacts/freebsd-installation' : podmanCandidates ? 'artifacts/freebsd-podman' : 'artifacts/freebsd-common', ...(absentRuntime ? ['absent-runtime'] : []))
 await mkdir(directory, { recursive: true, mode: 0o700 }); await chmod(directory, 0o700)
 const stateFile = path.join(directory, 'state.json')
 let state
 try { state = JSON.parse(await readFile(stateFile, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error; state = { hosts: {} } }
-const safe = text => redactDiagnosticText(String(text).replaceAll(process.env.VAULT_TEST, '[redacted]')).replace(/[\r\n]+/gu, ' ').slice(0, 1600)
+let checkpointSettings
+for (const hostId of selectedHost ? [selectedHost] : hosts) {
+  const saved = state.hosts[hostId]
+  if (!saved || !Object.keys(saved.tasks).length) continue
+  const dataRoot = process.env.WEBMINAI_DATA_ROOT ?? '/home/vscode/.intentaiops'
+  checkpointSettings ??= await new SettingsStore(dataRoot).load()
+  assert.ok(checkpointSettings.servers[hostId], 'Checkpoint host is missing from this vault; re-add and verify it before continuation')
+  const tasks = new TaskStore(dataRoot, { directoryAliases: new Map([[hostId, checkpointSettings.servers[hostId].historyId]]) })
+  assertCheckpointTasks(saved, state.observedAt, id => tasks.get(hostId, id))
+}
+const safe = text => redactDiagnosticText(String(text).replaceAll(process.env.VAULT_TEST, '[redacted]')).replace(/[\r\n]+/gu, ' ').slice(0, 1600).trim()
 let writes = Promise.resolve()
 let stopScheduling = null
 async function record (message) {
@@ -78,7 +97,7 @@ async function record (message) {
   })
   return writes
 }
-const config = path.join(directory, 'ssh_config')
+const config = path.resolve('artifacts/freebsd-common/ssh_config')
 const connection = host => `ssh://${host}?config=${encodeURIComponent(config)}`
 const quote = text => "'" + text.replaceAll("'", "'\\''") + "'"
 async function inspect (host, command) {
@@ -97,6 +116,7 @@ function catalogPathProbe (paths) {
 }
 const baseline = `set -eu; printf '===OS===\\n'; uname -sr; printf '===PACKAGES===\\n'; ${packages}; printf '===SERVICES===\\n'; service -e | LC_ALL=C sort; printf '===FILES===\\n'; for p in /etc/rc.conf /etc/fstab /etc/sysctl.conf; do if test -f "$p"; then sha256 -q "$p"; else printf 'absent %s\\n' "$p"; fi; done; printf '===RESOURCES===\\n'; sysctl -n hw.physmem; swapinfo -k; df -k /; printf '===RUNTIMES===\\n'; command -v podman || true; command -v netdata || true; printf '===APP-PATHS===\\n'; find /var/db -maxdepth 1 -type d -name 'webminai*' -print; printf '===PORTS===\\n'; sockstat -4l`
 for (const host of selectedHost ? [selectedHost] : hosts) {
+  if (absentRuntime && !state.hosts[host]?.tasks['podman-freebsd']) assert.equal(await inspect(host, 'set -eu; test -z "$(command -v podman || true)"; for p in /var/db/containers /usr/local/etc/containers; do test ! -e "$p"; test ! -L "$p"; done; printf absent'), 'absent', 'Absent-runtime check must not adopt an existing installation')
   state.hosts[host] ??= { tasks: {} }
   if (!state.hosts[host].baselineSaved) {
     const observed = await inspect(host, baseline)
@@ -170,6 +190,7 @@ try {
       host = (await request('/workspace')).hosts.find(value => value.id === hostId)
       if (updatePlugin || settings.servers[hostId].desiredStage2 !== 'active') await operation(hostId, { action: updatePlugin ? 'stage2-update' : 'stage2-activate', hostVersion: host.hostVersion, approved: true })
       const inventory = await request('/inventory?host=' + hostId)
+      if (podmanCandidates) assert.equal(inventory.webminaiDocker?.preference, 'enabled', 'Explicitly enable the candidate container route in the CLI before testing; Automatic remains native pending qualification')
       await writeFile(path.join(directory, hostId + '-capabilities.json'), JSON.stringify({ execution: inventory.webminaiExecution, docker: inventory.webminaiDocker }, null, 2), { mode: 0o600 })
       const catalog = await request('/catalog?host=' + hostId)
       hostState.eligibility = catalog
@@ -315,6 +336,25 @@ try {
         if (stopScheduling) throw new Error('Another host test failed; current reviewed cycle finished before stopping')
         const eligible = (await request('/catalog?host=' + hostId)).find(value => value.id === definition.id)
         if (!eligible?.eligible) { await record(`${hostId}/${definition.id}: INELIGIBLE ${eligible?.reason ?? 'not offered by current capabilities'}`); continue }
+        if (process.argv.includes('--retest-preflight')) {
+          const source = hostState.tasks[definition.id]
+          assert.ok(source, 'No failed candidate preflight to inspect')
+          const saved = await view(hostId, source.id)
+          assert.equal(saved.task.status, 'partial')
+          assert.equal(saved.commands[0].commandId, 'prepare-podman-application')
+          assert.equal(saved.commands[0].status, 'failed')
+          assert.ok(saved.commands.slice(1).every(command => command.status === 'pending'), 'Only a confirmed initial preflight failure permits this fresh test')
+          const paths = await inspect(hostId, catalogPathProbe(saved.task.plan.modifiedFiles))
+          assert.ok(paths.trim().split('\n').every(line => line.startsWith('absent ')), 'Preflight left state; reviewed cleanup is required')
+          const application = definition.id.replace(/-freebsd$/u, '')
+          const name = `intentaiops-${application}-${source.id}`
+          await inspect(hostId, `set -eu; for kind in container network image; do target=${name}; [ "$kind" != image ] || target=localhost/${name}:runtime; if podman "$kind" exists "$target"; then exit 78; else test "$?" -eq 1; fi; done`)
+          await operation(hostId, { action: 'abort', taskId: source.id, expectedVersion: saved.stateVersion })
+          hostState.preflightFailures ??= []
+          hostState.preflightFailures.push({ ...source, catalogId: definition.id, status: 'confirmed-failure-no-resources' })
+          delete hostState.tasks[definition.id]
+          await record(`${hostId}/${definition.id}: confirmed failed preflight left no paths or Podman resources; original failure retained, a new task requires fresh approval`)
+        }
         if (cleanupFailure) {
           const source = hostState.tasks[definition.id]
           assert.ok(source, 'No recorded test to clean up')
@@ -322,6 +362,23 @@ try {
           assert.equal(current.task.status, 'partial')
           assert.ok(!current.commands.some(command => command.status === 'uncertain' || command.status === 'running'))
           assert.ok(current.commands.some(command => command.status === 'failed'), 'Cleanup is only for confirmed failure, never lost observation')
+          if (podmanCandidates) {
+            const trusted = buildCommonTask(definition.id, source.id, { platform: 'freebsd', freebsdExecution: inventory.webminaiExecution, docker: inventory.webminaiDocker }).plan
+            assert.equal(planFingerprint(current.task.plan.revertCommands), planFingerprint(trusted.revertCommands), 'Candidate ownership cleanup changed; inspect before approving')
+            const reviewed = { ...trusted, commands: trusted.revertCommands, revertCommands: [], operatorRollback: true }
+            validateCommandPlan(reviewed, rootExecutionPolicy({}), { requireRevert: false })
+            const revisionId = tasks.proposeRevision(hostId, source.id, reviewed, current.stateVersion)
+            await operation(hostId, { action: 'approve', taskId: source.id, revisionId, expectedVersion: current.stateVersion, fingerprint: planFingerprint(reviewed), approved: true })
+            current = await view(hostId, source.id)
+            await operation(hostId, { action: 'rollback', taskId: source.id, revisionId, expectedVersion: current.stateVersion, fingerprint: planFingerprint(reviewed), approved: true })
+            assert.equal((await view(hostId, source.id)).task.status, 'reverted')
+            assert.equal(await inspect(hostId, packages), await readFile(path.join(directory, `${hostId}-${source.id}-packages.before`), 'utf8'))
+            assert.equal(await inspect(hostId, accounts), await readFile(path.join(directory, `${hostId}-${source.id}-accounts.before`), 'utf8'))
+            assert.equal(await inspect(hostId, catalogPathProbe(current.task.plan.modifiedFiles)), await readFile(path.join(directory, `${hostId}-${source.id}-paths.before`), 'utf8'))
+            source.status = 'failed-cleaned'
+            await record(`${hostId}/${definition.id}: separately reviewed partial candidate cleanup restored exact baselines; no application pass claimed`)
+            continue
+          }
           if (definition.id === 'wordpress-freebsd') {
             assert.equal(hostId, 'webminai-freebsd-14-4')
             assert.equal(source.id, 10)
@@ -395,7 +452,20 @@ try {
           await record(`${hostId}: PASS retained prerequisite reviewed rollback and original package/path/account baseline`)
           continue
         }
-        if (retestReverted) {
+        if (retestReverted && podmanCandidates) {
+          assert.ok(['failed-cleaned', 'reverted'].includes(prior?.status), 'Only an exactly restored candidate can be retested')
+          const saved = await view(hostId, prior.id)
+          assert.equal(saved.task.status, 'reverted')
+          assert.equal(await inspect(hostId, packages), await readFile(path.join(directory, `${hostId}-${prior.id}-packages.before`), 'utf8'))
+          assert.equal(await inspect(hostId, accounts), await readFile(path.join(directory, `${hostId}-${prior.id}-accounts.before`), 'utf8'))
+          assert.equal(await inspect(hostId, catalogPathProbe(saved.task.plan.modifiedFiles)), await readFile(path.join(directory, `${hostId}-${prior.id}-paths.before`), 'utf8'))
+          hostState.archivedTests ??= []
+          hostState.archivedTests.push({ ...prior, catalogId: definition.id })
+          delete hostState.tasks[definition.id]
+          prior = null
+          await record(`${hostId}/${definition.id}: original reverted candidate and exact cleanup retained; preparing a separately approved fresh test`)
+        }
+        if (retestReverted && !podmanCandidates) {
           const n8n = definition.id === 'n8n-freebsd'
           assert.equal(prior?.id, n8n ? 21 : 3, 'Only the inspected historical cycle may be superseded')
           const saved = await view(hostId, prior.id)
@@ -433,6 +503,10 @@ try {
             assert.ok(saved.commands.every(command => ['completed', 'pending'].includes(command.status)), 'Resolve uncertain or failed work before paused catalog refresh')
           } else assert.ok(saved.commands.some(command => command.status === 'failed'), 'Only confirmed failure permits this continuation')
           assert.ok(!saved.commands.some(command => ['uncertain', 'running'].includes(command.status)), 'Uncertain work requires reconciliation')
+          if (podmanCandidates && saved.commands.some(command => command.status === 'failed' && /^(?:podman-install-|(?:prepare|verify)-podman-(?:build-|source-|system-|openssl-)|clean-podman-(?:build|package)-cache)/u.test(command.commandId))) {
+            const name = `intentaiops-${definition.id.replace(/-freebsd$/u, '')}-${prior.id}`
+            assertIdlePodmanProcesses(await inspect(hostId, `podman container inspect --format '{{.State.Pid}}' ${name}; podman exec ${name} ps -ax -o pid -o ppid -o comm`))
+          }
           const proposal = await operation(hostId, { action: 'refresh-catalog', taskId: prior.id, expectedVersion: saved.stateVersion })
           await record(`${hostId}/${definition.id}: regenerated remaining catalog steps; completed history and original baseline preserved`)
           await operation(hostId, { action: 'approve', taskId: prior.id, revisionId: proposal.revisionId, expectedVersion: proposal.expectedVersion, fingerprint: proposal.fingerprint, approved: true })
@@ -490,13 +564,13 @@ try {
         if (['reverted', 'verified-read-only', 'verified-one-way', 'prerequisite-ready'].includes(hostState.tasks[definition.id]?.status)) continue
         assert.ok(!hostState.tasks[definition.id] || resumePrepared || refreshRemaining || resumePaused, 'Existing incomplete test requires explicit reviewed continuation, not another installation')
         let id = resumePrepared || refreshRemaining || resumePaused ? prior.id : null
-        for (let attempt = 0; !id && attempt < 8; attempt++) {
+        for (let attempt = 0; !id && attempt < (podmanCandidates ? 32 : 8); attempt++) {
           const prepared = await operation(hostId, { action: 'prepare', catalogId: definition.id, request: 'Validate FreeBSD common task through reviewed CLI: ' + definition.label })
           id = prepared.results[0].taskId
           assert.ok(Number.isSafeInteger(id) && id > 0)
           hostState.tasks[definition.id] = { id, status: 'awaiting-review' }
           await record(`${hostId}/${definition.id}: prepared #${id}`)
-          const occupied = await inspect(hostId, `for p in /var/lib/webminai/task-state/${id}-* /var/db/webminai/task-state/${id}-* /var/lib/webminai/tasks/${id} /var/db/webminai/tasks/${id} /var/lib/intentaiops/recovery/task-${id} /var/db/intentaiops/recovery/task-${id}; do if test -e "$p" || test -L "$p"; then printf occupied; break; fi; done`)
+          const occupied = await inspect(hostId, `for p in /var/db/webminai/podman-${id}-* /var/lib/webminai/task-state/${id}-* /var/db/webminai/task-state/${id}-* /var/lib/webminai/tasks/${id} /var/db/webminai/tasks/${id} /var/lib/intentaiops/recovery/task-${id} /var/db/intentaiops/recovery/task-${id}; do if test -e "$p" || test -L "$p"; then printf occupied; break; fi; done`)
           if (!occupied) break
           const pending = await view(hostId, id)
           await operation(hostId, { action: 'abort', taskId: id, expectedVersion: pending.stateVersion })
@@ -535,7 +609,7 @@ try {
         const profileFile = path.join(directory, `${hostId}-${id}-profiles.before`)
         const profileProbe = catalogPathProbe(['/root/.profile', '/root/.cshrc', '/root/.config/fish/config.fish'])
         let profileBaseline
-        if (current.task.plan.commands.some(command => /-build-toolchain(?:-catalog-[a-f0-9]+)?$/u.test(command.id))) {
+        if (current.task.plan.commands.some(command => /-build-toolchain(?:-catalog-[a-f0-9]+)?$/u.test(command.id) || command.command?.includes('RUSTUP_HOME='))) {
           try { profileBaseline = await readFile(profileFile, 'utf8') } catch (error) {
             if (error.code !== 'ENOENT') throw error
             profileBaseline = await inspect(hostId, profileProbe)
@@ -552,6 +626,11 @@ try {
         await operation(hostId, { action: resumePaused ? 'resume' : 'execute', taskId: id, expectedVersion: current.stateVersion, fingerprint: current.fingerprint, approved: true })
         current = await view(hostId, id)
         hostState.tasks[definition.id].status = current.task.status
+        if (podmanCandidates && current.task.status === 'partial' && current.control.action === 'pause' && current.commands.some(command => command.status === 'pending') && current.commands.every(command => ['completed', 'pending'].includes(command.status))) {
+          hostState.tasks[definition.id].status = 'paused'
+          await record(`${hostId}/${definition.id}: safe-boundary pause confirmed; completed commands preserved, remaining commands await separate review; no application pass claimed`)
+          return
+        }
         if (current.task.status !== 'completed') {
           const failed = tasks.get(hostId, id).results?.find(result => result.status !== 'completed')
           const uncertain = current.commands.filter(command => command.status === 'uncertain').map(command => command.commandId)
@@ -561,6 +640,12 @@ try {
         assert.ok(current.commands.every(command => command.status === 'completed'))
         hostState.tasks[definition.id].status = 'completed'
         await record(`${hostId}/${definition.id}: apply and catalog verification passed`)
+        if (podmanCandidates) {
+          const { chromium } = await import('@playwright/test')
+          const browser = await chromium.launch({ ...(process.env.INTENT_BROWSER_EXECUTABLE ? { executablePath: process.env.INTENT_BROWSER_EXECUTABLE } : {}) })
+          try { await verifyFreebsdPodmanBrowser(browser, hostId, definition.id) } finally { await browser.close() }
+          await record(`${hostId}/${definition.id}: PASS external browser rendering and same-origin assets after container restart; screenshot saved`)
+        }
         if (!stopScheduling) {
           const confirmedEvents = tasks.allExecutionEvents(hostId, id)
           await assert.rejects(operation(hostId, { action: 'execute', taskId: id, expectedVersion: current.stateVersion, fingerprint: current.fingerprint, approved: true }), /already completed; its execution approval is consumed/u)
@@ -601,3 +686,26 @@ try {
     assert.deepEqual({ historyId: savedSettings.servers[hostId].historyId ?? null, hostFingerprint: savedSettings.servers[hostId].hostFingerprint ?? null }, state.hosts[hostId].identity, 'Settings updates must preserve every tested host identity and history')
   }
 } catch (error) { await record('STOPPED: ' + safe(error.message)); throw new Error(safe(error.message)) } finally { await cli.close() }
+
+function assertIdlePodmanProcesses (output) {
+  const lines = output.trim().split(/\r?\n/u)
+  const main = Number(lines.shift())
+  assert.ok(Number.isSafeInteger(main) && main > 0 && /^\s*PID\s+PPID\s+COMMAND\s*$/u.test(lines.shift() ?? ''), 'Container process evidence unavailable')
+  const processes = lines.map(line => {
+    const fields = line.trim().split(/\s+/u)
+    const pid = Number(fields[0]); const parent = Number(fields[1])
+    assert.ok(fields.length === 3 && Number.isSafeInteger(pid) && pid > 0 && Number.isSafeInteger(parent) && parent >= 0, 'Malformed container process evidence')
+    return { pid, parent, name: fields[2] }
+  })
+  assert.ok(processes.some(process => process.pid === main && process.name === 'sh'), 'Container entrypoint changed; inspect before continuation')
+  assert.ok(processes.every(process => process.pid === main || (process.parent === main && process.name === 'sleep') || process.name === 'ps'), 'Previous in-container work remains active; observe it before approving another acquisition attempt')
+}
+
+function assertCheckpointTasks (saved, observedAt, readTask) {
+  const checkpointTime = Date.parse(observedAt) / 1000
+  assert.ok(Number.isFinite(checkpointTime), 'Checkpoint observation time is missing')
+  for (const [catalogId, reference] of Object.entries(saved.tasks)) {
+    const task = readTask(reference.id)
+    assert.ok(task.kind === 'catalog' && task.catalogId === catalogId && Number.isFinite(task.createdAt) && task.createdAt <= checkpointTime, 'Checkpoint belongs to different local task history; preserve it and use separate state after vault recreation')
+  }
+}

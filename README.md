@@ -98,6 +98,29 @@ The default preference is **Automatic**:
 
 Native Linux web stacks prefer nginx and PHP-FPM Unix sockets. Container credentials are generated on the host and stored in protected files, never in AI context or task history.
 
+FreeBSD Odoo, Home Assistant and Magento can install their native stack inside
+a task-owned Podman container, not a Linux Docker image. **Automatic** prefers
+these verified routes on ready amd64 FreeBSD 14.4 and 15.1 RELEASE hosts. **Disabled**
+keeps native installation. Other targets and applications remain explicit
+**Enabled** candidates until qualification finishes. Credentials stay in the
+protected task directory; application data persists in the container writable
+layer. Reviewed rollback deletes both.
+FreeBSD containers use `restart=always` for the native boot service, so a manually
+stopped container can start again after reboot. Reviewed rollback removes it.
+The [upstream FreeBSD port remains experimental](https://podman.io/docs/installation#installing-on-freebsd).
+
+On the validated FreeBSD 14.4/15.1 amd64 hosts, Automatic selects Podman for
+WordPress, WooCommerce, Joomla, Drupal, PrestaShop, Moodle, Nextcloud, Odoo,
+Home Assistant, Magento and Jellyfin when their reviewed runtime is ready.
+Ghost and Mattermost also select Automatic on independently qualified 15.1.
+n8n on both releases, plus Ghost and Mattermost on 14.4, have explicit Enabled
+Podman candidates pending live qualification. Disabled retains native routes.
+The n8n Podman candidate checks for 8 GiB available on its storage filesystem
+before reserving resources. Cold-build space includes LLVM, npm caches and
+unpacked dependencies, not just the final application.
+Intent AI Ops itself
+installs on the host. Platform and runtime safety checks still apply.
+
 ## Usage
 
 Run Intent AI Ops on the administration computer. Requirements:

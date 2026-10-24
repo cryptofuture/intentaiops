@@ -6,6 +6,21 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { buildFreebsdJellyfinTask } from '../src/freebsd-jellyfin-task.js'
 
+test('FreeBSD Jellyfin cold acquisition has an explicit bounded durable-job budget', () => {
+  const command = buildFreebsdJellyfinTask(1, { platform: 'freebsd' }).plan.commands.find(command => command.id === 'install-jellyfin-runtime')
+  assert.equal(command.executionMode, 'job')
+  assert.equal(command.timeoutMs, 3600000)
+})
+
+test('FreeBSD Jellyfin runtime accepts its exact version response without accepting crashes or other failures', () => {
+  const probe = buildFreebsdJellyfinTask(1, { platform: 'freebsd' }).verifyRuntime
+  const fixture = 'su () { printf "%s\\n" "$PROBE_TEXT" >&2; return "$PROBE_STATUS"; }; '
+  for (const [status, text, accepted] of [[0, 'Jellyfin.Server 10.11.11.0', true], [1, 'Jellyfin.Server 10.11.11.0', true], [137, 'Jellyfin.Server 10.11.11.0', false], [1, 'Failed to create CoreCLR', false], [0, 'Jellyfin.Server 10.11.12.0', false], [1, '', false], [2, 'Jellyfin.Server 10.11.11.0', false], [1, 'Jellyfin.Server 10.11.11.0\nFailed to create CoreCLR', false]]) {
+    const result = spawnSync('/bin/sh', ['-c', fixture + probe], { encoding: 'utf8', env: { ...process.env, PROBE_TEXT: text, PROBE_STATUS: String(status) }, timeout: 3000 })
+    assert.equal(result.status === 0, accepted, `${status}: ${text}`)
+  }
+})
+
 test('FreeBSD Jellyfin accepts only the reviewed upstream release and numeric packaging revisions', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'intent-freebsd-pkg-'))
   try {

@@ -138,6 +138,15 @@ test('an explicit package version assertion retains a stable failure category', 
   assert.ok(isFailureCode(failure.code))
 })
 
+test('storage preflight distinguishes insufficient capacity from unavailable measurements', () => {
+  for (const code of ['INSUFFICIENT_DISK', 'DISK_CAPACITY_UNAVAILABLE']) {
+    const result = { exitCode: 78, stderr: `${code}: cold build preflight stopped before mutation` }
+    assert.equal(classifyFailure({ item: { id: 'prepare-podman-application' }, result }).code, code)
+    assert.ok(isFailureCode(code))
+    assert.equal(classifyFailure({ item: { id: 'prepare-podman-application' }, result: { ...result, timedOut: true } }).code, 'TIMEOUT')
+  }
+})
+
 test('Windows Docker prerequisite failures retain actionable stable codes', () => {
   const cases = [
     'FIRMWARE_VIRTUALIZATION_DISABLED',

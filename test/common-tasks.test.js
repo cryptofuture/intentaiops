@@ -275,6 +275,52 @@ test('Intent AI Ops macOS and Windows tasks install directly on the host', () =>
   assert.doesNotMatch(windowsCommand, /Docker|WSL|container/u)
 })
 
+test('FreeBSD Automatic selects every available Podman route while retaining explicit host-only exceptions', () => {
+  const containerApps = new Set(['wordpress', 'woocommerce', 'joomla', 'drupal', 'prestashop', 'moodle', 'nextcloud', 'odoo', 'home-assistant', 'magento'].map(name => `${name}-freebsd`))
+  const nativeApps = new Set(['jellyfin', 'mattermost', 'n8n', 'ghost', 'intent-ai-ops'].map(name => `${name}-freebsd`))
+  const applications = listCommonTasks({ category: 'application', platform: 'freebsd' }).filter(task => !task.prerequisite)
+  assert.equal(applications.length, containerApps.size + nativeApps.size)
+  for (const release of ['14.4-RELEASE-p12', '15.1-RELEASE-p6']) {
+    for (const preference of [undefined, 'auto', 'enabled']) {
+      const execution = { platform: 'freebsd', architecture: 'amd64', freebsdVersion: release, memoryBytes: 4294967296, docker: { ready: true, daemonReachable: true, hostIsContainer: false } }
+      for (const application of applications) {
+        assert.ok(containerApps.has(application.id) || nativeApps.has(application.id), 'New application requires an explicit route expectation')
+        const plan = buildCommonTask(application.id, 901, { platform: 'freebsd', freebsdExecution: execution, docker: { preference, ready: true, preferred: true } }).plan
+        validateCommandPlan(plan, rootExecutionPolicy({}))
+        const commands = plan.commands.map(command => command.command).join('\n')
+        const candidateEnabled = preference === 'enabled' && application.id !== 'intent-ai-ops-freebsd'
+        const additionalQualified = application.id === 'jellyfin-freebsd' || (['ghost-freebsd', 'mattermost-freebsd'].includes(application.id) && release.startsWith('15.1-'))
+        assert.equal(/\bpodman(?:-compose)?\s/u.test(commands), containerApps.has(application.id) || candidateEnabled || additionalQualified, `${release}/${preference ?? 'default'}/${application.id}`)
+        assert.doesNotMatch(commands, /\bdocker(?:-compose)?\s/u)
+      }
+    }
+  }
+})
+
+test('FreeBSD Disabled rejects container-only tasks while retaining existing native routes', () => {
+  const containerOnly = new Set(['wordpress', 'woocommerce', 'joomla', 'drupal', 'prestashop', 'moodle', 'nextcloud'].map(name => `${name}-freebsd`))
+  for (const release of ['14.4-RELEASE-p12', '15.1-RELEASE-p6']) {
+    const execution = { platform: 'freebsd', architecture: 'amd64', freebsdVersion: release, memoryBytes: 4294967296, docker: { ready: true, daemonReachable: true, hostIsContainer: false } }
+    for (const inventoryOnly of [false, true]) {
+      const docker = { preference: 'disabled', preferred: false, ready: true }
+      const options = { platform: 'freebsd', ...(inventoryOnly ? { inventory: { webminaiExecution: execution, webminaiDocker: docker } } : { freebsdExecution: execution, docker }) }
+      for (const application of listCommonTasks({ category: 'application', platform: 'freebsd' }).filter(task => !task.prerequisite)) {
+        if (containerOnly.has(application.id)) {
+          assert.throws(() => buildCommonTask(application.id, 902, options), /Podman is disabled/u)
+          assert.equal(commonTaskEligibility(application.id, options).eligible, false)
+        } else {
+          const built = buildCommonTask(application.id, 902, options)
+          assert.ok(built.plan.commands.every(command => !/\bpodman(?:-compose)?\s/u.test(command.command)))
+          assert.equal(commonTaskEligibility(application.id, options).eligible, true)
+        }
+      }
+      for (const definition of listCommonTasks({ platform: 'freebsd' }).filter(task => ['diagnostic', 'maintenance'].includes(task.category))) {
+        assert.equal(commonTaskEligibility(definition.id, options).eligible, true, 'Disabled must preserve inspection and maintenance')
+      }
+    }
+  }
+})
+
 test('verified FreeBSD catalog exposes native PHP application routes', () => {
   assert.deepEqual(
     listCommonTasks({ category: 'application', platform: 'freebsd' }).map(task => task.id),
@@ -364,7 +410,7 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd', docker: { daemonReachable: true, composeAvailable: true } }
   })
   assert.equal(validateCommandPlan(mattermost.plan, rootExecutionPolicy({})), mattermost.plan)
-  assert.match(mattermost.plan.commands.find(item => item.id === 'install-mattermost-runtime').command, /mattermost-server-11\.7\.10_1/u)
+  assert.match(mattermost.plan.commands.find(item => item.id === 'install-mattermost-runtime').command, /mattermost-server-11\.7\.10_2/u)
   assert.match(mattermost.plan.commands.find(item => item.id === 'initialize-mattermost-admin').command, /system_admin/u)
   assert.match(mattermost.verifyApplied, /api\/v4\/system\/ping/u)
   const n8n = buildCommonTask('n8n-freebsd', 101, {
@@ -373,7 +419,8 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
   })
   assert.equal(validateCommandPlan(n8n.plan, rootExecutionPolicy({})), n8n.plan)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-runtime').command, /for package in 'node24' 'npm-node24'/u)
-  assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /n8n@2\.33\.7/u)
+  assert.match(n8n.plan.commands.find(item => item.id === 'resolve-n8n-dependencies').command, /n8n@2\.33\.7/u)
+  assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /ci --ignore-scripts/u)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /SQLITE_DQS/u)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /-Bsymbolic/u)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /application-installed/u)
@@ -397,7 +444,8 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
   assert.match(odoo.plan.commands.find(item => item.id === 'install-odoo-application').command, /GEVENTSETUP_EMBED_LIBEV=0/u)
   assert.match(odoo.plan.commands.find(item => item.id === 'configure-odoo').command, /CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1/u)
   assert.doesNotMatch(odoo.plan.commands.find(item => item.id === 'install-odoo-runtime').command, /pkg clean/u)
-  assert.match(odoo.verifyApplied, /odoo\/web\/login/u)
+  assert.match(odoo.verifyApplied, /18112\/web\/login/u)
+  assert.match(odoo.verifyApplied, /18112\/__intentaiops-health/u)
   const homeAssistant = buildCommonTask('home-assistant-freebsd', 104, {
     platform: 'freebsd',
     freebsdExecution: { platform: 'freebsd' }
@@ -409,7 +457,8 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
   assert.doesNotMatch(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-runtime').command, /pkg clean/u)
   assert.match(homeAssistant.plan.commands.find(item => item.id === 'verify-home-assistant').command, /for attempt in \$\(jot 90\)/u)
   assert.match(homeAssistant.plan.commands.find(item => item.id === 'initialize-home-assistant').command, /for attempt in \$\(jot 60\)/u)
-  assert.match(homeAssistant.verifyApplied, /homeassistant\//u)
+  assert.match(homeAssistant.verifyApplied, /18115\/__intentaiops-health/u)
+  assert.match(homeAssistant.verifyApplied, /18115\/ \| grep -Fi 'home assistant'/u)
   const magento = buildCommonTask('magento-freebsd', 105, {
     platform: 'freebsd',
     freebsdExecution: { platform: 'freebsd' }
@@ -498,6 +547,23 @@ test('Linux Docker and FreeBSD Podman common tasks expose actionable platform pr
   assert.ok(podmanInstall.includes('REBOOT_REQUIRED'))
   assert.ok(podmanInstall.indexOf('REBOOT_REQUIRED') < podmanInstall.indexOf('pkg install'), 'Reject missing matching kernel facilities before package changes')
   assert.match(freebsd.plan.revertCommands.find(item => item.id === 'verify-podman-baseline').command, /\[ ! -d .*121-freebsd-podman.* \] \|\|/u)
+})
+
+test('FreeBSD bootstrap preserves pre-existing Podman workload lifecycle', () => {
+  const built = buildCommonTask('podman-freebsd', 121, { platform: 'freebsd', freebsdExecution: { platform: 'freebsd', docker: { installSupported: true } } })
+  assert.match(built.plan.commands.find(item => item.id === 'capture-podman-baseline').command, /command -v podman[^;]+podman[.]preexisting/u)
+  const install = built.plan.commands.find(item => item.id === 'install-podman-suite').command
+  const restore = built.plan.revertCommands.find(item => item.id === 'restore-podman-baseline').command
+  for (const command of [install, restore]) {
+    const guard = command.match(/\[ -e "\$state\/podman[.]preexisting" \][^;]+service podman (?:start|stop)[^;]+/u)?.[0]
+    assert.ok(guard)
+    for (const existing of [true, false]) {
+      const fixture = `test () { [ "$2" = /fixture/podman.preexisting ] && ${existing ? 'return 0' : 'return 1'}; return 1; }; service () { called=yes; }; called=no; state=/fixture; `
+      const result = spawnSync('/bin/sh', ['-c', fixture + guard.replace(/\[ -e ("[^"]+") \]/gu, 'test -e $1') + '; printf "$called"'], { encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(result.stdout, existing ? 'no' : 'yes')
+    }
+  }
 })
 
 test('macOS catalog exposes a virtualization-gated Colima prerequisite', () => {

@@ -1,5 +1,5 @@
 const VERSION = '11.7.10'
-const PACKAGE_VERSION = '11.7.10_1'
+const PACKAGE_VERSION = '11.7.10_2'
 const SERVICE_ROOT = '/var/db/webminai-mattermost-18111'
 const CREDENTIALS = '/root/mattermost_credentials'
 const MATTERMOST_RC = '/usr/local/etc/rc.d/webminai_mattermost'
@@ -48,7 +48,7 @@ function installRuntime (state) {
 }
 
 function initializeDatabase () {
-  return `set -eu; root=${quote(SERVICE_ROOT)}; install -d -o postgres -g postgres -m 0700 "$root/db"; install -d -o postgres -g postgres -m 0750 "$root/pg-run"; cat > ${quote(POSTGRES_RC)} <<'CONF'
+  return `set -eu; root=${quote(SERVICE_ROOT)}; install -d -o postgres -g postgres -m 0700 "$root/db"; install -d -o postgres -g postgres -m 0750 "$root/pg-run"; install -d -m 0755 /etc/rc.conf.d; cat > ${quote(POSTGRES_RC)} <<'CONF'
 postgresql_enable="YES"
 postgresql_data="${SERVICE_ROOT}/db"
 CONF
