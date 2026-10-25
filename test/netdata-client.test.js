@@ -1,11 +1,27 @@
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import test from 'node:test'
-import { createKubernetesApiCommand, createSignedCommand, NetdataClient } from '../src/netdata-client.js'
+import { createKubernetesApiCommand, parseKubernetesApiCommand, createSignedCommand, NetdataClient } from '../src/netdata-client.js'
+import { KubernetesNetdataClient } from '../src/kubernetes-netdata-client.js'
 import { executionDiagnostics } from '../src/execution-diagnostics.js'
 import { classifyFailure } from '../src/failure-signature.js'
 
 const ACTION_KEY = '11'.repeat(32)
+
+test('shared Kubernetes command execution accepts only canonical API requests and never shell commands', async () => {
+  const request = { method: 'POST', path: '/api/v1/namespaces/webminai-tasks/configmaps', body: { apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: 'reviewed' } } }
+  const command = createKubernetesApiCommand(request)
+  assert.deepEqual(parseKubernetesApiCommand(command), { ...request, body: JSON.stringify(request.body), contentType: 'application/json' })
+  const client = new KubernetesNetdataClient({ kubernetes: {}, actionKey: ACTION_KEY })
+  const calls = []
+  client.runApiRequest = async request => { calls.push(request); return { exitCode: 0, stdout: '{}' } }
+  await client.runCommand(command, { timeoutSeconds: 5 })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].timeoutSeconds, 5)
+  assert.equal(calls[0].path, request.path)
+  for (const invalid of ['echo unsafe', command + '\nmethod=DELETE', command.replace('v=1', 'v=2'), command.replace(/\npath=([^\n]+)/u, '\npath=$1=')]) await assert.rejects(client.runCommand(invalid))
+  assert.equal(calls.length, 1)
+})
 
 test('signed command envelope authenticates exactly the encoded payload', () => {
   const envelope = createSignedCommand('printf hello', ACTION_KEY, 1710000000000)

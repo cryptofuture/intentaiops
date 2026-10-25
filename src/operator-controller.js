@@ -12,11 +12,13 @@ import { regenerateCatalogRevision } from './catalog-plan-revision.js'
 import { completeTaskReport } from './task-completion-report.js'
 import { withHostMutation } from './host-mutation-ownership.js'
 import { isSystemUpdateTask } from './system-update-task.js'
+import { KubernetesTaskService } from './kubernetes-task-service.js'
 
 export class OperatorController {
   constructor ({ dataRoot, settings, passphrase, adminFor, tasks, runs }) {
     this.settings = settings
     this.passphrase = passphrase
+    this.kubernetesTasks = new KubernetesTaskService({ dataRoot, settings, passphrase, onEvent: event => this.record(event) })
     this.adminFor = adminFor
     this.tasks = tasks ?? new TaskStore(dataRoot, { directoryAliases: new Map(Object.entries(settings.servers ?? {}).map(([id, host]) => [id, host.historyId ?? id])) })
     this.runs = runs ?? new MultiHostRunStore(dataRoot)

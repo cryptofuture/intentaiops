@@ -1,5 +1,13 @@
 # FreeBSD common-task lab validation
 
+## Artifact note: 2026-10-25
+
+The Kubernetes Playwright run cleared the shared browser output directory,
+including older ignored FreeBSD application PNGs. Previously inspected live
+results and task/checkpoint evidence remain valid, but those image files have
+not been restored. Playwright output is now isolated under a `playwright/`
+subdirectory so it cannot clear sibling application-capture directories.
+
 ## n8n Podman qualification COMPLETE: 2026-10-24 20:47 UTC
 
 - Existing normal vault and both saved host identities were reused. No vault

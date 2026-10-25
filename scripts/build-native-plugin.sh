@@ -38,6 +38,7 @@ build() {
   # intentionally split into compiler arguments here.
   # shellcheck disable=SC2046
   "$compiler" -O2 -Wall -Wextra -Werror -Wno-deprecated-declarations -std=c17 -static \
+    -I"$project_root/artifacts/native" \
     $platform_define \
     -DWEBMINAI_PLUGIN_VERSION=\"$version\" \
     -o "$output" "$source_file" $(crypto_flags)
@@ -131,6 +132,7 @@ case "$target" in
     fi
     ;;
   kubernetes)
+    node "$project_root/scripts/build-recovery-helper.js"
     if [ "$(uname -s)" != Linux ]; then
       echo 'the Kubernetes gateway plugin must be built on Linux' >&2
       exit 1

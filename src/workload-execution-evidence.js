@@ -56,7 +56,4 @@ export function containerRuntimeDiagnostics (object, { id, startedAt, observedAt
   return observations
 }
 
-export function kubernetesApiDiagnostics (statusCode) {
-  const codes = { 401: 'API_AUTHENTICATION', 403: 'API_AUTHORIZATION', 404: 'RESOURCE_NOT_FOUND', 409: 'RESOURCE_CONFLICT', 429: 'API_THROTTLED', 500: 'API_UNAVAILABLE', 502: 'GATEWAY_UNAVAILABLE', 503: 'API_UNAVAILABLE', 504: 'GATEWAY_TIMEOUT' }
-  return codes[statusCode] ? [observation(codes[statusCode], 'confirmed', 'transport', 'kubernetes-api', `The API request returned HTTP ${statusCode}. Resource state and mutation outcome require separate inspection.`, { statusCode })] : []
-}
+export { kubernetesApiDiagnostics } from './execution-diagnostics.js'

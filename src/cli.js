@@ -15,6 +15,7 @@ import { CodexPlanner, normalizeCodexSettings } from './codex-planner.js'
 import { KubernetesClient } from './kubernetes-client.js'
 import { KubernetesNetdataClient } from './kubernetes-netdata-client.js'
 import { KubernetesStage2Service } from './kubernetes-stage2-service.js'
+import { KubernetesTaskService } from './kubernetes-task-service.js'
 import { rootExecutionPolicy } from './execution-policy.js'
 import { parseClaimingInput, validateClaimDetails } from './netdata-claim.js'
 import { MultiHostRunStore } from './multi-host-run-store.js'
@@ -670,13 +671,21 @@ export async function addKubernetesCluster ({ context }) {
     ui.separator()
     const save = await ui.confirm(`Save Kubernetes cluster ${clusterId}?`, false)
     if (!save) return null
+    let actionKey
+    if (typeof kubernetes.request === 'function') {
+      try { actionKey = await new KubernetesStage2Service({ kubernetes }).existingActionKey() } catch (error) {
+        if (error.statusCode !== 403) throw error
+        ui.warn('This kubeconfig cannot read managed gateway credentials. API inspection remains available; no additional permission will be requested.')
+      }
+    }
     await settingsStore.addKubernetesCluster({
       settings,
       passphrase,
       clusterId,
       kubeconfig,
       apiServer,
-      contextName
+      contextName,
+      ...(actionKey ? { actionKey } : {})
     })
     ui.success(`Kubernetes cluster ${clusterId} was saved.`)
     ui.info('Open Browse Kubernetes clusters to activate or update its Stage 2 gateway.')
@@ -720,13 +729,16 @@ async function runConnectedKubernetesCluster ({ context, clusterId }) {
   const kubernetes = createKubernetesClient(context, cluster.kubeconfig)
   const stage2 = new KubernetesStage2Service({
     kubernetes,
+    dataRoot: settingsStore.dataRoot,
     onProgress: event => ui.info(`[${event.phase}] ${event.message}`)
   })
   let status = await readKubernetesStatus({ kubernetes, cluster })
+  const clusterTasks = new KubernetesTaskService({ dataRoot: settingsStore.dataRoot, settings, passphrase, settingsStore, onEvent: event => ui.info(event.type) })
 
   for (;;) {
     const actions = [
       { label: 'Refresh status', value: 'refresh' },
+      { label: 'Common tasks, persisted reviews and history', value: 'tasks' },
       { label: 'Activate/update Stage 2 gateway', value: 'activate' },
       { label: 'Remote common-task recovery availability', value: 'remote-recovery' },
       { label: 'Deactivate Stage 2 gateway', value: 'deactivate', style: 'warning' }
@@ -749,8 +761,15 @@ async function runConnectedKubernetesCluster ({ context, clusterId }) {
       footerHints: [['Up/Down', 'select'], ['Enter', 'open'], ['Esc', 'back']]
     })
     if (!action || action === 'back') return
+    if (action === 'tasks') {
+      try { await runKubernetesTaskMenu({ ui, clusterTasks, clusterId }) } catch (error) { ui.error(redactDiagnosticText(error.message)); await ui.pause() }
+      continue
+    }
     if (action === 'remote-recovery') {
-      ui.warn(stage2.remoteRecoveryCapabilities().reason)
+      const recovery = stage2.remoteRecoveryCapabilities(status.recoveryHealth, await clusterTasks.persistentAvailable(clusterId))
+      if (recovery.available) {
+        try { await runKubernetesTaskMenu({ ui, clusterTasks, clusterId, remote: true }) } catch (error) { ui.error(redactDiagnosticText(error.message)) }
+      } else ui.warn(recovery.reason)
       await ui.pause()
       continue
     }
@@ -763,7 +782,9 @@ async function runConnectedKubernetesCluster ({ context, clusterId }) {
       const confirmed = await ui.confirm('Deploy or update the Stage 2 gateway directly through the Kubernetes API?', false)
       if (!confirmed) continue
       try {
-        await stage2.activate({ actionKey: cluster.actionKey })
+        let recoveryStorageClass
+        if (!status.recoveryHealth?.recoveryConfigured && await ui.confirm('Enable persistent signed recovery storage? This preserves a dedicated PVC across gateway deactivation.', false)) recoveryStorageClass = await ui.ask('Existing StorageClass name', { defaultValue: 'standard' })
+        await stage2.activate({ actionKey: cluster.actionKey, recoveryStorageClass })
         await settingsStore.setKubernetesStage2State({ settings, clusterId, desired: 'active' })
         status = await readKubernetesStatus({ kubernetes, cluster })
         ui.success('Kubernetes Stage 2 gateway is active.')
@@ -813,7 +834,51 @@ async function readKubernetesStatus ({ kubernetes, cluster }) {
     version: version.gitVersion ?? 'available',
     nodes: String(nodes.items?.length ?? 0),
     stage2: health?.platform === 'kubernetes' ? 'active' : 'inactive',
-    plugin: health?.version ? `v${health.version}` : 'not installed'
+    plugin: health?.version ? `v${health.version}` : 'not installed',
+    recoveryHealth: health
+  }
+}
+
+async function runKubernetesTaskMenu ({ ui, clusterTasks, clusterId, remote = false }) {
+  for (;;) {
+    if (remote) {
+      const listing = await clusterTasks.remoteHistory(clusterId)
+      const executionId = await ui.searchChoose('Remote signed common-task records (summaries require verification)', [...listing.executions.map(entry => ({ label: `${entry.executionId} · ${entry.sequence} records`, value: entry.executionId })), { label: 'Back', value: null }])
+      if (!executionId) return
+      const view = await clusterTasks.prepareRecovery(clusterId, executionId)
+      if (view.alreadyAbsent) { ui.info(view.message); await ui.pause(); return }
+      await reviewKubernetesTask({ ui, clusterTasks, clusterId, taskId: view.taskId })
+      return
+    }
+    const history = await clusterTasks.history(clusterId)
+    const action = await ui.searchChoose('Kubernetes task workspace', [{ label: 'Prepare a verified common-task plan (no execution)', value: 'prepare' }, { label: 'Discover signed remote recovery records', value: 'remote' }, ...history.map(task => ({ label: `#${task.id} ${task.request} [${task.status}]`, value: task.id })), { label: 'Back', value: null }])
+    if (!action) return
+    if (action === 'remote') { await runKubernetesTaskMenu({ ui, clusterTasks, clusterId, remote: true }); continue }
+    let taskId = action
+    if (action === 'prepare') {
+      const catalogId = await ui.searchChoose('Select a supported Kubernetes application', [...clusterTasks.catalog().map(task => ({ label: task.label, value: task.id })), { label: 'Back', value: null }])
+      if (!catalogId) continue
+      taskId = (await clusterTasks.prepare(clusterId, catalogId)).taskId
+    }
+    await reviewKubernetesTask({ ui, clusterTasks, clusterId, taskId })
+  }
+}
+
+async function reviewKubernetesTask ({ ui, clusterTasks, clusterId, taskId }) {
+  for (;;) {
+    const view = await clusterTasks.inspect(clusterId, taskId)
+    ui.heading(`Kubernetes ${clusterId} / task #${taskId}: ${view.status}`)
+    ui.output.write(view.summary + '\n')
+    for (const command of view.commands) ui.output.write(`[${command.risk}] ${command.id}: ${command.method} ${command.path}\n  ${command.purpose}\n`)
+    for (const warning of view.warnings ?? []) ui.warn(warning)
+    const action = await ui.choose('Reviewed cluster controls', [{ label: view.recovery ? 'Review and execute recovery' : 'Review and continue remaining commands', value: 'execute' }, { label: 'Pause before the next command', value: 'pause' }, { label: 'Abort remaining work (does not kill workloads)', value: 'abort' }, ...(!view.recovery ? [{ label: 'Prepare a separate recovery review', value: 'recover' }] : []), { label: 'Back', value: null }])
+    if (!action) return
+    if (action === 'recover') { await clusterTasks.prepareRecovery(clusterId, view.executionId); ui.info('Recovery plan saved separately. Open it from task history.'); return }
+    if (action === 'execute') {
+      if (!await ui.confirm('Approve exactly this saved plan for this cluster? Destructive recovery removes task-created application data.', false)) continue
+      const takeoverApproved = view.takeoverRequired === true && await ui.confirm('A previous operation still owns this signed execution. Approve the displayed ownership takeover only after inspecting its workload state?', false)
+      await clusterTasks.execute(clusterId, taskId, { approved: true, expectedVersion: view.expectedVersion, fingerprint: view.fingerprint, takeoverApproved, takeoverFingerprint: view.takeoverFingerprint })
+    } else await clusterTasks.control(clusterId, taskId, view.expectedVersion, action)
   }
 }
 

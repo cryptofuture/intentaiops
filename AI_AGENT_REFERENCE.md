@@ -1248,21 +1248,25 @@ Ordinary Netdata monitoring, when installed, retains its normal Kubernetes topol
 Run the end-to-end Stage 2 and nginx test from the Intent AI Ops container after mounting or copying the routed kubeconfig:
 
 ```sh
-npm run test:kubernetes-stage2
+npm run test:kubernetes-stage2 -- --approve-live-tests
 ```
 
-The runner creates a lab-only per-cluster action key in the ignored mode-`0600` file `scripts/.kubernetes-stage2-action-key`, activates the gateway, deploys a custom nginx page in `webminai-tasks`, starts one unprivileged HTTP validation Job pinned to each ready node, checks every result, and reverts the nginx resources. It intentionally leaves Stage 2 active for inspection. Use `node scripts/validate-kubernetes-stage2.js deactivate` to remove both managed namespaces and the cluster-scoped node-reader RBAC. The production CLI integration must store the per-cluster key in the encrypted vault instead of this lab file.
+Set `WEBMINAI_K8S_VAULT_CLUSTER` and provide `VAULT_TEST` to reuse the CLI-saved cluster and its encrypted action key. Otherwise the runner uses a lab-only key in ignored mode-`0600` `scripts/.kubernetes-stage2-action-key`; do not mix this legacy key with a vault-managed gateway. The explicitly approved `kind-webminai-k8s` runner activates the gateway, deploys a custom nginx page in `webminai-tasks`, starts one unprivileged HTTP validation Job pinned to each ready node, checks every result, and reverts the nginx resources. It intentionally leaves Stage 2 active. Use `node scripts/validate-kubernetes-stage2.js deactivate --approve-live-tests` only to remove both managed namespaces and node-reader RBAC after inspecting existing task resources.
 
 The Kubernetes common-task catalog mirrors every reviewed ismet Compose application while adapting it to namespace-scoped Deployments, Services, persistent claims, and per-node validation Jobs. It does not install Docker in cluster nodes and it never grants the gateway access to Kubernetes Secrets. Application credentials are generated inside task-owned persistent state and are removed with that task. Validate and revert every catalog entry sequentially with:
 
 ```sh
-npm run test:kubernetes-common-tasks
+npm run test:kubernetes-common-tasks -- --approve-live-tests
 node scripts/validate-kubernetes-common-tasks.js list
-node scripts/validate-kubernetes-common-tasks.js run wordpress-kubernetes
-node scripts/validate-kubernetes-common-tasks.js revert wordpress-kubernetes
+node scripts/validate-kubernetes-common-tasks.js run wordpress-kubernetes --approve-live-tests
+node scripts/validate-kubernetes-common-tasks.js revert wordpress-kubernetes --approve-live-tests
 ```
 
-The `all` runner reverts each application before moving to the next one. Each successful application is reached through its ClusterIP Service by an unprivileged Job pinned to every ready node. This is an integration test against the configured cluster, not part of the offline unit suite.
+The disposable `kind-webminai-k8s` runner requires explicit live approval and an empty task namespace. It saves cluster-bound checkpoints and creation UIDs, verifies ownership before rollback, and stops for inspection instead of automatically cleaning up failed or uncertain work. `all` skips recorded successful cycles only after confirming the namespace is empty. Each successful application is reached through its ClusterIP Service by an unprivileged Job pinned to every ready node. This is integration validation, not the shared task-history/controller workflow. Set `WEBMINAI_K8S_VAULT_CLUSTER` and provide `VAULT_TEST` to reuse a CLI-saved encrypted cluster instead of the legacy lab action-key file. Progress is saved in `docs/kubernetes-lab-validation-status.md` and private receipts in ignored `artifacts/kubernetes-common/`.
+
+For opt-in, read-only signed gateway and SQLite journal checks, set `INTENT_KUBERNETES_LIVE=1`, `INTENT_WEB_DATA_ROOT`, `INTENT_WEB_CLUSTER` and `VAULT_TEST`, then run `node --test test/kubernetes-reliability.integration.test.js`. This checks authorization, approval, leases, pause, persisted history and continuation without replay. It uses the existing vault and an isolated temporary task database, and never mutates cluster resources. It does not prove production CLI/controller cluster task integration or durable remote recovery.
+
+Cluster task preparation/review/execution now uses `KubernetesTaskService` in both the CLI and browser. A dedicated explicitly enabled recovery PVC persists across gateway updates/deactivation, without extending RBAC. The signed fixed `webminai:recovery` function reuses the embedded OpenSSL storage backend; health exposes `recoveryOpenSslAvailable`, `recoveryProtocolVersion` and `recoveryConfigured`. Version2 records bind catalog command definitions to original Kubernetes resource UIDs. Fresh recovery rebuilds local catalog definitions and reviews new UID-preconditioned deletions, never remote command text. Unknown creations, changed resources/catalogs/node identities and stale record heads fail closed. Arbitrary AI cluster replanning is not implemented. `browser-checks/kubernetes-tasks.spec.js` is an explicitly enabled disposable kind test (`INTENT_KUBERNETES_TASK_LIVE=1`) of actual CLI/browser review, reload, gateway restart and fresh-profile reviewed recovery. Failed test resources/profiles are preserved for inspection, never automatically replayed or cleaned up.
 
 The lab demonstrates that node-control boundary with a fixed, harmless write/read/remove probe on every kind node:
 

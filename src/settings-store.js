@@ -237,10 +237,11 @@ export class SettingsStore {
     }
   }
 
-  async addKubernetesCluster ({ settings, passphrase, clusterId, kubeconfig, apiServer, contextName }) {
+  async addKubernetesCluster ({ settings, passphrase, clusterId, kubeconfig, apiServer, contextName, actionKey }) {
     validateServerId(clusterId)
     validateKubeconfig(kubeconfig)
     validateKubernetesEndpoint(apiServer)
+    if (actionKey !== undefined && (typeof actionKey !== 'string' || !/^[a-f0-9]{64}$/u.test(actionKey))) throw new TypeError('Invalid existing Kubernetes action key')
     if (typeof contextName !== 'string' || contextName.length === 0 || contextName.length > 512 || /[\0\r\n]/u.test(contextName)) {
       throw new TypeError('Kubernetes context name is invalid')
     }
@@ -256,7 +257,7 @@ export class SettingsStore {
           kubeconfig,
           apiServer,
           contextName,
-          actionKey: randomBytes(32).toString('hex')
+          actionKey: actionKey ?? randomBytes(32).toString('hex')
         })
       }
     } finally {

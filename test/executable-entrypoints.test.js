@@ -38,7 +38,7 @@ for (const [entrypoint, expected] of [
   ['scripts/validate-multi-host-nginx.js', /WEBMINAI_TEST_HOSTS/u],
   ['scripts/validate-remote-tasks.js', /--task=ID/u],
   ['scripts/validate-kubernetes-stage2.js', /activate\|test\|revert\|deactivate\|all/u],
-  ['scripts/validate-kubernetes-common-tasks.js', /list\|all\|run <catalog-id>\|revert <catalog-id>/u],
+  ['scripts/validate-kubernetes-common-tasks.js', /list\|all\|run <catalog-id>\|resume <catalog-id>\|revert <catalog-id>/u],
   ['scripts/validate-package-install-remote.js', /--host=SERVER_ID/u],
   ['scripts/validate-intent-ai-ops-common-task.js', /--host=macos-15\|windows-11/u]
 ]) {

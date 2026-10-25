@@ -5,6 +5,7 @@ import { KubernetesApiError } from './kubernetes-client.js'
 import { KubernetesNetdataClient } from './kubernetes-netdata-client.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
 import { diagnosticSummary } from './execution-diagnostics.js'
+import { withHostMutation } from './host-mutation-ownership.js'
 
 const SYSTEM_NAMESPACE = 'webminai-system'
 const TASK_NAMESPACE = 'webminai-tasks'
@@ -12,6 +13,7 @@ const SERVICE_ACCOUNT = 'webminai-stage2'
 const SERVICE_NAME = 'webminai-stage2'
 // Stable Kubernetes object name; keep it separate from the secret value.
 const ACTION_KEY_SECRET = ['webminai', 'stage2', 'action', 'key'].join('-')
+const RECOVERY_CLAIM = 'webminai-recovery'
 const PLUGIN_CHUNK_BYTES = 700 * 1024
 const MANAGED_LABELS = {
   'app.kubernetes.io/name': 'webminai-stage2',
@@ -19,8 +21,9 @@ const MANAGED_LABELS = {
 }
 
 export class KubernetesStage2Service {
-  remoteRecoveryCapabilities () {
-    return { version: 1, available: false, reason: 'The current gateway has ephemeral writable storage and no persistent recovery signing backend. Remote recovery requires an explicitly configured persistent volume, a verified cluster identity, and a gateway-native signer. No RBAC changes or pod-exec fallback are performed.' }
+  remoteRecoveryCapabilities (health, persistentVerified = false) {
+    const available = persistentVerified === true && health?.recoveryProtocolVersion === 1 && health?.recoveryConfigured === true && health?.recoveryOpenSslAvailable === true
+    return { version: 1, available, reason: available ? 'Persistent signed resource-bound recovery is available through the authenticated gateway. Recovery always requires a new catalog reconstruction, current-state inspection and explicit approval.' : 'Remote recovery requires an explicitly configured persistent volume, a verified cluster identity and a gateway-native signer with OpenSSL. No RBAC changes or pod-exec fallback are performed.' }
   }
 
   constructor ({
@@ -31,7 +34,8 @@ export class KubernetesStage2Service {
     assemblerImage = 'busybox:1.37.0',
     systemNamespace = SYSTEM_NAMESPACE,
     taskNamespace = TASK_NAMESPACE,
-    readinessAttempts = 120,
+    dataRoot = null,
+    readinessAttempts = 600,
     readinessIntervalMs = 1000,
     onProgress = (_event) => {}
   }) {
@@ -42,12 +46,25 @@ export class KubernetesStage2Service {
     this.assemblerImage = assemblerImage
     this.systemNamespace = systemNamespace
     this.taskNamespace = taskNamespace
+    this.dataRoot = dataRoot
     this.readinessAttempts = readinessAttempts
     this.readinessIntervalMs = readinessIntervalMs
     this.onProgress = onProgress
   }
 
-  async activate ({ actionKey }) {
+  async activate ({ actionKey, recoveryStorageClass }) {
+    return this.withMutation(() => this.activateGateway({ actionKey, recoveryStorageClass }))
+  }
+
+  async withMutation (operation) {
+    if (!this.dataRoot) return operation()
+    const cluster = await this.kubernetes.request('/api/v1/namespaces/kube-system')
+    const uid = cluster.metadata?.uid
+    if (typeof uid !== 'string' || !uid || uid.length > 128) throw new Error('Cluster identity unavailable; gateway mutation blocked')
+    return withHostMutation({ dataRoot: this.dataRoot, identity: `kubernetes:${uid}` }, operation)
+  }
+
+  async activateGateway ({ actionKey, recoveryStorageClass }) {
     validateActionKey(actionKey)
     const binary = await readFile(this.pluginPath)
     const digest = createHash('sha256').update(binary).digest('hex')
@@ -60,6 +77,7 @@ export class KubernetesStage2Service {
     this.progress('credentials', `Connected to ${version.gitVersion}; ${nodes.items.length} nodes discovered`)
 
     await this.ensureNamespaces()
+    const recovery = await this.ensureRecoveryStorage(recoveryStorageClass)
     await this.ensureRbac()
     await this.ensureConfig()
     await this.ensureActionKey(actionKey)
@@ -84,7 +102,8 @@ export class KubernetesStage2Service {
     await this.ensureDeployment({
       chunkNames,
       digest,
-      actionKeyDigest: createHash('sha256').update(actionKey).digest('hex')
+      actionKeyDigest: createHash('sha256').update(actionKey).digest('hex'),
+      recovery
     })
     this.progress('rollout', 'Waiting for the gateway Netdata pod')
     await this.waitForDeployment()
@@ -113,11 +132,62 @@ export class KubernetesStage2Service {
   }
 
   async deactivate () {
+    return this.withMutation(() => this.deactivateGateway())
+  }
+
+  async deactivateGateway () {
+    const recovery = await this.readRecoveryClaim()
     await this.deleteIfPresent('/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/webminai-stage2-node-reader')
     await this.deleteIfPresent('/apis/rbac.authorization.k8s.io/v1/clusterroles/webminai-stage2-node-reader')
     await this.deleteIfPresent(`/api/v1/namespaces/${this.taskNamespace}`)
-    await this.deleteIfPresent(`/api/v1/namespaces/${this.systemNamespace}`)
-    return { status: 'inactive' }
+    if (recovery) {
+      await this.deleteIfPresent(`/apis/apps/v1/namespaces/${this.systemNamespace}/deployments/${SERVICE_NAME}`)
+      await this.deleteIfPresent(`/api/v1/namespaces/${this.systemNamespace}/services/${SERVICE_NAME}`)
+      this.progress('storage', 'Persistent recovery storage and its namespace were preserved; removal requires a separate explicit administrative action')
+    } else await this.deleteIfPresent(`/api/v1/namespaces/${this.systemNamespace}`)
+    return { status: 'inactive', recoveryStoragePreserved: Boolean(recovery) }
+  }
+
+  async readRecoveryClaim () {
+    let claim
+    try { claim = await this.kubernetes.request(`/api/v1/namespaces/${this.systemNamespace}/persistentvolumeclaims/${RECOVERY_CLAIM}`) } catch (error) { if (error.statusCode === 404) return null; throw error }
+    if (claim.metadata?.labels?.['app.kubernetes.io/managed-by'] !== 'webminai' || claim.metadata?.deletionTimestamp) throw new Error('Recovery storage is unowned or deleting; gateway update blocked')
+    return claim
+  }
+
+  async existingActionKey () {
+    let secret
+    try { secret = await this.kubernetes.request(`/api/v1/namespaces/${this.systemNamespace}/secrets/${ACTION_KEY_SECRET}`) } catch (error) { if (error.statusCode === 404) return null; throw error }
+    if (secret.metadata?.labels?.['app.kubernetes.io/managed-by'] !== 'webminai' || typeof secret.data?.['action.key'] !== 'string' || secret.data['action.key'].length > 128) throw new Error('Existing gateway credentials are not managed or valid; no credentials were adopted')
+    const key = Buffer.from(secret.data['action.key'], 'base64').toString('utf8').trim()
+    validateActionKey(key)
+    return key
+  }
+
+  async ensureRecoveryStorage (storageClass) {
+    if (storageClass !== undefined && (typeof storageClass !== 'string' || !/^[a-z0-9][a-z0-9.-]{0,252}$/u.test(storageClass))) throw new Error('Invalid recovery storage class')
+    let claim = await this.readRecoveryClaim()
+    if (!claim && storageClass === undefined) return null
+    const cluster = await this.kubernetes.request('/api/v1/namespaces/kube-system')
+    const uid = cluster.metadata?.uid
+    if (typeof uid !== 'string' || !/^[a-zA-Z0-9-]{1,128}$/u.test(uid)) throw new Error('Verified cluster identity is required for persistent recovery')
+    const target = 'SHA256:' + createHash('sha256').update(uid).digest('hex')
+    if (claim) {
+      if (claim.metadata.annotations?.['webminai.io/recovery-target'] !== target || (storageClass !== undefined && claim.spec.storageClassName !== storageClass)) throw new Error('Recovery storage identity or class mismatch; existing data preserved')
+    } else {
+      await this.kubernetes.request(`/apis/storage.k8s.io/v1/storageclasses/${storageClass}`)
+      claim = await this.kubernetes.request(`/api/v1/namespaces/${this.systemNamespace}/persistentvolumeclaims`, {
+        method: 'POST',
+        body: {
+          apiVersion: 'v1',
+          kind: 'PersistentVolumeClaim',
+          metadata: { name: RECOVERY_CLAIM, namespace: this.systemNamespace, labels: MANAGED_LABELS, annotations: { 'webminai.io/recovery-target': target } },
+          spec: { storageClassName: storageClass, accessModes: ['ReadWriteOnce'], resources: { requests: { storage: '1Gi' } } }
+        }
+      })
+      this.progress('storage', 'Created dedicated persistent recovery claim; signing material is not stored in ConfigMaps or returned to clients')
+    }
+    return { claimName: RECOVERY_CLAIM, target }
   }
 
   async ensureNamespaces () {
@@ -215,7 +285,7 @@ export class KubernetesStage2Service {
     })
   }
 
-  async ensureDeployment ({ chunkNames, digest, actionKeyDigest }) {
+  async ensureDeployment ({ chunkNames, digest, actionKeyDigest, recovery }) {
     const chunkMounts = chunkNames.map((name, index) => ({
       name: `chunk-${index}`,
       mountPath: `/chunks/${String(index).padStart(3, '0')}`,
@@ -258,11 +328,21 @@ export class KubernetesStage2Service {
               command: ['/bin/sh', '-ceu'],
               args: [`cat ${inputs} > /assembled/webminai.plugin\necho '${digest}  /assembled/webminai.plugin' | sha256sum -c -\nchmod 0555 /assembled/webminai.plugin`],
               volumeMounts: [...chunkMounts, { name: 'plugin', mountPath: '/assembled' }]
-            }],
+            }, ...(recovery
+              ? [{
+                  name: 'initialize-recovery-storage',
+                  image: this.assemblerImage,
+                  securityContext: { runAsUser: 0, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } },
+                  command: ['/bin/sh', '-ceu'],
+                  args: ['test ! -L /recovery; test "$(stat -c %u /recovery)" = 0; if test "$(stat -c %a /recovery)" != 700; then test -z "$(find /recovery -mindepth 1 -maxdepth 1 -print -quit)"; chmod 0700 /recovery; fi'],
+                  volumeMounts: [{ name: 'recovery', mountPath: '/recovery' }]
+                }]
+              : [])],
             containers: [{
               name: 'netdata',
               image: this.netdataImage,
               imagePullPolicy: 'IfNotPresent',
+              ...(recovery ? { env: [{ name: 'WEBMINAI_RECOVERY_TARGET', value: recovery.target }] } : {}),
               securityContext: {
                 runAsUser: 0,
                 runAsNonRoot: false,
@@ -286,7 +366,8 @@ export class KubernetesStage2Service {
                 { name: 'action-key', mountPath: '/var/run/secrets/webminai', readOnly: true },
                 { name: 'netdata-config', mountPath: '/etc/netdata/netdata.conf', subPath: 'netdata.conf', readOnly: true },
                 { name: 'netdata-lib', mountPath: '/var/lib/netdata' },
-                { name: 'netdata-cache', mountPath: '/var/cache/netdata' }
+                { name: 'netdata-cache', mountPath: '/var/cache/netdata' },
+                ...(recovery ? [{ name: 'recovery', mountPath: '/var/lib/intentaiops' }] : [])
               ]
             }],
             volumes: [
@@ -295,7 +376,8 @@ export class KubernetesStage2Service {
               { name: 'action-key', secret: { secretName: ACTION_KEY_SECRET, defaultMode: 256 } },
               { name: 'netdata-config', configMap: { name: 'webminai-stage2-netdata', defaultMode: 292 } },
               { name: 'netdata-lib', emptyDir: {} },
-              { name: 'netdata-cache', emptyDir: {} }
+              { name: 'netdata-cache', emptyDir: {} },
+              ...(recovery ? [{ name: 'recovery', persistentVolumeClaim: { claimName: recovery.claimName } }] : [])
             ]
           }
         }
@@ -305,14 +387,34 @@ export class KubernetesStage2Service {
   }
 
   async waitForDeployment () {
+    let readiness = 'Pod evidence unavailable'
     for (let attempt = 1; attempt <= this.readinessAttempts; attempt++) {
       const deployment = await this.kubernetes.request(`/apis/apps/v1/namespaces/${this.systemNamespace}/deployments/${SERVICE_NAME}`)
       const desired = deployment.spec?.replicas ?? 1
       if (deployment.status?.observedGeneration >= deployment.metadata.generation &&
           deployment.status?.availableReplicas === desired) return deployment
+      if (attempt === 1 || attempt % 30 === 0 || attempt === this.readinessAttempts) {
+        readiness = await this.gatewayReadiness()
+        this.progress('rollout', `Waiting for gateway (${attempt}/${this.readinessAttempts}): ${readiness}`)
+      }
       if (attempt < this.readinessAttempts) await delay(this.readinessIntervalMs)
     }
-    throw new Error('Kubernetes Stage 2 gateway deployment did not become ready')
+    throw new Error(`Kubernetes Stage 2 gateway deployment did not become ready: ${readiness}. Resources remain in place; inspect the existing rollout before another approved update.`)
+  }
+
+  async gatewayReadiness () {
+    try {
+      const pods = await this.kubernetes.request(`/api/v1/namespaces/${this.systemNamespace}/pods?labelSelector=app.kubernetes.io%2Fname%3Dwebminai-stage2`)
+      const allowed = new Set(['PodInitializing', 'ContainerCreating', 'ErrImagePull', 'ImagePullBackOff', 'InvalidImageName', 'CrashLoopBackOff', 'CreateContainerConfigError', 'CreateContainerError', 'RunContainerError'])
+      const states = (pods.items ?? []).slice(0, 8).flatMap(pod => [...(pod.status?.initContainerStatuses ?? []), ...(pod.status?.containerStatuses ?? [])].slice(0, 16).map(container => {
+        const reason = container.state?.waiting?.reason
+        if (allowed.has(reason)) return reason
+        if (container.state?.terminated) return container.state.terminated.exitCode === 0 ? 'Init/process completed' : 'Process terminated'
+        if (container.state?.running) return container.ready ? 'Ready' : 'Running, not ready'
+        return 'State unavailable'
+      }))
+      return [...new Set(states)].join(', ') || 'No container status available'
+    } catch { return 'Pod evidence unavailable' }
   }
 
   async waitForPlugin (netdata) {

@@ -1,4 +1,4 @@
-import { createKubernetesApiCommand, createSignedCommand } from './netdata-client.js'
+import { createKubernetesApiCommand, parseKubernetesApiCommand, createSignedCommand } from './netdata-client.js'
 import { executionDiagnostics, observation } from './execution-diagnostics.js'
 import { kubernetesApiDiagnostics, kubernetesWorkloadDiagnostics } from './workload-execution-evidence.js'
 
@@ -24,6 +24,32 @@ export class KubernetesNetdataClient {
 
   async health () {
     return this.request('/api/v3/function?function=webminai%3Ahealth&timeout=10')
+  }
+
+  async runCommand (command, { timeoutSeconds = 30 } = {}) {
+    const request = parseKubernetesApiCommand(command)
+    let result
+    try { result = await this.runApiRequest({ ...request, timeoutSeconds }) } catch (cause) {
+      const error = new Error('Kubernetes API observation failed; inspect structured diagnostics before continuation.')
+      if (['ECONNRESET', 'EPIPE', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'].includes(cause.code)) error.code = cause.code
+      if (Number.isInteger(cause.statusCode) && cause.statusCode >= 400 && cause.statusCode <= 599) error.kubernetesHttpStatus = cause.statusCode
+      error.recoveryRequired = request.method !== 'GET'
+      throw error
+    }
+    let object
+    try { object = JSON.parse(result.stdout) } catch {}
+    const summary = publicResult(object)
+    let stdout = JSON.stringify(summary)
+    const truncated = Buffer.byteLength(stdout) > 32768
+    if (truncated) stdout = JSON.stringify({ contentPolicy: summary.contentPolicy, kind: summary.kind, metadata: summary.metadata, truncated: true })
+    return { ...result, stdout, stdoutTruncated: result.stdoutTruncated || truncated, stderr: result.stderr ? 'Kubernetes request did not complete normally; inspect structured diagnostics.' : '' }
+  }
+
+  async runRecoveryRequest (command, { timeoutSeconds = 30 } = {}) {
+    if (typeof command !== 'string' || Buffer.byteLength(command) > 16384 || !/^v=1\noperation=(?:key|initialize|verification-key|rotate-key|list|read|ownership|release|claim|takeover|append)\nargs=[A-Za-z0-9_+/=,:-]*$/u.test(command)) throw new Error('Invalid fixed recovery request')
+    const result = await this.request(`/api/v3/function?function=webminai%3Arecovery&timeout=${Math.min(60, timeoutSeconds)}`, { method: 'POST', body: createSignedCommand(command, this.actionKey), timeoutMs: (Math.min(60, timeoutSeconds) + 5) * 1000 })
+    if (result?.outputEncoding !== 'base64') throw new Error('Invalid recovery gateway response')
+    return { ...result, stdout: Buffer.from(result.stdout, 'base64').toString('utf8'), stderr: result.stderr ? 'Recovery storage request failed; inspect recorded state before continuation' : '' }
   }
 
   async runApiRequest ({ method, path, body, contentType, timeoutSeconds = 30 }) {
@@ -52,7 +78,8 @@ export class KubernetesNetdataClient {
     }
     let object
     try { object = JSON.parse(result.stdout) } catch {}
-    const diagnostics = [...kubernetesApiDiagnostics(object?.kind === 'Status' ? object.code : undefined), ...executionDiagnostics({ result })]
+    if (object?.kind === 'Status' && Number.isInteger(object.code) && object.code >= 400 && object.code <= 599) result = { ...result, kubernetesHttpStatus: object.code }
+    const diagnostics = executionDiagnostics({ result })
     const reference = this.workloadReferences.get(path)
     if (method === 'GET' && reference && result.exitCode === 0) diagnostics.push(...kubernetesWorkloadDiagnostics(object, reference))
     if (result.exitCode === 0 && !result.timedOut && ['POST', 'PUT', 'PATCH'].includes(method) && ['Pod', 'Deployment', 'Job'].includes(object?.kind) && object.metadata?.namespace === this.taskNamespace && /^[a-z0-9][a-z0-9.-]{0,252}$/u.test(object.metadata?.name ?? '')) {
@@ -65,7 +92,16 @@ export class KubernetesNetdataClient {
       result = { ...result, diagnostics }
       this.reportDiagnostics(diagnostics, path)
     }
-    if (method !== 'GET' && (result.exitCode === null || result.timedOut || (object?.kind === 'Status' && [500, 502, 503, 504].includes(object.code)))) result = { ...result, recoveryRequired: true }
+    if (method !== 'GET') {
+      const rejected = object?.kind === 'Status' && Number.isInteger(object.code) && object.code >= 400 && object.code < 500 && object.code !== 408
+      const identity = typeof object?.metadata?.uid === 'string' && object.metadata.uid.length > 0 && object.metadata.uid.length <= 128
+      const listKinds = { pods: 'PodList', jobs: 'JobList', deployments: 'DeploymentList', replicasets: 'ReplicaSetList', services: 'ServiceList', configmaps: 'ConfigMapList', persistentvolumeclaims: 'PersistentVolumeClaimList' }
+      const resource = path.split('?')[0].split('/').at(-1)
+      const deletedList = Array.isArray(object?.items) && Object.hasOwn(listKinds, resource) && object.kind === listKinds[resource]
+      const deleted = method === 'DELETE' && (deletedList || (object?.kind === 'Status' && object.status === 'Success' && (object.code === undefined || (Number.isInteger(object.code) && object.code >= 200 && object.code < 300))))
+      const acknowledged = result.exitCode === 0 && !result.timedOut && typeof object?.kind === 'string' && (identity || deleted)
+      if ((!acknowledged && !rejected) || result.timedOut || result.recoveryRequired) result = { ...result, state: 'unknown', recoveryRequired: true }
+    }
     return result
   }
 
@@ -94,7 +130,7 @@ export class KubernetesNetdataClient {
       const error = new Error(`Kubernetes gateway request failed with exit code ${result.exitCode}: ${result.stderr.trim() || 'no error output'}`)
       /** @type {any} */
       const detailedError = error
-      detailedError.result = result
+      detailedError.result = result.recoveryRequired ? { exitCode: result.exitCode, state: result.state, timedOut: result.timedOut, recoveryRequired: true } : result
       detailedError.diagnostics = result.diagnostics ?? []
       detailedError.recoveryRequired = result.recoveryRequired === true
       throw detailedError
@@ -120,4 +156,22 @@ export class KubernetesNetdataClient {
       timeoutMs
     })
   }
+}
+
+function publicResult (object, depth = 0) {
+  const summary = { contentPolicy: 'metadata-status-only' }
+  if (!object || typeof object !== 'object') return summary
+  for (const key of ['kind', 'status', 'reason']) if (typeof object[key] === 'string' && /^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(object[key])) summary[key] = object[key]
+  if (Number.isInteger(object.code) && object.code >= 100 && object.code <= 599) summary.code = object.code
+  const metadata = {}
+  for (const key of ['name', 'namespace', 'uid', 'resourceVersion']) if (typeof object.metadata?.[key] === 'string' && /^[A-Za-z0-9_.:-]{1,253}$/u.test(object.metadata[key])) metadata[key] = object.metadata[key]
+  if (Number.isSafeInteger(object.metadata?.generation)) metadata.generation = object.metadata.generation
+  if (Object.keys(metadata).length) summary.metadata = metadata
+  const status = {}
+  for (const key of ['succeeded', 'failed', 'readyReplicas', 'availableReplicas']) if (Number.isSafeInteger(object.status?.[key]) && object.status[key] >= 0) status[key] = object.status[key]
+  if (['Pending', 'Running', 'Succeeded', 'Failed', 'Unknown'].includes(object.status?.phase)) status.phase = object.status.phase
+  if (Array.isArray(object.status?.conditions)) status.conditions = object.status.conditions.slice(0, 16).map(condition => Object.fromEntries(['type', 'status', 'reason'].filter(key => typeof condition?.[key] === 'string' && /^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(condition[key])).map(key => [key, condition[key]])))
+  if (Object.keys(status).length) summary.workloadStatus = status
+  if (depth === 0 && Array.isArray(object.items)) summary.items = object.items.slice(0, 128).map(item => publicResult(item, depth + 1))
+  return summary
 }

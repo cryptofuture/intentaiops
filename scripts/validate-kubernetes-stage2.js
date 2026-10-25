@@ -6,14 +6,17 @@ import { KubernetesClient } from '../src/kubernetes-client.js'
 import { KubernetesNetdataClient } from '../src/kubernetes-netdata-client.js'
 import { validateNginxFromAllNodes, revertNginxValidation } from '../src/kubernetes-nginx-validation.js'
 import { KubernetesStage2Service } from '../src/kubernetes-stage2-service.js'
+import { resolveDefaultDataRoot } from '../src/cli.js'
+import os from 'node:os'
+import { SettingsStore } from '../src/settings-store.js'
 
 const directory = fileURLToPath(new URL('.', import.meta.url))
 const kubeconfigPath = process.env.WEBMINAI_KUBECONFIG || `${directory}kubeconfig.container`
 const keyPath = process.env.WEBMINAI_K8S_ACTION_KEY_FILE || `${directory}.kubernetes-stage2-action-key`
-const action = process.argv[2] || 'all'
+const action = process.argv.slice(2).find(argument => argument !== '--approve-live-tests') || 'all'
 
 if (['--help', '-h'].includes(action)) {
-  console.log('Usage: validate-kubernetes-stage2.js [activate|test|revert|deactivate|all]')
+  console.log('Usage: validate-kubernetes-stage2.js [activate|test|revert|deactivate|all] --approve-live-tests')
 } else if (!['activate', 'test', 'revert', 'deactivate', 'all'].includes(action)) {
   console.error('Usage: validate-kubernetes-stage2.js [activate|test|revert|deactivate|all]')
   process.exitCode = 2
@@ -22,10 +25,23 @@ if (['--help', '-h'].includes(action)) {
 }
 
 async function main () {
-  const kubernetes = await KubernetesClient.fromKubeconfig(kubeconfigPath)
-  const actionKey = action === 'deactivate' ? null : await loadOrCreateActionKey()
+  if (!process.argv.includes('--approve-live-tests')) throw new Error('Disposable live mutations require --approve-live-tests')
+  const dataRoot = process.env.WEBMINAI_DATA_ROOT ?? await resolveDefaultDataRoot(os.homedir())
+  let kubernetes, actionKey
+  if (process.env.WEBMINAI_K8S_VAULT_CLUSTER) {
+    if (!process.env.VAULT_TEST) throw new Error('Vault lab validation requires VAULT_TEST')
+    const store = new SettingsStore(dataRoot)
+    const settings = await store.load()
+    const cluster = await store.decryptKubernetesCluster({ settings, passphrase: process.env.VAULT_TEST, clusterId: process.env.WEBMINAI_K8S_VAULT_CLUSTER })
+    kubernetes = KubernetesClient.fromKubeconfigSource(cluster.kubeconfig)
+    actionKey = cluster.actionKey
+  } else {
+    kubernetes = await KubernetesClient.fromKubeconfig(kubeconfigPath)
+    actionKey = action === 'deactivate' ? null : await loadOrCreateActionKey()
+  }
+  if (kubernetes.contextName !== 'kind-webminai-k8s') throw new Error('Stage 2 lab validation requires kind-webminai-k8s')
   const progress = ({ phase, message }) => console.log(`[${phase}] ${message}`)
-  const stage2 = new KubernetesStage2Service({ kubernetes, onProgress: progress })
+  const stage2 = new KubernetesStage2Service({ kubernetes, dataRoot, onProgress: progress })
 
   if (action === 'deactivate') {
     await stage2.deactivate()

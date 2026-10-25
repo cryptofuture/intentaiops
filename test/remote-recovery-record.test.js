@@ -17,6 +17,16 @@ const manifest = {
   revision: 'b'.repeat(64)
 }
 
+test('Kubernetes signed resource bindings require an observed result, not a dispatch intention', () => {
+  const source = { ...manifest, platform: 'kubernetes', identityMethod: 'kubernetes-cluster-uid-v1' }
+  const resource = { path: '/apis/apps/v1/namespaces/webminai-tasks/deployments/app', uid: 'observed-resource', definitionDigest: 'd'.repeat(64) }
+  const event = { type: 'command_acknowledged', commandId: 'create', commandDigest: 'e'.repeat(64) }
+  assert.equal(recoveryRecord(source, event, { sequence: 1, resource }).version, 2)
+  assert.throws(() => recoveryRecord(source, { ...event, type: 'command_dispatched' }, { sequence: 1, resource }), /observed/u)
+  assert.throws(() => recoveryRecord(source, event, { sequence: 1, resource: { ...resource, uid: 42 } }), /binding/u)
+  assert.throws(() => recoveryRecord(source, event, { sequence: 1, resource: { ...resource, path: '/api/v1/namespaces/kube-system/secrets/key' } }), /binding/u)
+})
+
 for (const platform of ['linux', 'freebsd', 'macos', 'windows', 'kubernetes']) {
   test(`signed ${platform} recovery metadata verifies without retaining secrets`, () => {
     const { privateKey, publicKey } = generateKeyPairSync('ed25519')

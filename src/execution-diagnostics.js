@@ -8,6 +8,7 @@ export function observation (code, confidence, scope, source, explanation, evide
 
 export function executionDiagnostics ({ item = { id: 'execution' }, result = {}, error, before, after }) {
   const observations = []
+  observations.push(...kubernetesApiDiagnostics(result.kubernetesHttpStatus ?? error?.kubernetesHttpStatus))
   observations.push(...(after?.workloadDiagnostics ?? []))
   const add = (code, confidence, scope, explanation, evidence = {}, source = 'execution-result') => observations.push(observation(code, confidence, scope, source, explanation, evidence))
   const errorFields = []
@@ -82,4 +83,10 @@ export function executionDiagnostics ({ item = { id: 'execution' }, result = {},
 
 export function diagnosticSummary (diagnostics = []) {
   return diagnostics.map(value => `${value.code} (${value.confidence}): ${value.explanation} ${value.nextAction}`).join('\n')
+}
+
+export function kubernetesApiDiagnostics (statusCode) {
+  if (!Number.isInteger(statusCode)) return []
+  const codes = { 401: 'API_AUTHENTICATION', 403: 'API_AUTHORIZATION', 404: 'RESOURCE_NOT_FOUND', 409: 'RESOURCE_CONFLICT', 429: 'API_THROTTLED', 500: 'API_UNAVAILABLE', 502: 'GATEWAY_UNAVAILABLE', 503: 'API_UNAVAILABLE', 504: 'GATEWAY_TIMEOUT' }
+  return codes[statusCode] ? [observation(codes[statusCode], 'confirmed', 'transport', 'kubernetes-api', `The API request returned HTTP ${statusCode}. Resource state and mutation outcome require separate inspection.`, { statusCode })] : []
 }

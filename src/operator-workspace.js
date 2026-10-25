@@ -11,6 +11,7 @@ import { KubernetesNetdataClient } from './kubernetes-netdata-client.js'
 import { OperatorShells } from './operator-shells.js'
 
 const actions = new Set(['prepare', 'execute', 'host-connect', 'host-disconnect', 'host-add', 'host-edit', 'host-remove', 'stage2-activate', 'stage2-update', 'stage2-deactivate', 'propose', 'refresh-catalog', 'approve', 'resume', 'rollback', 'reconcile', 'resolve', 'analyze', 'pause', 'abort', 'prepare-remote-recovery', 'execute-remote-recovery', 'run-resume', 'run-pause'])
+for (const action of ['cluster-prepare', 'cluster-execute', 'cluster-pause', 'cluster-abort', 'cluster-prepare-recovery']) actions.add(action)
 export class OperatorWorkspace {
   constructor ({ controller, hosts, metrics }) {
     this.controller = controller; this.hosts = hosts; this.metrics = metrics; this.pending = new Map(); this.stopping = false
@@ -40,8 +41,11 @@ export class OperatorWorkspace {
     if (this.stopping) throw new Error('Workspace is shutting down')
     if (!body || typeof body !== 'object' || Array.isArray(body) || !actions.has(body.action) || typeof body.requestKey !== 'string' || !/^[a-zA-Z0-9-]{16,80}$/u.test(body.requestKey)) throw new Error('Invalid workspace operation')
     const allowed = ['action', 'requestKey', 'hostId', 'hostVersion', 'taskId', 'expectedVersion', 'fingerprint', 'approved', 'commandIds', 'commandId', 'status', 'evidence', 'rollbackRevision', 'serverIds', 'request', 'catalogId', 'consultation', 'retryOfTaskId', 'retryOfRunId', 'retryInstructions', 'instructions', 'revisionId', 'rollback', 'question', 'executionId', 'takeoverApproved', 'takeoverFingerprint', 'runId', 'decisions', 'concurrency', 'rollout', 'connection', 'temporary', 'authentication']
+    allowed.push('clusterId')
     if (Object.keys(body).some(key => !allowed.includes(key)) || Buffer.byteLength(JSON.stringify(body)) > 32768) throw new Error('Unsupported operation fields')
     for (const field of ['approved', 'consultation', 'rollback', 'takeoverApproved', 'temporary']) if (body[field] !== undefined && typeof body[field] !== 'boolean') throw new Error(`Invalid ${field}`)
+    if (body.action.startsWith('cluster-') && (typeof body.clusterId !== 'string' || !Object.hasOwn(this.controller.settings.clusters ?? {}, body.clusterId))) throw new Error('Select a configured cluster')
+    if (body.action === 'cluster-execute' && body.approved !== true) throw new Error('Explicit cluster approval required')
     for (const field of ['request', 'instructions', 'question', 'retryInstructions', 'evidence']) if (body[field] !== undefined && body[field] !== null && (typeof body[field] !== 'string' || body[field].length > (field === 'evidence' ? 4096 : 8192))) throw new Error(`Invalid ${field}`)
     if (body.action === 'prepare' && (typeof body.request !== 'string' || !body.request.trim() || (!body.hostId && !body.serverIds))) throw new Error('Select hosts and provide a request')
     for (const field of ['fingerprint', 'hostVersion', 'takeoverFingerprint']) if (body[field] !== undefined && (typeof body[field] !== 'string' || !/^[a-f0-9]{64}$/u.test(body[field]))) throw new Error(`Invalid ${field}`)
@@ -109,6 +113,10 @@ export class OperatorWorkspace {
 
   async perform (b) {
     const c = this.controller
+    if (b.action === 'cluster-prepare') return c.kubernetesTasks.prepare(b.clusterId, b.catalogId)
+    if (b.action === 'cluster-execute') return c.kubernetesTasks.execute(b.clusterId, b.taskId, b)
+    if (b.action === 'cluster-pause' || b.action === 'cluster-abort') return c.kubernetesTasks.control(b.clusterId, b.taskId, b.expectedVersion, b.action.slice(8))
+    if (b.action === 'cluster-prepare-recovery') return c.kubernetesTasks.prepareRecovery(b.clusterId, b.executionId)
     const args = [b.hostId, b.taskId, b.expectedVersion]
     if (b.action === 'prepare') return this.prepare(b)
     if (b.action === 'execute' || b.action === 'resume') return c.resume(...args, b.fingerprint, undefined, b.commandIds)
@@ -152,13 +160,20 @@ export class OperatorWorkspace {
     const [version, nodes] = await Promise.all([kubernetes.version(), kubernetes.nodes()])
     let health
     try { health = await new KubernetesNetdataClient({ kubernetes, actionKey: cluster.actionKey }).health() } catch {}
-    return { clusterId, observedAt: new Date().toISOString(), source: 'Kubernetes API and signed gateway transport', version: version.gitVersion, nodeCount: nodes.items?.length ?? 0, nodes: (nodes.items ?? []).slice(0, 128).map(node => ({ uid: node.metadata?.uid, name: node.metadata?.name, ready: node.status?.conditions?.find(condition => condition.type === 'Ready')?.status ?? 'Unknown' })), stage2: health?.platform === 'kubernetes' ? 'active' : 'unavailable', pluginVersion: health?.version ?? null, metrics: 'Host CPU, memory and filesystem gauges do not describe cluster workloads' }
+    if (health?.recoveryConfigured && !await this.controller.kubernetesTasks.persistentAvailable(clusterId)) health = { ...health, recoveryConfigured: false }
+    return { clusterId, observedAt: new Date().toISOString(), source: 'Kubernetes API and signed gateway transport', version: version.gitVersion, nodeCount: nodes.items?.length ?? 0, nodes: (nodes.items ?? []).slice(0, 128).map(node => ({ uid: node.metadata?.uid, name: node.metadata?.name, ready: node.status?.conditions?.find(condition => condition.type === 'Ready')?.status ?? 'Unknown' })), stage2: health?.platform === 'kubernetes' ? 'active' : 'unavailable', pluginVersion: health?.version ?? null, recoveryAvailable: health?.recoveryConfigured === true && health?.recoveryProtocolVersion === 1 && health?.recoveryOpenSslAvailable === true, tasks: await this.controller.kubernetesTasks.history(clusterId), catalog: this.controller.kubernetesTasks.catalog(), metrics: 'Host CPU, memory and filesystem gauges do not describe cluster workloads' }
   }
 
   async close () {
     this.stopping = true
     await this.shells.close()
     for (const { body } of this.pending.values()) {
+      if (body.clusterId && body.taskId) {
+        try {
+          const view = await this.controller.kubernetesTasks.inspect(body.clusterId, body.taskId)
+          await this.controller.kubernetesTasks.control(body.clusterId, body.taskId, view.expectedVersion, 'pause')
+        } catch {}
+      }
       if (body.hostId && body.taskId) {
         try { this.controller.control(body.hostId, body.taskId, 'pause', this.controller.tasks.stateVersion(body.hostId, body.taskId)) } catch {}
       }

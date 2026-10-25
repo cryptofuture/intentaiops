@@ -50,6 +50,7 @@ export class KubernetesClient {
   /** @param {string} path @param {{method?: string, body?: any, contentType?: string, timeoutMs?: number}} [options] */
   async request (path, { method = 'GET', body, contentType = 'application/json', timeoutMs = 30000 } = {}) {
     validateRequestPath(path)
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3600000) throw new TypeError('invalid Kubernetes observation timeout')
     const normalizedMethod = String(method).toUpperCase()
     if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(normalizedMethod)) {
       throw new TypeError('unsupported Kubernetes API method')
@@ -65,7 +66,12 @@ export class KubernetesClient {
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
 
-    return new Promise((resolve, reject) => {
+    return new Promise((_resolve, _reject) => {
+      let timer = null
+      let settled = false
+      const finish = (callback, value) => { if (settled) return; settled = true; clearTimeout(timer); callback(value) }
+      const resolve = value => finish(_resolve, value)
+      const reject = error => finish(_reject, error)
       const request = this.requestImpl(url, {
         method: normalizedMethod,
         ca: this.ca,
@@ -76,6 +82,8 @@ export class KubernetesClient {
       }, response => {
         const chunks = []
         let received = 0
+        response.once('aborted', () => reject(new KubernetesApiError('Kubernetes API response was interrupted', { statusCode: response.statusCode, method: normalizedMethod, path })))
+        response.once('error', cause => reject(new KubernetesApiError('Kubernetes API response could not be read', { statusCode: response.statusCode, method: normalizedMethod, path, cause })))
         response.on('data', chunk => {
           received += chunk.length
           if (received <= MAX_RESPONSE_BYTES) chunks.push(chunk)
@@ -87,7 +95,7 @@ export class KubernetesClient {
           try {
             parsed = text.length === 0 ? null : JSON.parse(text)
           } catch (error) {
-            reject(new KubernetesApiError(`Kubernetes API returned invalid JSON: ${error.message}`, {
+            reject(new KubernetesApiError('Kubernetes API returned invalid JSON', {
               statusCode: response.statusCode,
               method: normalizedMethod,
               path,
@@ -110,6 +118,12 @@ export class KubernetesClient {
       })
       request.once('timeout', () => request.destroy(new Error(`Kubernetes ${normalizedMethod} ${path} timed out`)))
       request.once('error', reject)
+      timer = setTimeout(() => {
+        const error = new KubernetesApiError('Kubernetes API observation deadline exceeded', { method: normalizedMethod, path })
+        reject(error)
+        request.destroy(error)
+      }, timeoutMs)
+      timer.unref()
       request.end(serializedBody)
     })
   }

@@ -259,3 +259,23 @@ and excluded from distribution packages. There is no HTML report to serve.
 Add `INTENT_WEB_SHELL_TEST=1` to explicitly opt into the real SSH browser test.
 It opens the saved lab host with actions enabled and runs only the read-only
 commands listed above. The live screenshot shows terminal output; unrelated task-history labels remain masked.
+
+## Kubernetes catalog workspace
+
+Select a configured cluster, then choose an application and **Prepare cluster
+plan**. Review the saved API operations, images, risks and dependencies before
+approving. Reloading the page keeps awaiting-review work in cluster history.
+The CLI's **Common tasks, persisted reviews and history** menu shares this store.
+
+Persistent recovery must be enabled during gateway activation using an existing
+StorageClass. The workspace verifies the actual bound claim and target identity;
+an environment flag alone is not durability proof. No additional RBAC is granted.
+**Discover remote records** is read-only. **Verify and prepare recovery** creates
+a new review from signed original UIDs, trusted catalog code and fresh state.
+Approving recovery can permanently delete task-created PVC data. It never runs
+remote saved command text, adopts replacements or replays uncertain mutations.
+
+Pause stops subsequent commands, not workloads. Completed approvals cannot be
+used again. Outstanding remote ownership needs explicit reviewed takeover.
+Arbitrary AI cluster replanning and multi-cluster rollout scheduling are not
+implemented. See [recovery details](remote-common-task-recovery.md#kubernetes-cluster-workspace).

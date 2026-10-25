@@ -2,11 +2,11 @@
 
 ## Current validation scope
 
-Live acceptance testing targets the existing Linux lab with native installations
-only. Docker/Podman, Kubernetes, Windows, FreeBSD and macOS are not part of this
-live validation and must not be reported as verified. Their existing execution
-paths and deterministic regression coverage must remain intact. This limits the
-validation claim, not the security requirements or implementation requirements.
+Host recovery acceptance testing covers the Linux lab with native installations.
+The separate kind lab also passed a browser-created n8n deployment, a gateway
+restart with the same signing key, and fresh-profile reviewed resource recovery.
+This does not establish live recovery coverage for Docker/Podman, Windows,
+FreeBSD or macOS, or every application through the new cluster workspace.
 
 ## Implementation audit
 
@@ -21,11 +21,54 @@ through system OpenSSH. Linux and FreeBSD link OpenSSL, macOS uses CommonCrypto,
 and Windows uses CNG. A universal remote Node runtime is not available. Remote
 signing must use platform-native maintained crypto, not require a new agent.
 
-The Kubernetes gateway is separate and its current Deployment uses `emptyDir`
-for writable storage. Its task ServiceAccount cannot read Secrets. Durable
-recovery cannot be enabled by writing to that ephemeral filesystem or silently
-granting new permissions. It needs explicitly configured persistent storage and
-an established cluster identity before claiming this capability.
+The Kubernetes gateway is separate. Durable recovery uses an explicitly enabled
+PVC and the verified kube-system namespace UID, without additional RBAC.
+Deployments without that persistent claim cannot claim durable recovery.
+The task ServiceAccount still cannot read Secrets.
+
+## Kubernetes cluster workspace
+
+1. Open **Browse Kubernetes clusters**, activate/update the gateway, and enable
+   persistent recovery using an existing StorageClass. The lab uses `standard`.
+2. Choose **Common tasks, persisted reviews and history**, or open the cluster in
+   `intentaiops --web --console-actions`. Prepare a catalog plan, review its API
+   operations, risks and images, then explicitly approve it. Preparation does not
+   create cluster resources. Refreshing or closing a view never executes work.
+3. Pause before the next command, abort remaining work, or explicitly continue
+   from confirmed command history. Running workloads are not killed by pause.
+4. From the same or a fresh installation, discover remote records and request
+   a recovery review. Signatures, catalog/node identities and original resource
+   UIDs are checked before a new deletion plan is generated. Review it separately:
+   deleting the original PVC permanently deletes task-created application data.
+
+The shared cluster service stores history under `kubernetes-tasks/` in the local
+profile. Remote version2 records add bounded path/UID/definition bindings to the
+existing signed format. The dedicated gateway function accepts only fixed ledger
+operations; its embedded storage implementation reuses the maintained OpenSSL
+P-256 backend. It cannot execute caller-provided shell code. The API command
+function remains Kubernetes-API-only. Health reports `recoveryProtocolVersion`,
+`recoveryConfigured` and `recoveryOpenSslAvailable`.
+
+The signing key stays in root-owned0700 persistent storage with0600 files.
+Normal updates reuse the claim; gateway deactivation preserves its namespace,
+PVC and signing material. Removal is a separate explicit Kubernetes administrative
+action. Unknown owners, writable nonempty roots, changed cluster bindings or
+unexpected key pins fail closed. Fresh verified kubeconfig access can reuse the
+managed gateway action credential, stored encrypted locally, without exporting
+the recovery private key or broadening gateway permissions.
+
+Recovery uses only signed, attributable creation UIDs and fresh matching catalog
+definitions. It does not adopt an existing installation. Missing resources are
+excluded; replacements and configuration drift block destructive recovery.
+Uncertain creations without an authoritative signed UID remain blocked for
+operator investigation. Outstanding ownership requires a separate explicit
+takeover decision. There is no automatic lease-expiry takeover or replay.
+
+The workspace currently accepts reviewed catalog plans, not arbitrary Kubernetes
+AI replanning or consultation. Reconstruction requires matching catalog code and
+node identities; changed nodes/catalogs require separate investigation. Root or
+an authorized gateway administrator can still use the signer, and a fresh
+installation cannot prove the newest records were not deleted.
 
 Existing common-task builders can regenerate commands and their provenance, but
 their rollback scripts consume different baseline formats. A signature does not

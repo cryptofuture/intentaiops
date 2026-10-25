@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomUUID, sign, verify } from 'node:crypto'
-import { planFingerprint } from './execution-journal.js'
+import { planFingerprint, isKubernetesResourceBinding } from './execution-journal.js'
 
 const DOMAIN = 'intentaiops.remote-common-task.v1\n'
 const ROTATION_DOMAIN = 'intentaiops.remote-common-task.key-rotation.v1\n'
@@ -17,9 +17,10 @@ export function recoveryKeyFingerprint (publicKey) {
   return createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('hex')
 }
 
-export function recoveryRecord (manifest, event, { sequence, previousHash = null, baselineDigest = null, operation = 'deployment' } = {}) {
+export function recoveryRecord (manifest, event, { sequence, previousHash = null, baselineDigest = null, operation = 'deployment', resource = null } = {}) {
   const record = {
-    version: 1,
+    version: manifest.platform === 'kubernetes' ? 2 : 1,
+    ...(manifest.platform === 'kubernetes' ? { resource } : {}),
     recordId: randomUUID(),
     executionId: manifest.executionId,
     target: manifest.target,
@@ -48,10 +49,15 @@ export function recoveryRecord (manifest, event, { sequence, previousHash = null
 }
 
 export function validateRecoveryRecord (record) {
-  exactKeys(record, FIELDS)
+  exactKeys(record, record.version === 2 ? [...FIELDS, 'resource'] : FIELDS)
   for (const field of ['recordId', 'executionId', 'target', 'identityMethod', 'platform', 'catalogId', 'catalogDigest', 'planDigest', 'rollbackDigest', 'revision', 'event', 'outcome', 'operation']) if (typeof record[field] !== 'string') throw new Error(`invalid recovery ${field} type`)
   for (const field of ['parentRevision', 'previousHash', 'baselineDigest', 'commandId', 'commandDigest', 'attemptId', 'jobId']) if (record[field] !== null && typeof record[field] !== 'string') throw new Error(`invalid recovery ${field} type`)
-  if (record.version !== 1 || !UUID.test(record.recordId) || !ID.test(record.executionId)) throw new Error('unsupported or invalid recovery record')
+  if (![1, 2].includes(record.version) || (record.version === 2 && record.platform !== 'kubernetes') || !UUID.test(record.recordId) || !ID.test(record.executionId)) throw new Error('unsupported or invalid recovery record')
+  if (record.version === 2 && record.resource !== null) {
+    exactKeys(record.resource, ['path', 'uid', 'definitionDigest'])
+    if (!['command_acknowledged', 'command_completed'].includes(record.event)) throw new Error('Resource identity requires an observed acknowledgment or completion')
+    if (!isKubernetesResourceBinding(record.resource)) throw new Error('invalid signed Kubernetes resource binding')
+  }
   if (!/^SHA256:[a-f0-9]{64}$/u.test(record.target) || !['ssh-host-fingerprint-v1', 'kubernetes-cluster-uid-v1'].includes(record.identityMethod) || !PLATFORMS.has(record.platform)) throw new Error('invalid recovery target identity')
   if ((record.platform === 'kubernetes') !== (record.identityMethod === 'kubernetes-cluster-uid-v1')) throw new Error('recovery identity method does not match platform')
   if (!/^[a-z0-9][a-z0-9-]{0,79}$/u.test(record.catalogId) || !Number.isSafeInteger(record.taskId) || record.taskId < 1 || record.taskId > 2147483647) throw new Error('invalid recovery catalog identity')

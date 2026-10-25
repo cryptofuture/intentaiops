@@ -8,6 +8,7 @@ operation=$1
 platform=$2
 case "$platform" in
   linux) root=/var/lib/intentaiops/recovery ;;
+  kubernetes) root=/var/lib/intentaiops/recovery ;;
   freebsd) root=/var/db/intentaiops/recovery ;;
   macos) root=/private/var/db/intentaiops/recovery ;;
   *) exit 1 ;;
@@ -76,6 +77,22 @@ case "$operation" in
     trap 'exit 1' HUP INT TERM
     ;;
 esac
+
+if [ "$platform" = kubernetes ]; then
+  case "${WEBMINAI_RECOVERY_TARGET:-}" in SHA256:*) identity=${WEBMINAI_RECOVERY_TARGET#SHA256:} ;; *) exit 1 ;; esac
+  case "$identity" in ''|*[!a-f0-9]*) exit 1 ;; esac
+  [ "${#identity}" -eq 64 ]
+  if [ -e "$root/target" ]; then
+    private_file "$root/target"
+    [ "$(cat "$root/target")" = "$WEBMINAI_RECOVERY_TARGET" ]
+  elif [ "$operation" = initialize ]; then
+    test ! -L "$root/target"; test ! -e "$root/signing.pem"
+    printf '%s' "$WEBMINAI_RECOVERY_TARGET" > "$root/target"
+    flush "$root/target"
+  else
+    exit 1
+  fi
+fi
 
 if [ "$operation" = initialize ] && [ ! -e "$root/signing.pem" ]; then
   test ! -L "$root/signing.pem"
@@ -221,6 +238,7 @@ if [ "$operation" = claim ] && [ ! -e "$directory" ]; then
   task=$7
   case "$task" in ''|*[!0-9]*) exit 1 ;; esac
   [ "$task" -gt 0 ]; [ "$task" -le 2147483647 ]; [ "$sequence" -eq 0 ]
+  if [ "$platform" != kubernetes ]; then
   if [ -e "$root/task-$task" ] || [ -L "$root/task-$task" ]; then
     printf '%s\n' 'Remote task identity is already occupied' >&2
     exit 1
@@ -231,9 +249,14 @@ if [ "$operation" = claim ] && [ ! -e "$directory" ]; then
       exit 1
     fi
   done
+  fi
   mkdir -m 0700 "$directory"
-  printf '%s' "$execution" > "$root/task-$task"
-  flush "$root/task-$task" "$directory"
+  if [ "$platform" != kubernetes ]; then
+    printf '%s' "$execution" > "$root/task-$task"
+    flush "$root/task-$task" "$directory"
+  else
+    flush "$directory"
+  fi
 fi
 safe_directory "$directory"
 if [ -e "$directory/head" ]; then
@@ -292,6 +315,16 @@ case "$signing" in ''|*[!A-Za-z0-9+/=]*) exit 1 ;; esac
 actual_key=$(openssl pkey -in "$root/signing.pem" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 | awk '{print $NF}')
 [ "$actual_key" = "$fingerprint" ]
 printf '%s' "$signing" | openssl base64 -d -A > "$root/.write-lock/payload"
+if [ "$platform" = kubernetes ]; then
+  padding=
+  case $((${#payload} % 4)) in 0) ;; 2) padding='==' ;; 3) padding='=' ;; *) exit 1 ;; esac
+  printf '%s%s' "$payload" "$padding" | tr '_-' '/+' | openssl base64 -d -A > "$root/.write-lock/record"
+  grep -Fq '"platform":"kubernetes"' "$root/.write-lock/record"
+  grep -Fq '"identityMethod":"kubernetes-cluster-uid-v1"' "$root/.write-lock/record"
+  grep -Fq "\"target\":\"$WEBMINAI_RECOVERY_TARGET\"" "$root/.write-lock/record"
+  { printf 'intentaiops.remote-common-task.v1\n'; cat "$root/.write-lock/record"; } > "$root/.write-lock/head"
+  cmp -s "$root/.write-lock/head" "$root/.write-lock/payload"
+fi
 openssl dgst -sha256 -sign "$root/signing.pem" -out "$root/.write-lock/signature" "$root/.write-lock/payload"
 signature=$(openssl base64 -A -in "$root/.write-lock/signature" | tr '+/' '-_' | tr -d '=')
 printf '{"algorithm":"ECDSA-P256-SHA256","format":"intentaiops-remote-recovery","keyFingerprint":"%s","payload":"%s","signature":"%s","version":1}' "$fingerprint" "$payload" "$signature" > "$root/.write-lock/record"

@@ -544,6 +544,15 @@ export function createKubernetesApiCommand ({ method, path, body, contentType = 
   ].join('\n')
 }
 
+export function parseKubernetesApiCommand (command) {
+  if (typeof command !== 'string' || command.length > 32768) throw new TypeError('Invalid Kubernetes API command')
+  const match = /^v=1\nmethod=(GET|POST|PUT|PATCH|DELETE)\npath=([A-Za-z0-9_-]+)\ncontentType=(application\/(?:json|merge-patch\+json|apply-patch\+yaml))\nbody=([A-Za-z0-9_-]*)$/u.exec(command)
+  if (!match) throw new TypeError('Only canonical Kubernetes API commands are supported; shell execution is unavailable')
+  const request = { method: match[1], path: Buffer.from(match[2], 'base64url').toString('utf8'), contentType: match[3], body: Buffer.from(match[4], 'base64url').toString('utf8') }
+  if (createKubernetesApiCommand(request) !== command) throw new TypeError('Noncanonical Kubernetes API command')
+  return request
+}
+
 function curlCommand (method, path) {
   const request = method === 'POST'
     ? '--request POST --header "Content-Type: application/json" --data-binary @-'

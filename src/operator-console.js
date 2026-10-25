@@ -133,6 +133,12 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
       }
       if (request.method === 'GET' && url.pathname === '/catalog' && workspace) return json(200, await workspace.catalog(url.searchParams.get('host')))
       if (request.method === 'GET' && url.pathname === '/cluster' && workspace) return json(200, await workspace.cluster(url.searchParams.get('id')))
+      if (request.method === 'GET' && url.pathname === '/cluster-task' && workspace) {
+        const view = await controller.kubernetesTasks.inspect(url.searchParams.get('cluster'), Number(url.searchParams.get('task')))
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        return response.end(JSON.stringify(view))
+      }
+      if (request.method === 'GET' && url.pathname === '/cluster-recovery' && workspace) return json(200, await controller.kubernetesTasks.remoteHistory(url.searchParams.get('cluster')))
       if (request.method === 'GET' && url.pathname === '/metrics' && workspace) return json(200, await workspace.metrics.get(url.searchParams.get('host')))
       if (request.method === 'GET' && url.pathname === '/inventory' && workspace) return json(200, await controller.withAdmin(url.searchParams.get('host'), admin => admin.refreshInventory({ settings: controller.settings, passphrase: controller.passphrase, serverId: url.searchParams.get('host') })))
       if (request.method === 'POST' && url.pathname === '/operation' && workspace) {

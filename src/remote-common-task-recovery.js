@@ -40,7 +40,9 @@ export class RemoteCommonTaskJournal {
     const saved = this.state.get(this.target, this.taskId)
     if (!saved) throw new Error('Common-task recovery registration is missing')
     if (!this.trust) {
-      const key = await this.transport.key({ initialize: true })
+      const known = this.state.currentKey(this.target)
+      const key = await this.transport.key({ initialize: !known })
+      if (!key) throw new Error('Previously pinned recovery key is unavailable; inspect persistent storage without replacing the key')
       this.trust = this.state.pin(this.target, key)
     }
     const { manifest, owner, sequence, head } = saved
@@ -50,7 +52,7 @@ export class RemoteCommonTaskJournal {
     }
     const command = (operation === 'rollback' ? this.plan.revertCommands : this.plan.commands).find(item => item.id === event.commandId)
     if (event.commandId && !command) throw new Error('Remote recovery event references an unknown command')
-    const record = recoveryRecord({ ...manifest, revision: planFingerprint(this.plan) }, { ...event, commandDigest: command ? planFingerprint(command) : null }, { sequence: sequence + 1, previousHash: head, operation, baselineDigest })
+    const record = recoveryRecord({ ...manifest, revision: planFingerprint(this.plan) }, { ...event, commandDigest: command ? planFingerprint(command) : null }, { sequence: sequence + 1, previousHash: head, operation, baselineDigest, resource: event.metadata?.resource ?? null })
     const envelope = await this.transport.append(record, { owner, trust: this.trust })
     this.state.advance(this.target, this.taskId, sequence, head, envelope)
     return record

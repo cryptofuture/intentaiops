@@ -3,24 +3,86 @@ import { joomlaComposeAssets } from './joomla-task.js'
 import { drupalComposeAssets } from './drupal-task.js'
 import { prestaShopComposeAssets } from './prestashop-task.js'
 import { moodleComposeAssets, moodleRelease } from './moodle-task.js'
-import { magentoComposeAssets } from './magento-task.js'
+import { magentoComposeAssets, magentoIndexerVerification } from './magento-task.js'
+import { createKubernetesApiCommand } from './netdata-client.js'
+import { planFingerprint } from './execution-journal.js'
 
 const TASK_NAMESPACE = 'webminai-tasks'
-const SUPPORTED_APPLICATIONS = new Set(['wordpress', 'woocommerce', 'joomla', 'drupal', 'prestashop', 'moodle', 'magento', 'n8n', 'ghost', 'mattermost', 'odoo', 'jellyfin', 'home-assistant'])
+const SUPPORTED_APPLICATIONS = new Set(['nginx', 'wordpress', 'woocommerce', 'joomla', 'drupal', 'prestashop', 'moodle', 'magento', 'n8n', 'ghost', 'mattermost', 'odoo', 'jellyfin', 'home-assistant'])
+
+function workspaceTask (catalogId) {
+  const task = kubernetesCommonTask(catalogId)
+  if (task.id === 'nginx-static-site-kubernetes') task.applicationId = 'nginx'
+  return task
+}
+
+export function buildKubernetesApplicationPlan ({ catalogId, executionId, nodes }) {
+  const task = workspaceTask(catalogId)
+  if (!SUPPORTED_APPLICATIONS.has(task.applicationId) || !/^[a-f0-9]{32}$/u.test(executionId) || !Array.isArray(nodes) || !nodes.length || nodes.length > 16 || new Set(nodes).size !== nodes.length || nodes.some(node => !/^[a-z0-9][a-z0-9.-]{0,252}$/u.test(node))) throw new Error('Invalid Kubernetes catalog reconstruction parameters')
+  const profile = applicationProfile(task, { namespace: TASK_NAMESPACE, adminEmail: 'intentaiops@example.invalid' })
+  const paths = {
+    PersistentVolumeClaim: `/api/v1/namespaces/${TASK_NAMESPACE}/persistentvolumeclaims`,
+    Deployment: `/apis/apps/v1/namespaces/${TASK_NAMESPACE}/deployments`,
+    Service: `/api/v1/namespaces/${TASK_NAMESPACE}/services`,
+    Job: `/apis/batch/v1/namespaces/${TASK_NAMESPACE}/jobs`
+  }
+  const source = { type: 'verified-application', id: catalogId, version: 1 }
+  const resources = [persistentVolumeClaim(task, TASK_NAMESPACE), deployment(task, profile, TASK_NAMESPACE), service(task, profile, TASK_NAMESPACE), ...[...nodes].sort().map(node => validationJob(task, profile, TASK_NAMESPACE, validationJobName(task, node), node))]
+  const commands = resources.flatMap((body, index) => {
+    body.metadata.labels['webminai.io/execution-id'] = executionId
+    body.metadata.annotations = { 'webminai.io/definition-sha256': planFingerprint(body) }
+    const command = { id: 'resource-' + index, command: createKubernetesApiCommand({ method: 'POST', path: paths[body.kind], body }), purpose: `Create ${body.kind} ${body.metadata.name}`, risk: 'change', timeoutMs: 300000, requiresSudo: false, phase: body.kind === 'Job' ? 'verify' : 'configure', dependsOn: index ? [index === 3 ? 'workload-ready' : index > 3 ? 'probe-' + (index - 1) : 'resource-' + (index - 1)] : [], source }
+    return body.kind === 'Job' ? [command, { ...command, id: 'probe-' + index, command: createKubernetesApiCommand({ method: 'GET', path: paths.Job + '/' + body.metadata.name }), purpose: 'Observe this exact validation Job and confirm its application marker', risk: 'read', dependsOn: [command.id] }] : [command]
+  })
+  commands.splice(3, 0, { id: 'workload-ready', command: createKubernetesApiCommand({ method: 'GET', path: paths.Deployment + '/' + resourceName(task) }), purpose: 'Observe this exact Deployment until application readiness; inspection timeout never cancels or replays the workload', risk: 'read', timeoutMs: 300000, requiresSudo: false, phase: 'health', dependsOn: ['resource-2'], source })
+  const revertCommands = resources.slice().reverse().map((body, index) => ({ id: 'revert-' + index, command: createKubernetesApiCommand({ method: 'DELETE', path: paths[body.kind] + '/' + body.metadata.name, body: { apiVersion: 'v1', kind: 'DeleteOptions', propagationPolicy: 'Foreground', preconditions: { uid: 'review-required' } } }), purpose: `Review deletion of the signed original ${body.kind} UID; PVC deletion removes task data`, risk: 'destructive', timeoutMs: 300000, requiresSudo: false, source }))
+  return { summary: task.label, changeOverview: 'Create task-owned persistent state, workload, Service and per-node health probes through the signed Kubernetes gateway', modifiedFiles: [], assumptions: ['Existing resources are never adopted', 'Recovery requires a separate current-UID review'], warnings: ['Application-generated data is deleted only through a separately approved recovery plan'], requiresConfirmation: true, commands, revertCommands, kubernetes: { catalogId, executionId, nodes: [...nodes].sort() } }
+}
+
+export async function inspectKubernetesApplicationReadiness (netdata, catalogId, uid, shouldContinue = () => true) {
+  const task = workspaceTask(catalogId)
+  const profile = applicationProfile(task, { namespace: TASK_NAMESPACE, adminEmail: 'intentaiops@example.invalid' })
+  await waitForDeployment(netdata, TASK_NAMESPACE, resourceName(task), profile.deploymentAttempts ?? 360, uid, shouldContinue)
+}
+
+export async function inspectKubernetesValidationJob (netdata, body, uid, shouldContinue = () => true) {
+  const path = `/apis/batch/v1/namespaces/${TASK_NAMESPACE}/jobs/${body.metadata.name}`
+  await waitForJob(netdata, TASK_NAMESPACE, body.metadata.name, 300, uid, shouldContinue)
+  const pods = await gatewayJson(netdata, { method: 'GET', path: `/api/v1/namespaces/${TASK_NAMESPACE}/pods?labelSelector=${encodeURIComponent('job-name=' + body.metadata.name)}` })
+  const pod = pods.items?.find(pod => pod.metadata?.ownerReferences?.some(owner => owner.uid === uid && owner.kind === 'Job'))
+  if (!pod || !/^[a-z0-9][a-z0-9.-]{0,252}$/u.test(pod.metadata?.name ?? '')) throw new Error('Validation Pod ownership is unavailable')
+  const current = await gatewayJson(netdata, { method: 'GET', path })
+  if (current.metadata?.uid !== uid) throw new Error('Validation Job identity changed')
+  const output = await gatewayText(netdata, { method: 'GET', path: `/api/v1/namespaces/${TASK_NAMESPACE}/pods/${pod.metadata.name}/log?limitBytes=8192` })
+  const task = workspaceTask(body.metadata.labels['webminai.io/catalog-id'])
+  if (!output.includes(validationMarker(task, body.spec.template.spec.nodeName))) throw new Error('Application validation marker is unavailable')
+}
 
 export async function validateKubernetesApplication ({ netdata, catalogId, namespace = TASK_NAMESPACE, adminEmail = 'intentaiops@example.invalid', onProgress = (_event) => {} }) {
   const task = kubernetesCommonTask(catalogId)
   if (!SUPPORTED_APPLICATIONS.has(task.applicationId)) throw new Error(`Kubernetes application adapter is not implemented yet: ${catalogId}`)
-  await revertKubernetesApplication({ netdata, catalogId, namespace, onProgress })
-  const profile = applicationProfile(task, { adminEmail })
+  for (const resource of [`/api/v1/namespaces/${namespace}/persistentvolumeclaims/${resourceName(task)}`, `/apis/apps/v1/namespaces/${namespace}/deployments/${resourceName(task)}`, `/api/v1/namespaces/${namespace}/services/${resourceName(task)}`]) {
+    if (await readResource(netdata, resource)) throw new Error('Existing application resource requires inspection and reviewed cleanup before another apply')
+  }
+  const profile = applicationProfile(task, { adminEmail, namespace })
   const nodes = await readyNodeNames(netdata)
   if (nodes.length === 0) throw new Error('no ready Kubernetes nodes were returned by Stage 2')
 
   onProgress({ phase: 'apply', message: `${task.label}: creating persistent state, Deployment, and Service` })
   await gatewayJson(netdata, { method: 'POST', path: `/api/v1/namespaces/${namespace}/persistentvolumeclaims`, body: persistentVolumeClaim(task, namespace) })
-  await gatewayJson(netdata, { method: 'POST', path: `/apis/apps/v1/namespaces/${namespace}/deployments`, body: deployment(task, profile, namespace) })
+  const created = await gatewayJson(netdata, { method: 'POST', path: `/apis/apps/v1/namespaces/${namespace}/deployments`, body: deployment(task, profile, namespace) })
   await gatewayJson(netdata, { method: 'POST', path: `/api/v1/namespaces/${namespace}/services`, body: service(task, profile, namespace) })
-  await waitForDeployment(netdata, namespace, resourceName(task), profile.deploymentAttempts ?? 360)
+  return verifyKubernetesApplication({ netdata, catalogId, namespace, adminEmail, onProgress, expectedDeploymentUid: created.metadata?.uid })
+}
+
+export async function verifyKubernetesApplication ({ netdata, catalogId, expectedDeploymentUid, namespace = TASK_NAMESPACE, adminEmail = 'intentaiops@example.invalid', onProgress = (_event) => {} }) {
+  if (typeof expectedDeploymentUid !== 'string' || !expectedDeploymentUid) throw new Error('Confirmed Deployment UID is required before verification')
+  const task = kubernetesCommonTask(catalogId)
+  if (!SUPPORTED_APPLICATIONS.has(task.applicationId)) throw new Error('Unsupported Kubernetes application verification')
+  const profile = applicationProfile(task, { adminEmail, namespace })
+  await waitForDeployment(netdata, namespace, resourceName(task), profile.deploymentAttempts ?? 360, expectedDeploymentUid)
+  const nodes = await readyNodeNames(netdata)
+  if (!nodes.length) throw new Error('No ready nodes available for verification')
 
   onProgress({ phase: 'verify', message: `Validating ${task.applicationId} from ${nodes.length} ready nodes` })
   const results = await Promise.all(nodes.map(async node => {
@@ -39,22 +101,50 @@ export async function validateKubernetesApplication ({ netdata, catalogId, names
   return { status: 'successful', catalogId, application: task.applicationId, nodes: results, service: `http://${resourceName(task)}.${namespace}.svc.cluster.local:${task.port}` }
 }
 
-export async function revertKubernetesApplication ({ netdata, catalogId, namespace = TASK_NAMESPACE, onProgress = (_event) => {} }) {
+export async function revertKubernetesApplication ({ netdata, catalogId, namespace = TASK_NAMESPACE, expectedResources, onProgress = (_event) => {} }) {
   const task = kubernetesCommonTask(catalogId)
   if (!task.applicationId) throw new Error(`Kubernetes application adapter is not applicable: ${catalogId}`)
   const name = resourceName(task)
   const selector = encodeURIComponent(`webminai.io/catalog-id=${catalogId}`)
-  for (const path of [
-    `/apis/batch/v1/namespaces/${namespace}/jobs?labelSelector=${selector}`,
+  const jobsPath = `/apis/batch/v1/namespaces/${namespace}/jobs`
+  const jobs = await gatewayJson(netdata, { method: 'GET', path: `${jobsPath}?labelSelector=${selector}` })
+  if (!Array.isArray(jobs?.items) || jobs.items.length > 128) throw new Error('Unexpected validation Job list; cleanup blocked')
+  const expected = expectedResources ? new Map(expectedResources.map(resource => [resource.path, resource.uid])) : null
+  const paths = [
+    ...jobs.items.map(job => {
+      if (!/^[a-z0-9][a-z0-9.-]{0,252}$/u.test(job.metadata?.name ?? '')) throw new Error('Invalid validation Job identity')
+      return `${jobsPath}/${job.metadata.name}`
+    }),
     `/apis/apps/v1/namespaces/${namespace}/deployments/${name}`,
     `/api/v1/namespaces/${namespace}/services/${name}`,
     `/api/v1/namespaces/${namespace}/persistentvolumeclaims/${name}`
-  ]) await gatewayDeleteIgnoringMissing(netdata, path)
+  ]
+  const removals = []
+  for (const path of paths) {
+    const resource = await readResource(netdata, path)
+    if (!resource) continue
+    const uid = resource.metadata?.uid
+    if (typeof uid !== 'string' || !uid || resource.metadata?.labels?.['webminai.io/catalog-id'] !== catalogId || resource.metadata?.labels?.['app.kubernetes.io/managed-by'] !== 'webminai' || (expected && expected.get(path) !== uid)) throw new Error('Unowned or replaced application resource; cleanup blocked')
+    removals.push({ path, uid, deleting: Boolean(resource.metadata.deletionTimestamp) })
+  }
+  for (const resource of removals) {
+    if (!resource.deleting) await gatewayDeleteIgnoringMissing(netdata, resource.path, resource.uid)
+    else await waitForDeletion(netdata, resource.path, resource.uid)
+  }
   onProgress({ phase: 'revert', message: `Removed task-owned ${task.applicationId} resources` })
   return { status: 'reverted', catalogId }
 }
 
 function applicationProfile (task, options) {
+  if (task.applicationId === 'nginx') {
+    return {
+      port: 80,
+      path: '/',
+      httpMarker: 'WEBMINAI_NGINX_OK',
+      initScript: "mkdir -p /state/html; printf '%s\\n' '<!doctype html><title>Intent AI Ops</title><h1>WEBMINAI_NGINX_OK</h1>' > /state/html/index.html; chmod 0755 /state/html; chmod 0644 /state/html/index.html",
+      containers: [{ name: 'nginx', image: task.images[0], volumeMounts: [{ name: 'state', mountPath: '/usr/share/nginx/html', subPath: 'html', readOnly: true }] }]
+    }
+  }
   if (['wordpress', 'woocommerce'].includes(task.applicationId)) return wordpressProfile(task, options)
   if (task.applicationId === 'joomla') return joomlaProfile(task, options)
   if (task.applicationId === 'drupal') return drupalProfile(task, options)
@@ -265,27 +355,85 @@ function moodleProfile (task, { adminEmail }) {
   }
 }
 
-function magentoProfile (task, { adminEmail }) {
+function magentoProfile (task, { adminEmail, namespace = TASK_NAMESPACE }) {
   /** @type {any} */
   const assets = magentoComposeAssets()
   const marker = 'WEBMINAI_MAGENTO_OK'
   const nginx = assets.nginx.join('\n').replace('    include /var/www/html/nginx.conf.sample;', '    location = /webminai-health { root /var/www/html; default_type text/plain; try_files /webminai-health =503; }\n    include /var/www/html/nginx.conf.sample;')
   const dirs = ['mysql', 'opensearch', 'valkey', 'webroot', 'php-run', 'config']
-  const initScript = credentialInit(['database_username', 'database_password', 'database_root_password', 'admin_username', 'admin_password'], dirs, ['999:999:mysql', '1000:1000:opensearch', '999:999:valkey', '33:33:webroot', '33:33:php-run']) + `; chgrp 101 /state/webroot /state/php-run; chmod 2770 /state/webroot /state/php-run; printf '%s\n' ${shellWord(kubernetesFpm(assets.fpm.join('\n')))} > /state/config/php-fpm.conf; printf '%s\n' ${shellWord(nginx)} > /state/config/nginx.conf; printf '%s\n' ${shellWord(assets.installer.join('\n'))} > /state/config/installer.php; printf '%s\n' ${shellWord(assets.marker.join('\n'))} > /state/config/marker.php; chmod 0644 /state/config/*`
-  const install = ['ready=', 'for attempt in $(seq 1 300); do if test -f /var/www/html/bin/magento && curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null 2>&1; then ready=yes; break; fi; sleep 2; done', 'test "$ready" = yes', 'if ! test -f /var/www/html/app/etc/env.php; then export WEBMINAI_DB_USERNAME_FILE=/state/credentials/database_username WEBMINAI_DB_PASSWORD_FILE=/state/credentials/database_password WEBMINAI_ADMIN_USERNAME_FILE=/state/credentials/admin_username WEBMINAI_ADMIN_PASSWORD_FILE=/state/credentials/admin_password; cd /var/www/html; timeout 240 php -d memory_limit=2G -d auto_prepend_file=/state/config/installer.php bin/magento setup:install --no-interaction --no-ansi --cleanup-database --base-url=http://' + resourceName(task) + '/ --db-host=127.0.0.1 --db-name=webminai_magento --backend-frontname=webminai_admin --admin-firstname=Intent --admin-lastname=Administrator --admin-email=' + shellWord(adminEmail) + ' --language=en_US --currency=USD --timezone=UTC --use-rewrites=1 --search-engine=opensearch --opensearch-host=127.0.0.1 --opensearch-port=9200 --opensearch-enable-auth=0 --session-save=redis --session-save-redis-host=127.0.0.1 --session-save-redis-db=2 --cache-backend=redis --cache-backend-redis-server=127.0.0.1 --cache-backend-redis-db=0 --page-cache=redis --page-cache-redis-server=127.0.0.1 --page-cache-redis-db=1 || test -f /var/www/html/app/etc/env.php; fi', `printf '%s\n' ${marker} > /var/www/html/webminai-health`, 'chown -R 33:101 /var/www/html; chmod 0644 /var/www/html/webminai-health', 'while :; do sleep 3600; done'].join('; ')
+  const initScript = credentialInit(['database_username', 'database_password', 'database_root_password', 'admin_username', 'admin_password'], dirs, ['999:999:mysql', '1000:1000:opensearch', '999:999:valkey', '82:82:webroot', '82:82:php-run']) + `; chgrp 101 /state/webroot /state/php-run; chmod 2770 /state/webroot /state/php-run; printf '%s\n' ${shellWord(kubernetesFpm(assets.fpm.join('\n')))} > /state/config/php-fpm.conf; printf '%s\n' ${shellWord(nginx)} > /state/config/nginx.conf; printf '%s\n' ${shellWord(assets.installer.join('\n'))} > /state/config/installer.php; printf '%s\n' ${shellWord(assets.marker.join('\n'))} > /state/config/marker.php; chmod 0644 /state/config/*`
+  const setup = 'cd /var/www/html; timeout 900 php -d memory_limit=2G -d auto_prepend_file=/state/config/installer.php bin/magento setup:install --no-interaction --no-ansi --cleanup-database --base-url=http://' + resourceName(task) + '.' + namespace + '.svc.cluster.local:' + task.port + '/ --db-host=127.0.0.1 --db-name=webminai_magento --backend-frontname=webminai_admin --admin-firstname=Intent --admin-lastname=Administrator --admin-email=' + shellWord(adminEmail) + ' --language=en_US --currency=USD --timezone=UTC --use-rewrites=1 --search-engine=opensearch --opensearch-host=127.0.0.1 --opensearch-port=9200 --opensearch-enable-auth=0 --session-save=redis --session-save-redis-host=127.0.0.1 --session-save-redis-db=2 --cache-backend=redis --cache-backend-redis-server=127.0.0.1 --cache-backend-redis-db=0 --page-cache=redis --page-cache-redis-server=127.0.0.1 --page-cache-redis-db=1'
+  const asOwner = command => `su -s /bin/sh www-data -c ${shellWord(`cd /var/www/html; ${command}`)}`
+  const failureSummary = 'foreach([\'setup\',\'schema\',\'mode\',\'marker\',\'index\',\'cache\',\'verify-schema\',\'verify-index\'] as $stage){$p=\'/state/config/magento-\'.$stage.\'-failure.json\';if(!is_file($p)||is_link($p)||filesize($p)>2048)continue;$x=json_decode(file_get_contents($p,false,null,0,2048),true);if(($x[\'version\']??null)!==1||($x[\'stage\']??null)!==$stage||!is_int($x[\'exitCode\']??null)||$x[\'exitCode\']<1||$x[\'exitCode\']>255||!in_array($x[\'reason\']??null,[\'unknown\',\'permission\',\'missing-path\',\'memory-allocation\',\'database\',\'incompatible\',\'contract\'],true))continue;echo \'MAGENTO_STEP_FAILURE \'.json_encode([\'version\'=>1,\'stage\'=>$stage,\'exitCode\'=>$x[\'exitCode\'],\'reason\'=>$x[\'reason\']])."\\n";}'
+  const reportFailure = `php -r ${shellWord(failureSummary.replace('"\\\\n"', 'chr(10)'))}`
+  const runStep = `run_step() {
+step=$1; shift
+case "$step" in setup|schema|mode|marker|index|cache|verify-schema|verify-index) ;; *) exit 78;; esac
+log=/state/config/magento-$step.log
+failure=/state/config/magento-$step-failure.json
+test ! -L "$log"; test ! -L "$failure"
+if test -e "$failure"; then log=/dev/null; fi
+status_file=$(mktemp /state/config/magento-status.XXXXXX)
+(set +e; "$@"; printf '%s\\n' "$?" > "$status_file") 2>&1 | { head -c 65536 > "$log"; cat >/dev/null; }
+status=$(cat "$status_file"); rm -f "$status_file"
+case "$status" in ''|*[!0-9]*) printf '%s\\n' MAGENTO_STEP_OUTCOME_UNKNOWN >&2; exit 78;; esac
+if [ "$status" -ne 0 ]; then
+reason=unknown
+if grep -Eqi 'Permission denied|failed to open stream' "$log"; then reason=permission
+elif grep -Eqi 'Could not open input file' "$log"; then reason=missing-path
+elif grep -Eqi 'Allowed memory size|Cannot allocate memory' "$log"; then reason=memory-allocation
+elif grep -Eqi 'not supported|incompatible version' "$log"; then reason=incompatible
+elif grep -Eqi 'SQLSTATE|Access denied for user|Connection refused' "$log"; then reason=database
+elif grep -Eqi 'Unknown option|option .*does not exist|syntax error' "$log"; then reason=contract
+fi
+if ! test -e "$failure"; then printf '{"version":1,"stage":"%s","exitCode":%s,"reason":"%s"}\\n' "$step" "$status" "$reason" > "$failure"; fi
+${reportFailure}
+exit "$status"
+fi
+}`
+  const install = [
+    'umask 077',
+    runStep,
+    'ready=',
+    'for attempt in $(seq 1 300); do if test -f /var/www/html/bin/magento && curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null 2>&1; then ready=yes; break; fi; sleep 2; done',
+    'test "$ready" = yes',
+    'if ! test -f /state/config/magento-installed; then',
+    `if test -e /state/config/magento-install-started || test -f /var/www/html/app/etc/env.php; then ${reportFailure}; printf '%s\\n' MAGENTO_INSTALLATION_REVIEW_REQUIRED >&2; exit 78; fi`,
+    'touch /state/config/magento-install-started; chmod 0600 /state/config/magento-install-started',
+    'install -d -o www-data -g www-data -m 0700 /run/webminai',
+    'for name in database_username database_password admin_username admin_password; do install -o www-data -g www-data -m 0400 "/state/credentials/$name" "/run/webminai/$name"; done',
+    "trap 'rm -f /run/webminai/database_username /run/webminai/database_password /run/webminai/admin_username /run/webminai/admin_password' EXIT",
+    'export WEBMINAI_DB_USERNAME_FILE=/run/webminai/database_username WEBMINAI_DB_PASSWORD_FILE=/run/webminai/database_password WEBMINAI_ADMIN_USERNAME_FILE=/run/webminai/admin_username WEBMINAI_ADMIN_PASSWORD_FILE=/run/webminai/admin_password',
+    `run_step setup su -s /bin/sh www-data -c ${shellWord(setup)}`,
+    'run_step schema ' + asOwner('php bin/magento setup:db:status'),
+    'run_step mode ' + asOwner('php bin/magento deploy:mode:set developer --skip-compilation --no-ansi'),
+    'run_step marker ' + asOwner('php -d memory_limit=2G /state/config/marker.php'),
+    'run_step index ' + asOwner('php bin/magento indexer:reindex --no-ansi --quiet && touch var/.webminai-indexed'),
+    'run_step cache ' + asOwner('php bin/magento cache:flush --no-ansi --quiet'),
+    'touch /state/config/magento-installed; chmod 0644 /state/config/magento-installed',
+    'fi',
+    'run_step verify-schema ' + asOwner('php bin/magento setup:db:status'),
+    'run_step verify-index ' + asOwner(`php -r ${shellWord(magentoIndexerVerification())}`),
+    'ready=; for attempt in $(seq 1 180); do if test -f /var/www/html/var/.webminai-cron-ok; then ready=yes; break; fi; sleep 2; done; test "$ready" = yes',
+    `printf '%s\n' ${marker} > /var/www/html/webminai-health`,
+    'chown -R www-data:101 /var/www/html; chmod 0644 /var/www/html/webminai-health',
+    'while :; do sleep 3600; done'
+  ].join('\n')
   return {
     port: 80,
     path: '/webminai-health',
-    validationPaths: ['/webminai-health'],
+    validationPaths: ['/webminai-health', '/'],
+    httpMarker: marker,
     deploymentAttempts: 1200,
-    initScript,
-    initContainers: [{ name: 'seed-magento-code', image: task.images[0], command: ['/bin/sh', '-ceu'], args: ['if ! test -f /state/webroot/var/.webminai-source-prepared; then test -f /state/webroot/bin/magento || cp -a /var/www/html/. /state/webroot/; rm -f /state/webroot/app/etc/env.php; rm -rf /state/webroot/generated/code/* /state/webroot/generated/metadata/* /state/webroot/var/cache/* /state/webroot/var/page_cache/* /state/webroot/var/di/*; cd /state/webroot; COMPOSER_ALLOW_SUPERUSER=1 composer dump-autoload --no-dev --no-interaction --no-ansi --quiet; touch /state/webroot/var/.webminai-source-prepared; chown -R 33:101 /state/webroot; fi'], volumeMounts: [{ name: 'state', mountPath: '/state' }] }],
+    initScript: initScript + '; chmod 0755 /state/config; rm -f /state/webroot/webminai-health /state/webroot/var/.webminai-cron-ok',
+    initContainers: [{ name: 'seed-magento-code', image: task.images[0], command: ['/bin/sh', '-ceu'], args: ['if ! test -f /state/webroot/var/.webminai-source-prepared; then test -f /state/webroot/bin/magento || cp -a /var/www/html/. /state/webroot/; rm -f /state/webroot/app/etc/env.php; rm -rf /state/webroot/generated/code/* /state/webroot/generated/metadata/* /state/webroot/var/cache/* /state/webroot/var/page_cache/* /state/webroot/var/di/*; cd /state/webroot; COMPOSER_ALLOW_SUPERUSER=1 composer dump-autoload --no-dev --no-interaction --no-ansi --quiet; touch /state/webroot/var/.webminai-source-prepared; chown -R www-data:101 /state/webroot; fi'], volumeMounts: [{ name: 'state', mountPath: '/state' }] }],
     containers: [
       databaseContainer(task.images[2], 'mysql', { env: [{ name: 'MARIADB_DATABASE', value: 'webminai_magento' }, { name: 'MARIADB_USER_FILE', value: '/state/credentials/database_username' }, { name: 'MARIADB_PASSWORD_FILE', value: '/state/credentials/database_password' }, { name: 'MARIADB_ROOT_PASSWORD_FILE', value: '/state/credentials/database_root_password' }], port: 3306, mountPath: '/var/lib/mysql' }),
       { name: 'opensearch', image: task.images[3], env: [{ name: 'discovery.type', value: 'single-node' }, { name: 'DISABLE_SECURITY_PLUGIN', value: 'true' }, { name: 'OPENSEARCH_JAVA_OPTS', value: '-Xms256m -Xmx256m' }], volumeMounts: [{ name: 'state', mountPath: '/usr/share/opensearch/data', subPath: 'opensearch' }] },
       { name: 'valkey', image: task.images[4], args: ['valkey-server', '--save', '', '--appendonly', 'no', '--maxmemory', '64mb', '--maxmemory-policy', 'allkeys-lru'], volumeMounts: [{ name: 'state', mountPath: '/data', subPath: 'valkey' }] },
-      { name: 'magento', image: task.images[0], command: ['/bin/sh', '-ceu'], args: ['install -d -o www-data -g www-data -m 0775 /run/php-fpm; rm -f /run/php-fpm/webminai.sock; exec docker-php-entrypoint php-fpm'], volumeMounts: phpApplicationMounts() },
-      { name: 'initializer', image: task.images[0], command: ['/bin/sh', '-ceu'], args: [install], securityContext: { runAsUser: 0, allowPrivilegeEscalation: false }, volumeMounts: [{ name: 'state', mountPath: '/state' }, { name: 'state', mountPath: '/var/www/html', subPath: 'webroot' }] },
+      { name: 'magento', image: task.images[0], env: [{ name: 'MAGE_MODE', value: 'developer' }], command: ['/bin/sh', '-ceu'], args: ['install -d -o www-data -g www-data -m 0775 /run/php-fpm; rm -f /run/php-fpm/webminai.sock; exec docker-php-entrypoint php-fpm'], volumeMounts: phpApplicationMounts() },
+      { name: 'initializer', image: task.images[0], env: [{ name: 'MAGE_MODE', value: 'developer' }], command: ['/bin/sh', '-ceu'], args: [install], securityContext: { runAsUser: 0, allowPrivilegeEscalation: false }, volumeMounts: [{ name: 'state', mountPath: '/state' }, { name: 'state', mountPath: '/var/www/html', subPath: 'webroot' }] },
+      { name: 'cron', image: task.images[0], env: [{ name: 'MAGE_MODE', value: 'developer' }], command: ['/bin/sh', '-ceu'], args: ['cd /var/www/html; while ! test -f /state/config/magento-installed; do sleep 2; done; while :; do php bin/magento cron:run --group default --no-ansi >/dev/null 2>&1 && touch var/.webminai-cron-ok; sleep 60; done'], securityContext: { runAsUser: 82, allowPrivilegeEscalation: false }, volumeMounts: phpApplicationMounts() },
       nginxContainer(task.images[1])
     ]
   }
@@ -360,6 +508,7 @@ function ghostProfile (task) {
   return {
     port: 2368,
     path: '/blog/',
+    deploymentAttempts: 1200,
     initScript: credentialInit(['database_password', 'database_root_password'], ['mysql', 'ghost'], ['999:999:mysql', '1000:1000:ghost']),
     containers: [
       databaseContainer(task.images[1], 'mysql', {
@@ -471,7 +620,7 @@ function deployment (task, profile, namespace) {
     ...(index === profile.containers.length - 1
       ? {
           ports: [{ name: 'http', containerPort: profile.port }],
-          startupProbe: { httpGet: { path: profile.path, port: 'http' }, periodSeconds: 5, timeoutSeconds: 5, failureThreshold: 180 },
+          startupProbe: { httpGet: { path: profile.path, port: 'http' }, periodSeconds: 5, timeoutSeconds: 5, failureThreshold: Math.max(180, Math.ceil((profile.deploymentAttempts ?? 360) / 5)) },
           readinessProbe: { httpGet: { path: profile.path, port: 'http' }, periodSeconds: 5, timeoutSeconds: 5, failureThreshold: 6 }
         }
       : {})
@@ -482,6 +631,7 @@ function deployment (task, profile, namespace) {
     metadata: { name, namespace, labels },
     spec: {
       replicas: 1,
+      progressDeadlineSeconds: Math.max(600, (profile.deploymentAttempts ?? 360) + 60),
       strategy: { type: 'Recreate' },
       selector: { matchLabels: { 'webminai.io/workload': name } },
       template: {
@@ -521,6 +671,11 @@ function service (task, profile, namespace) {
 
 function validationJob (task, profile, namespace, name, nodeName) {
   const marker = validationMarker(task, nodeName)
+  const checks = (profile.validationPaths ?? [profile.path]).map(path => {
+    const url = `http://${resourceName(task)}.${namespace}.svc.cluster.local:${task.port}${path}`
+    return profile.httpMarker ? `wget -qO "$response" --timeout=10 ${shellWord(url)} && grep -F ${shellWord(profile.httpMarker)} "$response" >/dev/null` : `wget -qO- --timeout=10 ${shellWord(url)} >/dev/null`
+  }).join(' && ')
+  const output = profile.httpMarker ? 'ulimit -f 4096\nresponse=$(mktemp)\ntrap \'rm -f "$response"\' EXIT\n' : ''
   return {
     apiVersion: 'batch/v1',
     kind: 'Job',
@@ -538,7 +693,7 @@ function validationJob (task, profile, namespace, name, nodeName) {
             name: 'validator',
             image: 'busybox:1.37.0',
             command: ['/bin/sh', '-ceu'],
-            args: [`ready=\nfor attempt in $(seq 1 30); do\n  if ${(profile.validationPaths ?? [profile.path]).map(path => `wget -qO- --timeout=10 'http://${resourceName(task)}.${namespace}.svc.cluster.local:${task.port}${path}' >/dev/null`).join(' && ')}; then ready=yes; break; fi\n  sleep 2\ndone\ntest "$ready" = yes\nprintf '%s\\n' '${marker}'`],
+            args: [`${output}ready=\nfor attempt in $(seq 1 30); do\n  if ${checks}; then ready=yes; break; fi\n  sleep 2\ndone\ntest "$ready" = yes\nprintf '%s\\n' '${marker}'`],
             securityContext: { runAsNonRoot: true, runAsUser: 65534, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, seccompProfile: { type: 'RuntimeDefault' } },
             resources: { requests: { cpu: '5m', memory: '8Mi' }, limits: { cpu: '100m', memory: '32Mi' } }
           }]
@@ -553,9 +708,12 @@ async function readyNodeNames (netdata) {
   return nodes.items.filter(node => node.status?.conditions?.some(condition => condition.type === 'Ready' && condition.status === 'True')).map(node => node.metadata.name)
 }
 
-async function waitForDeployment (netdata, namespace, name, attempts) {
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+async function waitForDeployment (netdata, namespace, name, attempts, expectedUid, shouldContinue = () => true) {
+  const deadline = Date.now() + attempts * 1000
+  for (let attempt = 1; attempt <= attempts && Date.now() < deadline; attempt++) {
+    if (!await shouldContinue()) throw new Error('Readiness observation paused; the workload was not cancelled')
     const current = await gatewayJson(netdata, { method: 'GET', path: `/apis/apps/v1/namespaces/${namespace}/deployments/${name}` })
+    if (current.metadata?.uid !== expectedUid) throw new Error('Deployment identity changed; no verification Jobs were dispatched')
     const desired = current.spec?.replicas ?? 1
     if (current.status?.observedGeneration >= current.metadata.generation && current.status?.availableReplicas === desired) return
     if (current.status?.conditions?.some(condition => condition.type === 'Progressing' && condition.status === 'False')) throw new Error(`${name} Deployment stopped progressing`)
@@ -564,9 +722,12 @@ async function waitForDeployment (netdata, namespace, name, attempts) {
   throw new Error(`${name} Deployment did not become ready`)
 }
 
-async function waitForJob (netdata, namespace, name, attempts) {
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+async function waitForJob (netdata, namespace, name, attempts, expectedUid, shouldContinue = () => true) {
+  const deadline = Date.now() + attempts * 1000
+  for (let attempt = 1; attempt <= attempts && Date.now() < deadline; attempt++) {
+    if (!await shouldContinue()) throw new Error('Validation observation paused; the Job was not cancelled')
     const current = await gatewayJson(netdata, { method: 'GET', path: `/apis/batch/v1/namespaces/${namespace}/jobs/${name}` })
+    if (expectedUid && current.metadata?.uid !== expectedUid) throw new Error('Validation Job identity changed')
     if (current.status?.succeeded === 1) return
     if (current.status?.failed > 0) throw new Error(`Kubernetes validation Job failed: ${name}`)
     await delay(1000)
@@ -584,10 +745,19 @@ async function gatewayText (netdata, request) {
   return result.stdout
 }
 
-async function gatewayDeleteIgnoringMissing (netdata, path) {
-  const result = await netdata.runApiRequest({ method: 'DELETE', path, body: { apiVersion: 'v1', kind: 'DeleteOptions', propagationPolicy: 'Foreground' }, timeoutSeconds: 30 })
+async function readResource (netdata, path) {
+  const result = await netdata.runApiRequest({ method: 'GET', path, timeoutSeconds: 30 })
+  let object
+  try { object = JSON.parse(result.stdout) } catch { throw new Error('Resource identity response unavailable; no mutation permitted') }
+  if (result.exitCode !== 0 && object?.kind === 'Status' && object.code === 404) return null
+  if (result.exitCode !== 0 || result.recoveryRequired || !object?.metadata?.uid) throw new Error('Resource identity could not be verified; no mutation permitted')
+  return object
+}
+
+async function gatewayDeleteIgnoringMissing (netdata, path, uid) {
+  const result = await netdata.runApiRequest({ method: 'DELETE', path, body: { apiVersion: 'v1', kind: 'DeleteOptions', propagationPolicy: 'Foreground', preconditions: { uid } }, timeoutSeconds: 30 })
   if (result.exitCode === 0) {
-    await waitForDeletion(netdata, path)
+    await waitForDeletion(netdata, path, uid)
     return
   }
   let status
@@ -596,7 +766,7 @@ async function gatewayDeleteIgnoringMissing (netdata, path) {
   throw new Error(`Kubernetes gateway delete failed: ${result.stderr.trim() || result.stdout.trim()}`)
 }
 
-async function waitForDeletion (netdata, path) {
+async function waitForDeletion (netdata, path, uid) {
   for (let attempt = 1; attempt <= 120; attempt++) {
     const result = await netdata.runApiRequest({ method: 'GET', path, timeoutSeconds: 30 })
     if (result.exitCode !== 0) {
@@ -611,7 +781,7 @@ async function waitForDeletion (netdata, path) {
     } catch (cause) {
       throw new Error(`Kubernetes gateway deletion probe returned invalid JSON: ${cause.message}`, { cause })
     }
-    if (Array.isArray(current.items) && current.items.length === 0) return
+    if (current.metadata?.uid !== uid) throw new Error('Resource identity changed while observing deletion; replacement preserved')
     await delay(500)
   }
   throw new Error(`Kubernetes resource deletion timed out: ${path}`)

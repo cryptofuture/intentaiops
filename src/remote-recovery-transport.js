@@ -12,9 +12,10 @@ export class RemoteRecoveryTransport {
   }
 
   async request (operation, parameters = {}) {
+    if (this.platform === 'kubernetes' && typeof this.client.runRecoveryRequest !== 'function') throw new Error('Remote recovery unavailable: persistent gateway backend is not configured')
     const command = await recoveryStorageCommand(this.platform, operation, parameters)
     const readOnly = ['key', 'list', 'read', 'verification-key', 'ownership'].includes(operation)
-    const result = await this.client.runCommand(command, { timeoutSeconds: readOnly ? 15 : 60 })
+    const result = await (this.platform === 'kubernetes' ? this.client.runRecoveryRequest(command, { timeoutSeconds: readOnly ? 15 : 60 }) : this.client.runCommand(command, { timeoutSeconds: readOnly ? 15 : 60 }))
     if (result.exitCode !== 0 || result.stdoutTruncated || result.stderrTruncated) {
       const reasons = {
         'Legacy remote task state is already occupied': 'legacy task state is occupied; preserve it and review a new task identity',
@@ -103,7 +104,7 @@ export class RemoteRecoveryTransport {
 }
 
 export async function recoveryStorageCommand (platform, operation, parameters = {}) {
-  if (!['linux', 'freebsd', 'macos', 'windows'].includes(platform)) throw new Error(platform === 'kubernetes' ? 'Remote recovery unavailable: gateway persistent storage and cluster identity are not configured' : 'Remote recovery unavailable: native signing/storage backend is not supported')
+  if (!['linux', 'freebsd', 'macos', 'windows', 'kubernetes'].includes(platform)) throw new Error('Remote recovery unavailable: native signing/storage backend is not supported')
   const args = [operation, platform]
   if (operation === 'verification-key' || operation === 'rotate-key') {
     if (!HASH.test(parameters.fingerprint)) throw new Error('Invalid recovery key fingerprint')
@@ -141,6 +142,7 @@ export async function recoveryStorageCommand (platform, operation, parameters = 
       } else if (!['release', 'ownership'].includes(operation)) throw new Error('Unsupported recovery operation')
     }
   }
+  if (platform === 'kubernetes') return ['v=1', `operation=${operation}`, 'args=' + args.slice(2).map(value => value === '' ? '-' : value).join(',')].join('\n')
   let command
   if (platform === 'windows') {
     const request = { operation }

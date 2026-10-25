@@ -316,6 +316,23 @@ function runPluginFile (plugin, input, environment) {
   })
 }
 
+test('Kubernetes recovery exposes OpenSSL capability and never accepts caller-supplied shell code', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'intent-kubernetes-recovery-protocol-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const keyFile = path.join(directory, 'action.key')
+  await writeFile(keyFile, ACTION_KEY, { mode: 0o600 })
+  const session = startPluginSession(fileURLToPath(new URL('../dist/webminai.plugin-kubernetes-amd64', import.meta.url)), { WEBMINAI_KEY_FILE: keyFile, WEBMINAI_RECOVERY_TARGET: 'SHA256:' + 'a'.repeat(64) })
+  t.after(() => session.stop())
+  await session.waitFor(output => output.includes('FUNCTION GLOBAL "webminai:recovery"'))
+  const health = await session.request('recovery-health', 'health', createSignedCommand('health', ACTION_KEY))
+  assert.equal(typeof health.body.recoveryOpenSslAvailable, 'boolean')
+  assert.equal(health.body.recoveryProtocolVersion, 1)
+  for (const [index, command] of ['printf unsafe', 'v=1\noperation=execute\nargs=', 'v=1\noperation=read\nargs=../escape,1', 'v=1\noperation=list\nargs=$(touch marker)'].entries()) {
+    const result = await session.request('recovery-bad-' + index, 'recovery', createSignedCommand(command, ACTION_KEY))
+    assert.equal(result.statusCode, 500)
+  }
+})
+
 function startPluginSession (plugin, environment) {
   const child = spawn(plugin, ['1'], {
     env: { ...process.env, ...environment },

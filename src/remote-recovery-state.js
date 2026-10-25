@@ -80,7 +80,8 @@ export class RemoteRecoveryState {
         if (known.planDigest !== manifest.planDigest) throw new Error('Registered common-task recovery definition cannot be overwritten')
         return known
       }
-      const value = { ...manifest, executionId: randomBytes(16).toString('hex') }
+      if (manifest.executionId !== undefined && !/^[a-f0-9]{32}$/u.test(manifest.executionId)) throw new Error('Invalid remote execution identity')
+      const value = { ...manifest, executionId: manifest.executionId ?? randomBytes(16).toString('hex') }
       database.prepare('INSERT INTO executions (target, task_id, execution_id, owner, manifest_json) VALUES (?, ?, ?, ?, ?)').run(value.target, value.taskId, value.executionId, randomBytes(16).toString('hex'), JSON.stringify(value))
       return value
     }).immediate())

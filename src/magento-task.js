@@ -371,8 +371,12 @@ function initializeCommand (linuxContext) {
   ].join('; ')
 }
 
+export function magentoIndexerVerification () {
+  return String.raw`require "app/bootstrap.php"; $m = \Magento\Framework\App\Bootstrap::create(BP, $_SERVER)->getObjectManager(); $config = $m->get(\Magento\Framework\Indexer\ConfigInterface::class)->getIndexers(); if (!$config || !isset($config["catalogsearch_fulltext"])) { exit(1); } $registry = $m->get(\Magento\Framework\Indexer\IndexerRegistry::class); foreach (array_keys($config) as $id) { if (!$registry->get($id)->isValid()) { exit(1); } } echo "magento-indexers-valid\n";`
+}
+
 function verifyCommand (linuxContext) {
-  const indexerVerification = String.raw`require "app/bootstrap.php"; $m = \Magento\Framework\App\Bootstrap::create(BP, $_SERVER)->getObjectManager(); $config = $m->get(\Magento\Framework\Indexer\ConfigInterface::class)->getIndexers(); if (!$config || !isset($config["catalogsearch_fulltext"])) { exit(1); } $registry = $m->get(\Magento\Framework\Indexer\IndexerRegistry::class); foreach (array_keys($config) as $id) { if (!$registry->get($id)->isValid()) { exit(1); } } echo "magento-indexers-valid\n";`
+  const indexerVerification = magentoIndexerVerification()
   const failure = String.raw`status=$?; if [ "$status" -ne 0 ]; then printf "MAGENTO_VERIFICATION_FAILED:%s\n" "$step" >&2; fi`
   return `set -eu; step=services; trap ${quote(failure)} EXIT; cd ${quote(SERVICE_ROOT)}; running=$(docker compose -p ${quote(PROJECT)} ps --status running --services); printf '%s\\n' "$running" | grep -Fxq magento; printf '%s\\n' "$running" | grep -Fxq nginx; printf '%s\\n' "$running" | grep -Fxq cron; step=socket; docker compose -p ${quote(PROJECT)} exec -T magento test -S /run/php-fpm/webminai.sock; step=configuration; docker compose -p ${quote(PROJECT)} exec -T magento test -f /var/www/html/app/etc/env.php; step=index-marker; docker compose -p ${quote(PROJECT)} exec -T magento test -f /var/www/html/var/.webminai-indexed; step=indexers; docker compose -p ${quote(PROJECT)} exec -T --user www-data magento php -r ${quote(indexerVerification)}; step=cron-marker; docker compose -p ${quote(PROJECT)} exec -T magento test -f /var/www/html/var/.webminai-cron-ok; step=version; docker compose -p ${quote(PROJECT)} exec -T --user www-data magento php bin/magento --version | grep -Fq ${quote(VERSION)}; step=search; docker compose -p ${quote(PROJECT)} exec -T opensearch curl --fail --silent http://127.0.0.1:9200/_cluster/health >/dev/null; step=cache; docker compose -p ${quote(PROJECT)} exec -T valkey valkey-cli ping | grep -Fq PONG; step=http; curl --fail --location --silent --show-error --max-time 120 http://127.0.0.1:${PORT}/ | grep -F ${MARKER} >/dev/null; printf '%s\\n' verification-passed`
 }

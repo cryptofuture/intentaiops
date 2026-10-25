@@ -13,6 +13,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { createKubernetesApiCommand } from '../src/netdata-client.js'
 
 const before = { availability: 'available', platform: 'linux', bootId: 'boot-a', scopeId: 'group-a', oomKills: 0, memoryLimitBytes: 805306368, observedAt: '2026-10-16T01:00:00Z' }
 const codes = observations => observations.map(value => value.code)
@@ -207,6 +208,45 @@ test('Kubernetes uncertain mutations retain uncertainty and inspection is namesp
   assert.equal(requests, 1)
 })
 
+test('ambiguous Kubernetes mutations journal unknown and cannot enter configured failure retries', async () => {
+  for (const response of [
+    { exitCode: 22, stdout: JSON.stringify({ kind: 'Status', code: 500 }), stderr: '' },
+    { exitCode: 56, stdout: '', stderr: 'connection reset' },
+    { exitCode: 0, stdout: '{}', stderr: '' },
+    { exitCode: 0, stdout: JSON.stringify({ kind: 'ConfigMap', metadata: { uid: '' } }), stderr: '' },
+    { exitCode: 0, stdout: JSON.stringify({ kind: 'Status', status: 'Success', code: 503 }), stderr: '' }
+  ]) {
+    let calls = 0
+    const client = new KubernetesNetdataClient({ actionKey: 'a'.repeat(64), kubernetes: { async request () { calls++; return response } } })
+    const command = createKubernetesApiCommand({ method: 'POST', path: '/api/v1/namespaces/webminai-tasks/configmaps', body: { kind: 'ConfigMap', metadata: { name: 'reviewed' } } })
+    const events = []
+    const plan = { summary: 'Reviewed API request', changeOverview: 'Unit fixture', modifiedFiles: [], commands: [{ id: 'apply', command, purpose: 'Create reviewed resource', risk: 'change', timeoutMs: 1000, requiresSudo: false, dependsOn: [], retry: { attempts: 2, intervalMs: 0, exitCodes: [22, 56], states: ['failed'] } }], revertCommands: [] }
+    const results = await executeApprovedPlan({ plan, policy: {}, netdata: client, approve: async () => true, requireRevert: false, onExecutionEvent: event => { events.push(event) } })
+    assert.equal(calls, 1)
+    assert.equal(results[0].recoveryRequired, true)
+    assert.equal(results[0].result.state, 'unknown')
+    assert.ok(events.some(event => event.type === 'command_outcome_unknown'))
+    assert.ok(!events.some(event => event.type === 'command_failed'))
+    if (response.stdout.includes('500')) assert.ok(events.find(event => event.type === 'command_outcome_unknown').metadata.diagnostics.some(value => value.code === 'API_UNAVAILABLE'))
+  }
+})
+
+test('shared Kubernetes output withholds pod specifications, data, environment and raw error text', async () => {
+  const object = { kind: 'Pod', metadata: { name: 'app', namespace: 'webminai-tasks', uid: 'pod-a', annotations: { password: 'KNOWN_SECRET' } }, spec: { containers: [{ env: [{ name: 'PASSWORD', value: 'KNOWN_SECRET' }] }] }, status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True', message: 'KNOWN_SECRET' }] }, data: { secret: 'KNOWN_SECRET' } }
+  const client = new KubernetesNetdataClient({ actionKey: 'a'.repeat(64), kubernetes: { async request () { return { exitCode: 0, stdout: JSON.stringify(object), stderr: 'KNOWN_SECRET' } } } })
+  const result = await client.runCommand(createKubernetesApiCommand({ method: 'GET', path: '/api/v1/namespaces/webminai-tasks/pods/app' }))
+  assert.doesNotMatch(JSON.stringify(result), /KNOWN_SECRET|annotations|containers|PASSWORD/u)
+  assert.equal(JSON.parse(result.stdout).metadata.uid, 'pod-a')
+  assert.equal(JSON.parse(result.stdout).workloadStatus.phase, 'Running')
+  client.kubernetes.request = async () => ({ exitCode: 0, stdout: JSON.stringify({ kind: 'PodList', items: new Array(128).fill({ ...object, metadata: { name: 'a'.repeat(253), namespace: 'a'.repeat(253), uid: 'a'.repeat(253) } }) }), stderr: '' })
+  const bounded = await client.runCommand(createKubernetesApiCommand({ method: 'GET', path: '/api/v1/namespaces/webminai-tasks/pods' }))
+  assert.ok(Buffer.byteLength(bounded.stdout) <= 32768)
+  assert.equal(bounded.stdoutTruncated, true)
+  assert.equal(JSON.parse(bounded.stdout).truncated, true)
+  client.kubernetes.request = async () => { throw Object.assign(new Error('KNOWN_SECRET connection reset'), { code: 'ECONNRESET' }) }
+  await assert.rejects(client.runCommand(createKubernetesApiCommand({ method: 'GET', path: '/api/v1/nodes' })), error => error.code === 'ECONNRESET' && !JSON.stringify(error).includes('KNOWN_SECRET') && !error.message.includes('KNOWN_SECRET'))
+})
+
 test('Kubernetes read evidence follows written UIDs, remains sanitized and avoids repeated routine messages', async () => {
   const reports = []
   let object = { kind: 'Pod', metadata: { uid: 'pod-a', generation: 1, namespace: 'webminai-tasks', name: 'app' }, spec: { privateValue: 'KNOWN_SECRET' } }
@@ -228,6 +268,14 @@ test('Kubernetes read evidence follows written UIDs, remains sanitized and avoid
   await assert.rejects(client.kubernetesJson({ method: 'POST', path: '/api/v1/namespaces/webminai-tasks/pods', body: { metadata: { name: 'app' } } }), error => error.recoveryRequired)
   client.kubernetes.request = async () => ({ exitCode: 0, stdout: 'KNOWN_SECRET invalid JSON', stderr: '' })
   await assert.rejects(client.kubernetesJson({ method: 'POST', path: '/api/v1/namespaces/webminai-tasks/pods', body: { metadata: { name: 'app' } } }), error => error.recoveryRequired && !JSON.stringify(error).includes('KNOWN_SECRET') && !error.message.includes('KNOWN_SECRET'))
+})
+
+test('Kubernetes DELETE collection acknowledges a typed resource list, not arbitrary success JSON', async () => {
+  const client = new KubernetesNetdataClient({ actionKey: 'a'.repeat(64), kubernetes: { async request () { return { exitCode: 0, stdout: JSON.stringify({ kind: 'JobList', items: [] }), stderr: '' } } } })
+  const result = await client.runApiRequest({ method: 'DELETE', path: '/apis/batch/v1/namespaces/webminai-tasks/jobs?labelSelector=app%3Dfixture' })
+  assert.notEqual(result.recoveryRequired, true)
+  client.kubernetes.request = async () => ({ exitCode: 0, stdout: JSON.stringify({ kind: 'UnknownList', items: [] }), stderr: '' })
+  assert.equal((await client.runApiRequest({ method: 'DELETE', path: '/apis/batch/v1/namespaces/webminai-tasks/jobs' })).state, 'unknown')
 })
 
 test('local runner timeout records intent without inventing a remote deadline', async () => {

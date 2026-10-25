@@ -282,8 +282,13 @@ The CLI-install profile has fixture coverage and a reviewed Debian lab recovery.
 Other task families can be recorded but cannot yet use verified remote
 rollback. Changed catalogs, missing or modified baseline files, partial execution
 and unknown outcomes block that recovery path. Windows storage code is included
-but has not been live-validated; Kubernetes currently reports recovery unavailable
-because its gateway has no durable recovery backend.
+but has not been live-validated. Kubernetes has a separate resource-bound recovery
+path: enable a dedicated persistent PVC during gateway activation, then use the
+cluster task workspace to prepare, review and execute catalog plans. CLI and web
+share durable history. Remote discovery verifies signatures and regenerates a
+new UID-checked recovery plan; it never runs a saved remote script. The kind lab
+passed an n8n browser cycle, gateway restart and fresh-profile reviewed recovery
+without RBAC expansion. See [Kubernetes recovery](docs/remote-common-task-recovery.md#kubernetes-cluster-workspace).
 
 Keys stay on the host; normal verified SSH establishes the public-key pin. A
 changed pin is refused. The recovery menu also offers explicitly reviewed key

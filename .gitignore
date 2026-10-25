@@ -31,3 +31,5 @@ core.*
 /artifacts/freebsd-common/
 /artifacts/freebsd-podman/
 /artifacts/freebsd-installation/
+/artifacts/kubernetes-common/
+/artifacts/native/
