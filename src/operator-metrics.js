@@ -23,6 +23,11 @@ export function normalizeMetrics (context, metadata, response) {
       percentage = series.filter(s => ['active', 'wired', 'laundry', 'buffers'].includes(s.dimension)).reduce((sum, s) => sum + s.value, 0) / total * 100
       memoryCalculation = 'FreeBSD RAM in use: (active + wired + laundry + buffers) / total reported RAM'
     }
+    const macosDimensions = ['active', 'wired', 'throttled', 'compressor', 'inactive', 'purgeable', 'speculative', 'free']
+    if (!used && total > 0 && series.length === macosDimensions.length && macosDimensions.every(name => series.filter(s => s.dimension === name).length === 1) && series.every(s => s.value !== null && s.value >= 0)) {
+      percentage = series.filter(s => ['active', 'wired', 'throttled', 'compressor'].includes(s.dimension)).reduce((sum, s) => sum + s.value, 0) / total * 100
+      memoryCalculation = 'macOS active RAM: (active + wired + throttled + compressor) / total reported RAM; not a memory-pressure measurement'
+    }
   }
   return { state: Date.now() - Date.parse(observedAt) > 30000 ? 'stale' : 'available', source: 'Netdata /api/v3/data', context, units: String(units ?? 'unknown').slice(0, 32), observedAt, aggregation: context === 'disk.space' ? 'per-filesystem dimensions, not a fleet-wide gauge' : 'latest 5-second average' + (memoryCalculation ? '; ' + memoryCalculation : ''), percentage: percentage !== null && percentage >= 0 && percentage <= 100 ? percentage : null, series: series.slice(0, 100) }
 }

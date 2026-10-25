@@ -13,7 +13,9 @@ test('macOS plugin target and Stage 2 bootstrap are defined', async () => {
   assert.doesNotMatch(source, /extern int setgroups/)
   assert.match(source, /\/var\/db\/webminai\/action\.key/)
   assert.match(build, /webminai\.plugin-macos-\$architecture/)
-  assert.match(build, /macOS does not support fully static executables/)
+  const macosBuild = build.split('\n  macos)')[1].split('\n  kubernetes)')[0]
+  assert.match(macosBuild, /CommonCrypto/u)
+  assert.doesNotMatch(macosBuild, /crypto_flags|-lcrypto/u)
   assert.match(installer, /Darwin\)/)
   assert.match(installer, /PLATFORM_ID=macos/)
   assert.match(installer, /Homebrew is required to install Netdata automatically on macOS/)

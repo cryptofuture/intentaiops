@@ -585,7 +585,13 @@ test('macOS catalog exposes a virtualization-gated Colima prerequisite', () => {
   assert.equal(validateCommandPlan(built.plan, rootExecutionPolicy({})), built.plan)
   assert.match(built.plan.commands[0].command, /kern\.hv_support/u)
   assert.match(built.plan.commands[0].command, /MACOS_HYPERVISOR_UNAVAILABLE/u)
-  assert.match(built.plan.commands.find(item => item.id === 'install-colima-toolchain').command, /brew.*install.*colima.*docker.*docker-compose/u)
+  assert.match(built.plan.commands.find(item => item.id === 'install-colima-toolchain').command, /for formula in.*colima.*docker.*docker-compose/u)
+  assert.match(built.plan.commands.find(item => item.id === 'install-colima-toolchain').command, /HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1/u)
+  assert.match(built.plan.commands.find(item => item.id === 'install-colima-toolchain').command, /docker-buildx/u)
+  assert.match(built.plan.commands.find(item => item.id === 'verify-colima').command, /buildx version/u)
+  assert.match(built.plan.commands.find(item => item.id === 'capture-colima-baseline').command, /default-profile\.existed/u)
+  assert.match(built.plan.commands.find(item => item.id === 'start-colima').command, /default-profile\.existed.*colima start'.*default-profile\.created/u)
+  assert.doesNotMatch(built.plan.revertCommands.find(item => item.id === 'remove-task-colima').command, /rm -rf/u)
   assert.doesNotMatch(built.plan.commands.map(item => item.command).join('\n'), /Docker\.app/u)
   for (const command of [...built.plan.commands, ...built.plan.revertCommands]) {
     const syntax = spawnSync('/bin/sh', ['-n', '-c', command.command], { encoding: 'utf8' })
@@ -604,6 +610,7 @@ test('macOS catalog exposes a virtualization-gated Colima prerequisite', () => {
   assert.equal(validateCommandPlan(wordpress.plan, rootExecutionPolicy({})), wordpress.plan)
   assert.match(wordpress.plan.commands.find(item => item.id === 'write-compose').command, /wordpress:7\.0\.2-php8\.3-fpm/u)
   assert.match(wordpress.plan.commands.find(item => item.id === 'write-compose').command, /\/Users\/mac\/\.webminai\/credentials\/wordpress/u)
+  assert.match(wordpress.plan.commands.find(item => item.id === 'write-compose').command, /unset DOCKER_CONTEXT/u)
   assert.doesNotMatch(JSON.stringify(wordpress.plan), /\/var\/lib\/webminai|\/opt\/webminai|\/root\/wordpress_credentials|systemctl|apt-get|dpkg/u)
   for (const command of [...wordpress.plan.commands, ...wordpress.plan.revertCommands]) {
     const syntax = spawnSync('/bin/sh', ['-n', '-c', command.command], { encoding: 'utf8' })
@@ -621,6 +628,14 @@ test('macOS catalog exposes a virtualization-gated Colima prerequisite', () => {
     assert.match(serialized, /DOCKER_HOST='unix:\/\/\/Users\/mac\/\.colima\/default\/docker\.sock'/u)
     assert.doesNotMatch(serialized, /\/opt\/webminai\/services|\/root\/[a-z_-]+_credentials|\/var\/lib\/webminai\/task-state|systemctl (start|stop) docker/u)
     assert.doesNotMatch(serialized, /stat -c|ip -4 route|hostname -I|\$\(seq /u)
+    assert.deepEqual(candidate.plan.commands.find(command => command.id.startsWith('start-')).diagnostic, { kind: 'compose', target: `/Users/mac/.webminai/services/${application}` })
+    if (['ghost', 'magento'].includes(application)) {
+      assert.equal(candidate.plan.commands[0].id, 'validate-image-cpu')
+      assert.equal(candidate.plan.commands[0].timeoutMs, 30000)
+      assert.match(candidate.plan.commands[0].command, /colima ssh/u)
+      assert.match(candidate.plan.commands[0].command, /CPU_IMAGE_COMPATIBILITY_UNVERIFIED/u)
+      assert.ok(candidate.plan.commands.find(command => command.id === 'capture-baseline').dependsOn.includes('validate-image-cpu'))
+    }
     for (const command of [...candidate.plan.commands, ...candidate.plan.revertCommands]) {
       const syntax = spawnSync('/bin/sh', ['-n', '-c', command.command], { encoding: 'utf8' })
       assert.equal(syntax.status, 0, `${application}/${command.id}: ${syntax.stderr}`)

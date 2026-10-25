@@ -316,5 +316,5 @@ function redactSensitiveResult (command, result) {
 }
 
 function isSensitiveCommand (command) {
-  return /\/root\/[A-Za-z0-9_.-]+_credentials(?:\/|\b)|C:\\ProgramData\\WebminAI\\credentials(?:\\|\b)|RandomNumberGenerator|openssl\s+rand|\/dev\/(?:u?random)\b|\b(?:docker\s+compose|docker-compose)\b/iu.test(command)
+  return /\/root\/[A-Za-z0-9_.-]+_credentials(?:\/|\b)|\/\.webminai\/credentials(?:\/|\b)|C:\\ProgramData\\WebminAI\\credentials(?:\\|\b)|RandomNumberGenerator|openssl\s+rand|\/dev\/(?:u?random)\b|\b(?:docker\s+compose|docker-compose)\b/iu.test(command)
 }

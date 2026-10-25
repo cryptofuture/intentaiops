@@ -294,6 +294,18 @@ test('FreeBSD RAM uses Netdata in-use categories and refuses incomplete or ambig
   }
 })
 
+test('macOS RAM uses its complete native dimension set and never substitutes memory pressure', () => {
+  const labels = ['time', 'active', 'wired', 'throttled', 'compressor', 'inactive', 'purgeable', 'speculative', 'free']
+  const row = [Math.floor(Date.now() / 1000), 20, 15, 5, 10, 30, 10, 5, 5]
+  const metric = normalizeMetrics('system.ram', { units: 'MiB' }, { result: { labels, data: [row] } })
+  assert.equal(metric.percentage, 50)
+  assert.match(metric.aggregation, /macOS active RAM/u)
+  assert.match(metric.aggregation, /not a memory-pressure measurement/u)
+  for (const [names, values] of [[labels.slice(0, -1), row.slice(0, -1)], [labels, [...row.slice(0, -1), null]], [labels, [...row.slice(0, -1), -1]], [[...labels, 'active'], [...row, 5]], [labels.map(name => name === 'compressor' ? 'unknown' : name), row]]) {
+    assert.equal(normalizeMetrics('system.ram', { units: 'MiB' }, { result: { labels: names, data: [values] } }).percentage, null)
+  }
+})
+
 test('normalized metrics retain source, units, missing evidence and shared bounded sampling', async t => {
   const { controller } = await fixture(t)
   const at = Math.floor(Date.now() / 1000)

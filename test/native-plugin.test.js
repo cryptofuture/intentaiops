@@ -147,7 +147,8 @@ test('native plugin starts, polls, cancels, and cleans durable command jobs', as
   assert.equal((await request('job_cleanup', cancelStart.body.jobId)).body.state, 'cleaned')
 
   const survivedFile = path.join(directory, 'orphan-survived')
-  const orphanCommand = `sleep 1; printf survived > '${survivedFile}'`
+  const releaseFile = path.join(directory, 'orphan-release')
+  const orphanCommand = `i=0; while [ ! -f '${releaseFile}' ]; do i=$((i+1)); [ "$i" -lt 600 ] || exit 1; sleep 0.1; done; printf survived > '${survivedFile}'`
   const orphanStart = await request('job_start', `timeoutSeconds=60\ncommand=${Buffer.from(orphanCommand).toString('base64url')}`)
   const controllerFile = path.join(jobDirectory, orphanStart.body.jobId, 'controller.pid')
   let controllerPid
@@ -164,6 +165,7 @@ test('native plugin starts, polls, cancels, and cleans durable command jobs', as
   assert.ok(Number.isInteger(controllerPid) && controllerPid > 1)
   assert.ok(Number.isInteger(commandPid) && commandPid > 1)
   process.kill(controllerPid, 'SIGKILL')
+  await writeFile(releaseFile, '')
   let orphaned
   for (let attempt = 0; attempt < 20; attempt++) {
     orphaned = await request('job_status', orphanStart.body.jobId)

@@ -26,7 +26,14 @@ export class NetdataClient {
 
   async collectExecutionEvidence ({ item, before } = {}) {
     const evidence = await collectHostEvidence(this, item?.diagnostic?.kind === 'filesystem' ? { filesystemTarget: item.diagnostic.target } : {})
-    if (before && item?.diagnostic?.kind === 'compose') evidence.workloadDiagnostics = await collectComposeEvidence(this, item.diagnostic, before.observedAt)
+    if (before && item?.diagnostic?.kind === 'compose') {
+      let runtimeHome
+      const platform = before.platform === 'macos' ? 'macos' : evidence.platform
+      if (platform === 'macos') {
+        try { runtimeHome = (await this.macosExecutionInventory()).runtimeHome } catch {}
+      }
+      evidence.workloadDiagnostics = await collectComposeEvidence(this, item.diagnostic, before.observedAt, { platform: platform ?? 'unknown', runtimeHome })
+    }
     return evidence
   }
 

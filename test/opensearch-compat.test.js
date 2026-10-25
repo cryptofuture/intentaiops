@@ -148,9 +148,11 @@ test('Magento rollback rejects changed compatibility image identity and preserve
   assert.match(source, /if .*builder-created.*; then docker buildx rm/u)
 })
 
-test('macOS keeps official image order and never uses Linux CPU diagnostics', () => {
+test('macOS keeps official image order and reads CPU capabilities only inside Colima', () => {
   const built = buildMacosComposeTask('magento', 23, { platform: 'macos', runtimeUser: 'operator', runtimeHome: '/Users/operator', architecture: 'x86_64' }, { ready: true })
-  assert.match(built.plan.commands[0].command, /standard > .*image-profile/u)
-  for (const c of built.plan.commands) assert.doesNotMatch(c.command, /\/proc\/cpuinfo/u)
-  assert.match(built.plan.commands[0].command, new RegExp(OPENSEARCH_IMAGE + "'[^;]*; then : > '[^']*image-3\\.existed"))
+  const capture = built.plan.commands.find(command => command.id === 'capture-baseline').command
+  assert.match(capture, /standard > .*image-profile/u)
+  assert.match(built.plan.commands[0].command, /colima ssh.*\/proc\/cpuinfo/u)
+  for (const c of built.plan.commands.filter(command => command.id !== 'validate-image-cpu')) assert.doesNotMatch(c.command, /\/proc\/cpuinfo/u)
+  assert.match(capture, new RegExp(OPENSEARCH_IMAGE + "'[^;]*; then : > '[^']*image-3\\.existed"))
 })

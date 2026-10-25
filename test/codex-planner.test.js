@@ -14,6 +14,34 @@ class CodexPlanner extends ProductionCodexPlanner {
   }
 }
 
+for (const home of ['/Users/mac', null]) {
+  test(`macOS planning uses root Stage 2 and verified Colima context: home=${home}`, async () => {
+    const planner = new CodexPlanner()
+    let prompt
+    const command = home ? 'docker compose -p app ps' : 'uptime'
+    planner.runStructured = async options => {
+      prompt = options.prompt
+      return JSON.stringify({ summary: 'Inspect macOS', changeOverview: 'Read current state', modifiedFiles: home ? [`${home}/.webminai/services/app/compose.yaml`] : [], commands: [{ id: 'inspect', command, purpose: 'Inspect', risk: 'read', timeoutMs: 5000, requiresSudo: false, dependsOn: [] }], revertCommands: [] })
+    }
+    const inventory = { webminaiExecution: { platform: 'macos', runtimeHome: home }, webminaiDocker: { preferred: Boolean(home), ready: Boolean(home) } }
+    const result = await planner.plan({ request: 'Inspect the current macOS state without changes', inventory, policy: {} })
+    assert.equal(result.commands[0].command, command)
+    assert.match(prompt, /Signed Stage 2 commands execute as root through \/bin\/sh/u)
+    assert.doesNotMatch(prompt, /administrative changes use sudo|sudo -S|sudo -n/u)
+    assert.doesNotMatch(prompt, /Store service credentials in a dedicated root-only directory named \/root/u)
+    if (home) {
+      assert.ok(prompt.includes(`${home}/.webminai/credentials/<service>`))
+      assert.ok(prompt.includes(`${home}/.webminai/services/<service>/compose.yaml`))
+      assert.ok(prompt.includes(`DOCKER_HOST=unix://${home}/.colima/default/docker.sock`))
+      assert.match(prompt, /unset DOCKER_CONTEXT/u)
+    } else {
+      assert.match(prompt, /verified Colima owner is unavailable/u)
+      assert.match(prompt, /Native macOS work remains/u)
+      assert.doesNotMatch(prompt, /\/Users\/(?:undefined|null)/u)
+    }
+  })
+}
+
 test('AI plans cannot set controller-owned rollback mode', async () => {
   const planner = new CodexPlanner()
   let attempts = 0

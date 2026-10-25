@@ -846,7 +846,7 @@ controlled host: loopback Netdata API → webminai.plugin → root command backe
                                       HMAC + timestamp + nonce gate
                                                         ├─ Linux: systemd-run or /bin/bash
                                                         ├─ FreeBSD: /bin/sh + rc.d tools
-                                                        └─ macOS: /bin/sh + sudo/bootstrap tools
+                                                        └─ macOS: root /bin/sh (sudo only during bootstrap)
 
 Windows host: loopback Netdata API → webminai.plugin-windows-amd64.exe
                                    └─ LocalSystem Windows PowerShell backend
@@ -989,13 +989,20 @@ Copy the resulting artifact into `dist/` on the Intent AI Ops machine. Activatio
 
 ### macOS support
 
-macOS Stage 2 detects `Darwin` over SSH and uses the signed native plugin with a root-only action key under `/var/db/webminai`. It supports both Intel Homebrew under `/usr/local` and Apple Silicon Homebrew under `/opt/homebrew`, and uses sudo/bootstrap tools instead of systemd or Linux namespace features. Build the artifact on a matching macOS architecture:
+macOS Stage 2 detects `Darwin` over SSH and uses the signed native plugin with a root-only action key under `/var/db/webminai`. It supports both Intel Homebrew under `/usr/local` and Apple Silicon Homebrew under `/opt/homebrew`. Bootstrap can require sudo; activated commands run as root through `/bin/sh`, without systemd or Linux namespaces. Build the artifact on a matching macOS architecture:
 
 ```sh
 npm run build:plugin:macos
 ```
 
 Copy `dist/webminai.plugin-macos-arm64` or `dist/webminai.plugin-macos-amd64` to the Intent AI Ops machine. A normal Ubuntu toolchain cannot create this Mach-O/CommonCrypto artifact; release automation should use a matching macOS runner, although Ubuntu may coordinate a build on a trusted Mac and copy the result into `dist/`. If Netdata is absent, activation installs the stable Homebrew formula as the non-root Homebrew owner and records it as Intent AI Ops-managed; managed removal stops and uninstalls that formula. Existing Homebrew Netdata can use plugin-only activation. Stage 2 restarts the LaunchAgent as the Homebrew owner, waits for the API and asynchronous plugin-spawn supervisor, and then installs the plugin for live discovery. This ordering avoids Netdata permanently disabling the plugin when its first launch races the supervisor socket. The SSH account must be able to bootstrap through sudo; its password is transient and is never passed to Codex.
+
+The reviewed Colima prerequisite installs missing Docker, Compose and Buildx tools
+as the Homebrew owner. Intel hosts can require source builds, including Go for
+Buildx. Existing formula versions and Colima profiles are preserved; rollback
+disables Homebrew autoremove and removes only recorded additions. Moodle checks
+Buildx before creating application files. See the [macOS lab checkpoint](docs/macos-lab-validation-status.md)
+for measured coverage and remaining platform limits.
 
 ### Windows command plugin
 
@@ -1319,9 +1326,11 @@ reviewed, archives public verification keys and never silently changes a pin.
 Shared-controller browser actions require separate proposal and execution approval.
 Reviewed owner takeover is limited to confirmed untouched sources; partial or
 unknown execution and already-started recovery remain blocked.
-Windows CNG storage is unverified on a native host; FreeBSD/macOS live tests and
-Kubernetes's durable gateway backend remain outstanding. Do not broaden that
-coverage claim or silently accept a changed signing key.
+The macOS lab verified automatic signed recording and fresh public-key
+trust/discovery. Destructive regeneration remains blocked because macOS baseline
+profiles are not registered. Windows CNG storage and other live-platform coverage
+require their own recorded evidence. Do not broaden these claims or silently
+accept a changed signing key.
 
 The promoted Linux application catalog is exposed through the host menu and structured Codex routing. It contains 13 reviewed builders; candidates without a promoted builder remain on the research/AI path. Run the staged Linux-lab and separate Docker-host promotion checks with:
 

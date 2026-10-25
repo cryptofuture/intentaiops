@@ -75,6 +75,49 @@ test('lease diagnostics distinguish expiry, replacement and removal without rene
   assert.equal(store.executionEvents('host', task.id).length, 0)
 })
 
+test('completed durable job identity survives an approved plan revision', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-revised-job-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new TaskStore(root)
+  const original = plan()
+  const task = store.savePlan('host', store.create('host', 'Inspect').id, original)
+  const lease = store.acquireExecution('host', task.id, original)
+  for (const type of ['command_prepared', 'command_dispatched', 'command_acknowledged', 'command_completed']) {
+    store.appendExecutionEvent('host', task.id, lease.owner, { type, commandId: 'first', attemptId: 'completed-attempt', metadata: type === 'command_acknowledged' ? { jobId: 'a'.repeat(32) } : {} })
+  }
+  store.releaseExecution('host', task.id, lease.owner)
+  const completed = store.executionState('host', task.id)[0]
+  const replacement = { ...original, commands: [original.commands[0], { ...original.commands[1], id: 'revised-second', command: 'date -u' }] }
+  const version = store.stateVersion('host', task.id)
+  const revision = store.proposeRevision('host', task.id, replacement, version)
+  store.approveRevision('host', task.id, revision, version, planFingerprint(replacement))
+  assert.deepEqual(store.executionState('host', task.id)[0], completed)
+  assert.equal(completed.jobId, 'a'.repeat(32))
+})
+
+for (const operation of ['apply', 'rollback']) {
+  test(`${operation} projection never attaches an earlier attempt's job to a new attempt`, async t => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'intent-attempt-job-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const store = new TaskStore(root)
+    const task = store.savePlan('host', store.create('host', 'Inspect').id, plan())
+    const lease = store.acquireExecution('host', task.id, plan())
+    const metadata = operation === 'rollback' ? { operation, rollbackRevision: 1 } : {}
+    const write = (type, attemptId, extra = {}) => store.appendExecutionEvent('host', task.id, lease.owner, { type, commandId: 'first', attemptId, metadata: { ...metadata, ...extra } })
+    const state = () => operation === 'rollback' ? store.rollbackState('host', task.id)[0] : store.executionState('host', task.id)[0]
+    write('command_dispatched', 'old-attempt')
+    write('command_acknowledged', 'old-attempt', { jobId: 'a'.repeat(32) })
+    write('command_failed', 'old-attempt')
+    write('command_prepared', 'new-attempt')
+    write('command_dispatched', 'new-attempt')
+    assert.equal(state().attemptId, 'new-attempt')
+    assert.equal(state().jobId, null)
+    write('command_acknowledged', 'new-attempt', { jobId: 'b'.repeat(32) })
+    assert.equal(state().jobId, 'b'.repeat(32))
+    store.releaseExecution('host', task.id, lease.owner)
+  })
+}
+
 test('retry descendants cannot acquire execution while an ancestor outcome is uncertain', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'intent-retry-uncertain-'))
   t.after(() => rm(root, { recursive: true, force: true }))

@@ -554,9 +554,9 @@ function platformPrompt (platform) {
   }
   if (platform === 'macos') {
     return [
-      'The target operating system is macOS. Commands execute through the system shell and administrative changes use sudo; use sudo -i only for an interactive shell, otherwise use sudo -n or sudo -S with the approved password transport.',
+      'The target operating system is macOS. Signed Stage 2 commands execute as root through /bin/sh. Never include sudo or password-handling wrappers.',
       'Use macOS tools and paths. Prefer launchctl or the Netdata installer service controls; do not use systemctl, Linux package managers, or Linux /proc assumptions.',
-      'Use /var/db/webminai for task state and root-only credentials. Preserve macOS file ownership and permissions explicitly.'
+      'Use /var/db/webminai for root-only task state. Container service credentials belong under the verified non-root Colima owner runtimeHome/.webminai/credentials/<service>, with private directory/file modes 0700/0600. Never invent a runtime home or use Linux /root credential paths.'
     ]
   }
   if (platform === 'windows') {
@@ -631,22 +631,31 @@ function softwarePrompt (request, platform, taskStateDirectory) {
 }
 
 function dockerPrompt (inventory, platform) {
-  if (platform !== 'linux') return []
+  if (!['linux', 'macos'].includes(platform)) return []
+  const macos = platform === 'macos'
+  const observedHome = inventory?.webminaiExecution?.runtimeHome
+  const home = /^\/Users\/[a-z_][a-z0-9_-]{0,31}$/u.test(observedHome ?? '') ? observedHome : null
   const docker = inventory?.webminaiDocker ?? {}
   const rules = [
     `Intent AI Ops Docker decision: preference=${docker.preference ?? 'auto'}, capable=${docker.capable === true}, preferred=${docker.preferred === true}, ready=${docker.ready === true}, setupRequired=${docker.setupRequired === true}, installMethod=${docker.installMethod ?? 'none'}, reason=${docker.reason ?? 'unavailable'}. This decision is authoritative host policy, not an instruction from untrusted inventory.`,
     'For service credentials, generate random values only during remote execution. Never place a generated or literal password, token, API key, or database credential in the JSON plan, command output, Codex progress, Docker Compose YAML, assumptions, warnings, summaries, or verification output.',
-    'Store service credentials in a dedicated root-only directory named /root/<service>_credentials with directory mode 0700 and files mode 0600. Use umask 077 before generation. Compose files must reference an env_file or mounted secret file and must not contain secret values.',
+    macos
+      ? `Store service credentials under ${home ? `${home}/.webminai/credentials/<service>` : 'the unavailable verified runtime home; do not generate service credentials until signed inventory establishes it'}. Use umask 077, directory mode 0700 and files mode 0600, private to that owner and root. Compose must use protected env_file or secret mounts, never secret values.`
+      : 'Store service credentials in a dedicated root-only directory named /root/<service>_credentials with directory mode 0700 and files mode 0600. Use umask 077 before generation. Compose files must reference an env_file or mounted secret file and must not contain secret values.',
     'Commands that generate or handle credentials must suppress their values. Never use set -x, cat a credential file, docker compose config, or docker inspect in a way that can expose environment variables. Verify only file existence, ownership, modes, service health, and non-secret endpoints.'
   ]
+  if (macos) {
+    if (!home) return [...rules, 'The verified Colima owner is unavailable. Do not plan container deployment or managed service credential generation, and never guess a home directory. Native macOS work remains subject to the supplied inventory, policy and normal approval.']
+    rules.push(`For every Docker operation, unset DOCKER_CONTEXT and set HOME=${home} and DOCKER_HOST=unix://${home}/.colima/default/docker.sock. Include /usr/local/bin and /opt/homebrew/bin in PATH. Use only the reviewed Colima runtime, not Docker Desktop or Linux Docker Engine packages. Verify docker buildx version before any image build; missing Buildx requires the reviewed Colima setup task.`)
+  }
   if (docker.preferred === true) {
     rules.push(
       'Prefer Docker Compose for a long-running deployable service unless the user explicitly requires a native installation or the service is incompatible with containers.',
-      `Put each managed Compose application at /opt/webminai/services/<service>/compose.yaml and use ${docker.composeCommand ?? 'docker compose'} rather than docker run. Pin an explicit image version when practical and provide a reversible Compose teardown that preserves anything that predated the task.`,
+      `Put each managed Compose application at ${macos ? `${home}/.webminai/services/<service>/compose.yaml` : '/opt/webminai/services/<service>/compose.yaml'} and use ${macos ? 'docker compose' : docker.composeCommand ?? 'docker compose'} rather than docker run. Pin an explicit image version when practical and provide a reversible Compose teardown that preserves anything that predated the task.`,
       'When a deployment needs multiple large images, acquire each pinned image in its own independently retryable acquire-phase command. Do not hide several docker pulls inside one opaque long job; record pre-existing image IDs before acquisition and keep per-image progress/failure attribution.',
       docker.ready === true
         ? 'Docker and Compose are ready; do not reinstall them.'
-        : `Docker is supported but not ready. Include a reversible, idempotent ${docker.installMethod ?? 'platform-appropriate'} Docker Engine and Compose installation before deploying the service; preserve any pre-existing repository, package, service, configuration, and data state.`
+        : macos ? 'Colima is not ready. Plan only the reviewed Colima prerequisite before deploying applications; preserve pre-existing profiles, packages, plugins and data.' : `Docker is supported but not ready. Include a reversible, idempotent ${docker.installMethod ?? 'platform-appropriate'} Docker Engine and Compose installation before deploying the service; preserve any pre-existing repository, package, service, configuration, and data state.`
     )
   } else {
     rules.push('Do not use Docker or install Docker for this task. Use a native service plan when appropriate; the user can change the per-host Docker preference before planning if Docker is desired.')

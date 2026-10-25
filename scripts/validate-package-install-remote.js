@@ -11,7 +11,7 @@ const NODE_VERSION = '24.16.0'
 const TARGETS = [
   { serverId: 'webminai-ubuntu-2404', platform: 'linux' },
   { serverId: 'webminai-freebsd-15-1', platform: 'freebsd' },
-  { serverId: 'macos-15', platform: 'macos', credentialEnv: 'SSH_HOST_MAC_PWD' },
+  { serverId: process.env.WEBMINAI_MACOS_SERVER_ID ?? 'macos-15', platform: 'macos', credentialEnv: 'SSH_HOST_MAC_PWD' },
   { serverId: 'windows-11', platform: 'windows', credentialEnv: 'SSH_HOST_PWD' }
 ]
 
@@ -48,7 +48,7 @@ async function validateTarget (target, tarball) {
   try {
     await session.ssh.execute(server.connectionUrl, createDirectoryCommand(target.platform, remoteDirectory), { timeoutMs: 30000 })
     await session.ssh.copy(server.connectionUrl, tarball, remoteTarball, { timeoutMs: 120000 })
-    const result = await session.ssh.execute(server.connectionUrl, validationCommand(target.platform, remoteDirectory), { timeoutMs: 300000 })
+    const result = await session.ssh.execute(server.connectionUrl, validationCommand(target.platform, remoteDirectory), { timeoutMs: target.platform === 'macos' ? 900000 : 300000 })
     if (!result.stdout.includes('PACKAGE_INSTALL_OK')) throw new Error(`${target.serverId} did not return its package-install marker`)
     process.stdout.write(`PASS: ${target.serverId} (${target.platform}) installed dist/intent-ai-ops.tgz and ran Intent AI Ops\n`)
   } finally {

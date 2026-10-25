@@ -293,9 +293,9 @@ export class TaskStore {
     const jobs = new Map()
     for (const event of events) {
       if (!event.commandId || ['plan_approved', 'execution_recovery'].includes(event.type) || event.metadata.operation === 'rollback') continue
+      if (event.attemptId && event.metadata.jobId) jobs.set(`${event.commandId}:${event.attemptId}`, event.metadata.jobId)
       if (event.revision !== fingerprint && event.type !== 'command_completed') continue
       latest.set(event.commandId, event)
-      if (event.metadata.jobId) jobs.set(event.commandId, event.metadata.jobId)
     }
     return (task.plan?.commands ?? []).map(item => {
       const event = latest.get(item.id)
@@ -304,7 +304,7 @@ export class TaskStore {
         : event.type === 'command_completed'
           ? 'completed'
           : event.type === 'command_failed' ? 'failed' : 'uncertain'
-      return { commandId: item.id, status, attemptId: event?.attemptId ?? null, jobId: jobs.get(item.id) ?? null }
+      return { commandId: item.id, status, attemptId: event?.attemptId ?? null, jobId: jobs.get(`${item.id}:${event?.attemptId}`) ?? null }
     })
   }
 
@@ -315,9 +315,9 @@ export class TaskStore {
       if (event.metadata.operation !== 'rollback' || !event.commandId || ['plan_approved', 'execution_recovery'].includes(event.type)) continue
       const key = `${event.metadata.rollbackRevision}:${event.commandId}`
       latest.set(key, event)
-      if (event.metadata.jobId) jobs.set(key, event.metadata.jobId)
+      if (event.attemptId && event.metadata.jobId) jobs.set(`${key}:${event.attemptId}`, event.metadata.jobId)
     }
-    return [...latest.entries()].map(([key, event]) => ({ commandId: event.commandId, attemptId: event.attemptId, rollbackRevision: event.metadata.rollbackRevision, jobId: jobs.get(key) ?? null, status: event.type === 'command_completed' ? 'completed' : event.type === 'command_failed' ? 'failed' : event.type === 'command_prepared' ? 'pending' : 'uncertain' }))
+    return [...latest.entries()].map(([key, event]) => ({ commandId: event.commandId, attemptId: event.attemptId, rollbackRevision: event.metadata.rollbackRevision, jobId: jobs.get(`${key}:${event.attemptId}`) ?? null, status: event.type === 'command_completed' ? 'completed' : event.type === 'command_failed' ? 'failed' : event.type === 'command_prepared' ? 'pending' : 'uncertain' }))
   }
 
   savePlan (serverId, taskId, plan) {

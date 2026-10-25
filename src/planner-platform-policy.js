@@ -1,5 +1,7 @@
 import { detectPersistedPlatform } from './platform-identity.js'
 
+const COMPOSE_INVOCATION = /\b(?:docker\s+compose|docker-compose(?:\.exe)?)(?![A-Za-z0-9_.-])/iu
+
 export function detectPlannerPlatform (inventory) {
   return detectPersistedPlatform(inventory) ?? 'unknown'
 }
@@ -76,10 +78,14 @@ export function validateWindowsPlan (plan, inventory, request) {
 }
 
 export function validateDockerAndSecrets (plan, inventory) {
-  const items = [...plan.commands, ...plan.revertCommands]
+  const macos = detectPlannerPlatform(inventory) === 'macos'
+  const observedHome = inventory?.webminaiExecution?.runtimeHome
+  const home = /^\/Users\/[a-z_][a-z0-9_-]{0,31}$/u.test(observedHome ?? '') ? observedHome : null
+  const originalItems = [...plan.commands, ...plan.revertCommands]
+  const items = macos ? macosPolicyItems(originalItems, home) : originalItems
   const commandText = items.map(item => item.command).join('\n')
   const docker = inventory?.webminaiDocker
-  const usesDocker = /\bdocker(?:-compose|\s+compose|\s+run)\b/iu.test(commandText)
+  const usesDocker = COMPOSE_INVOCATION.test(commandText) || /\bdocker\s+run\b/iu.test(commandText)
   if (usesDocker && docker?.preferred !== true) {
     throw new Error(`Docker is not enabled by this host's effective Docker preference: ${docker?.reason ?? 'unavailable'}`)
   }
@@ -97,7 +103,7 @@ export function validateDockerAndSecrets (plan, inventory) {
     if (/\bcat\s+(?:--\s+)?['"]?\/root\/[^\s'"]*_credentials(?:\/[^\s'"]*)?/iu.test(visible)) return true
     return /\bcat[ \t]+(?:(?:[A-Za-z0-9_./=+,:@%-]+|'[^'\r\n]*'|"[^"\r\n]*")[ \t]+)*(?:<[ \t]*)?['"]?\/root\/[^\s'"]*_credentials(?:\/|\b)/iu.test(visible)
   })) {
-    throw new Error('commands must not print root-only service credential files')
+    throw new Error('commands must not print protected service credential files')
   }
   const literals = commandText.matchAll(/\b(?:password|passwd|token|secret|api[_-]?key|username|login)\s*[:=]\s*['"]?(?!['"$%<{(])[^\s'";]{6,}/giu)
   const hasPrivateLiteral = [...literals].some(match => {
@@ -109,14 +115,28 @@ export function validateDockerAndSecrets (plan, inventory) {
   }
   const generatesSecret = /openssl\s+rand|\/dev\/(?:u?random)\b/iu.test(commandText)
   if (generatesSecret && !/\/root\/[A-Za-z0-9_.-]+_credentials(?:\/|\b)/u.test(commandText)) {
-    throw new Error('generated service credentials must be stored under /root/<service>_credentials')
+    throw new Error(macos ? 'generated macOS service credentials must use the verified runtime home under .webminai/credentials/<service>' : 'generated service credentials must be stored under /root/<service>_credentials')
   }
   if (generatesSecret && !/\bumask\s+0?77\b/u.test(commandText)) {
     throw new Error('credential generation must set umask 077')
   }
-  if (/\b(?:docker\s+compose|docker-compose)\b/iu.test(commandText) && !plan.modifiedFiles.some(file => /^\/opt\/webminai\/services\/[^/]+\/(?:compose\.ya?ml|docker-compose\.ya?ml)$/u.test(file))) {
-    throw new Error('Docker Compose service plans must list /opt/webminai/services/<service>/compose.yaml in modifiedFiles')
+  const configListed = macos
+    ? home && plan.modifiedFiles.some(file => file.startsWith(`${home}/.webminai/services/`) && /^[A-Za-z0-9][A-Za-z0-9_-]*\/(?:compose\.ya?ml|docker-compose\.ya?ml)$/u.test(file.slice(`${home}/.webminai/services/`.length)))
+    : plan.modifiedFiles.some(file => /^\/opt\/webminai\/services\/[^/]+\/(?:compose\.ya?ml|docker-compose\.ya?ml)$/u.test(file))
+  if (COMPOSE_INVOCATION.test(commandText) && !configListed) {
+    throw new Error(macos ? 'macOS Compose plans must list the service compose.yaml under the verified runtime home in .webminai/services' : 'Docker Compose service plans must list /opt/webminai/services/<service>/compose.yaml in modifiedFiles')
   }
+}
+
+function macosPolicyItems (items, home) {
+  const prefix = home ? new RegExp(`${home}/\\.webminai/credentials/([A-Za-z0-9_-]+)(?=/|['"\\s]|$)`, 'gu') : null
+  return items.map(item => {
+    if (/\/root\/[A-Za-z0-9_.-]+_credentials(?:\/|\b)/u.test(item.command)) throw new Error('macOS service credentials must use the verified runtime owner, not Linux root paths')
+    // Reuse credential checks on an inspection copy, never rewrite executable plans.
+    const command = prefix ? item.command.replace(prefix, '/root/$1_credentials') : item.command
+    if (command.includes('/.webminai/credentials/')) throw new Error('macOS credential paths must match the verified runtime owner and a fixed service name')
+    return { ...item, command }
+  })
 }
 
 export function validateNetdataFunctions (plan, inventory) {

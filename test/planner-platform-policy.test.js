@@ -26,6 +26,8 @@ function planWith (command, overrides = {}) {
   }
 }
 
+const macosInventory = { webminaiExecution: { platform: 'macos', runtimeHome: '/Users/mac' }, webminaiDocker: { preferred: true } }
+
 test('planner platform detection preserves inventory precedence and unknown fallback', () => {
   assert.equal(detectPlannerPlatform({ os: 'linux', platform: { os: 'Windows_NT' } }), 'windows')
   assert.equal(detectPlannerPlatform({ info: { agents: [{ application: { kernel: 'FreeBSD 15.1' } }] } }), 'freebsd')
@@ -57,6 +59,44 @@ test('Docker credential policy and Netdata function policy remain independent', 
   assert.doesNotThrow(() => validateNetdataFunctions(netdataPlan, {
     functions: { functions: [{ name: 'webminai:health' }] }
   }))
+})
+
+test('Docker metadata filenames do not require a Compose deployment route', () => {
+  const command = "test -f '/var/db/webminai/task-state/22-macos-colima/docker-compose.existed'; test ! -e '/var/db/webminai/task-state/22-macos-colima/docker-compose.created'"
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith(command), { webminaiDocker: { preferred: false } }))
+  for (const invocation of ['docker compose version', 'docker-compose version', 'docker-compose.exe version']) {
+    assert.throws(() => validateDockerAndSecrets(planWith(invocation), { webminaiDocker: { preferred: false } }), /Docker is not enabled/u)
+  }
+})
+
+test('macOS Compose routes use only the signed runtime owner service directory', () => {
+  const command = 'docker compose -p app up -d'
+  const valid = planWith(command, { modifiedFiles: ['/Users/mac/.webminai/services/app/compose.yaml'] })
+  assert.doesNotThrow(() => validateDockerAndSecrets(valid, macosInventory))
+  for (const file of ['/opt/webminai/services/app/compose.yaml', '/Users/other/.webminai/services/app/compose.yaml', '/Users/mac/.webminai/services/../compose.yaml']) {
+    assert.throws(() => validateDockerAndSecrets(planWith(command, { modifiedFiles: [file] }), macosInventory), /verified runtime home/u)
+  }
+  assert.throws(() => validateDockerAndSecrets(valid, { ...macosInventory, webminaiExecution: { platform: 'macos' } }), /verified runtime home/u)
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith('uptime'), { webminaiExecution: { platform: 'macos' } }))
+})
+
+test('macOS credential generation requires the observed owner and private storage', () => {
+  const command = "umask 077; openssl rand -hex 24 > '/Users/mac/.webminai/credentials/app/key'"
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith(command), macosInventory))
+  for (const invalid of [command.replace('/Users/mac', '/Users/other'), command.replace('/Users/mac/.webminai/credentials/app', '/root/app_credentials'), command.replace('umask 077;', ''), command.replace('/Users/mac/.webminai/credentials/app', '/tmp')]) {
+    assert.throws(() => validateDockerAndSecrets(planWith(invalid), macosInventory), /credential|umask/u)
+  }
+  assert.throws(() => validateDockerAndSecrets(planWith(command), { webminaiExecution: { platform: 'macos' } }), /verified runtime owner/u)
+})
+
+test('macOS private handoff validation preserves executable commands and redacts execution results', async () => {
+  const command = "set -eu; key=$(cat '/Users/mac/.webminai/credentials/n8n/encryption_key'); umask 077; printf 'N8N_ENCRYPTION_KEY=%s\\n' \"$key\" > '/Users/mac/.webminai/credentials/n8n/service.env'"
+  const plan = planWith(command, { summary: 'Private macOS handoff', changeOverview: 'Write only protected configuration' })
+  assert.doesNotThrow(() => validateDockerAndSecrets(plan, macosInventory))
+  assert.equal(plan.commands[0].command, command)
+  const results = await executeApprovedPlan({ plan, policy: {}, netdata: { async runCommand () { return { exitCode: 0, stdout: 'synthetic-private-key-value', stderr: 'synthetic-private-key-value' } } }, approve: async () => true })
+  assert.equal(results[0].result.stdout, '[redacted sensitive output]')
+  assert.equal(results[0].result.stderr, '[redacted sensitive output]')
 })
 
 test('published Joomla login is not a secret and cannot exempt password or arbitrary login literals', () => {
@@ -102,5 +142,7 @@ for (const command of [
 ]) {
   test(`private credential write exemption does not allow disclosure: ${command.slice(0, 35)}`, () => {
     assert.throws(() => validateDockerAndSecrets(planWith(command), {}), /credential|shell tracing/u)
+    const macos = command.replaceAll('/root/n8n_credentials', '/Users/mac/.webminai/credentials/n8n').replaceAll('/root/other_credentials', '/Users/mac/.webminai/credentials/other')
+    assert.throws(() => validateDockerAndSecrets(planWith(macos), macosInventory), /credential|shell tracing/u)
   })
 }
