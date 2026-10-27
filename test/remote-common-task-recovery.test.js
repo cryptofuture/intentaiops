@@ -350,6 +350,39 @@ test('Windows storage uses fixed CNG, protected ACLs and durable publication rat
   assert.doesNotMatch(command, /openssl|\/var\/lib/u)
 })
 
+test('Windows record pages bound requests, response bytes, records and read-only execution', async () => {
+  const executionId = 'a'.repeat(32)
+  for (const parameters of [{ sequence: 0, limit: 1 }, { sequence: 1, limit: 33 }, { sequence: 100000, limit: 2 }]) await assert.rejects(recoveryStorageCommand('windows', 'read-page', { executionId, ...parameters }), /record page/u)
+  await assert.rejects(recoveryStorageCommand('linux', 'read-page', { executionId, sequence: 1, limit: 1 }), /record page/u)
+  for (const response of [{ records: [] }, { records: [null, null] }, { records: [{}], extra: true }, { records: [{ payload: 'a'.repeat(8192) }] }]) {
+    const transport = new RemoteRecoveryTransport({ platform: 'windows', client: { async runCommand (_command, options) { assert.equal(options.timeoutSeconds, 15); return { exitCode: 0, stdout: JSON.stringify(response) } } } })
+    await assert.rejects(transport.readPage(executionId, 1, 1), /record page/u)
+  }
+  const transport = new RemoteRecoveryTransport({ platform: 'windows', client: { async runCommand () { return { exitCode: 0, stdout: JSON.stringify({ records: Array(8).fill({ payload: 'a'.repeat(7000) }) }) } } } })
+  await assert.rejects(transport.readPage(executionId, 1, 8), /response exceeds limit/u)
+})
+
+test('batched retrieval still verifies every signature and chain position', async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'intent-recovery-pages-'))
+  try {
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+    const key = { publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString(), fingerprint: recoveryKeyFingerprint(publicKey) }
+    const plan = buildCommonTask('systemd-service', 61, options).plan
+    const manifest = { ...commonTaskRecoveryManifest({ catalogId: 'systemd-service', taskId: 61, target, options, plan }), executionId: 'a'.repeat(32) }
+    const first = signRecoveryRecord(recoveryRecord(manifest, { type: 'plan_approved' }, { sequence: 1 }), privateKey)
+    const second = signRecoveryRecord(recoveryRecord(manifest, { type: 'execution_paused' }, { sequence: 2, previousHash: planFingerprint(first) }), privateKey)
+    const state = new RemoteRecoveryState(directory)
+    let pages = 0
+    const transport = { key: async () => key, list: async () => ({ executions: [{ executionId: manifest.executionId, sequence: 2, head: planFingerprint(second) }] }), readPage: async (_id, sequence, limit) => { pages++; assert.equal(sequence, 1); assert.equal(limit, 2); return [first, second] } }
+    assert.equal((await retrieveRecoveryExecution({ transport, state, target, executionId: manifest.executionId })).records.length, 2)
+    assert.equal(pages, 1)
+    for (const records of [[second, first], [first, first], [first, { ...second, signature: first.signature }], []]) {
+      transport.readPage = async () => records
+      await assert.rejects(retrieveRecoveryExecution({ transport, state, target, executionId: manifest.executionId }), /signature|gap|record page/u)
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
 test('signature-verified arbitrary remote fields cannot become executable recovery code', () => {
   const { privateKey } = generateKeyPairSync('ed25519')
   const plan = buildCommonTask('systemd-service', 63, options).plan

@@ -155,6 +155,10 @@ noninteractive key/agent authentication can work; password-only direct sessions
 fail instead of forwarding login passwords through the browser. Native PTY
 support comes from optional `node-pty`; a missing native build disables the
 shell, not the rest of the CLI. Windows clients require working ConPTY support.
+The Windows lab verified installed ConPTY backend output, resize, input
+deduplication and exit cleanup using a local console fixture. This is not a live
+Windows-client key-authenticated browser SSH test. Natural exit now releases the
+ConPTY worker so a closed terminal cannot keep the application process alive.
 
 There is at most one interactive shell per host and eight per workspace.
 Each holds the same cross-process host ownership used by managed changes.

@@ -5,7 +5,7 @@ if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'
 if ($Request.Length -gt 20000) { throw 'Recovery request exceeds limit' }
 $requestObject = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Request)) | ConvertFrom-Json
 $operation = [string]$requestObject.operation
-if ($operation -notin @('key','initialize','list','read','claim','append','release','rotate-key','verification-key','ownership','takeover')) { throw 'Unsupported recovery operation' }
+if ($operation -notin @('key','initialize','list','read','read-page','claim','append','release','rotate-key','verification-key','ownership','takeover')) { throw 'Unsupported recovery operation' }
 $root = 'C:\ProgramData\IntentAIOps\Recovery'
 $base = 'C:\ProgramData\IntentAIOps'
 $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
@@ -189,6 +189,23 @@ try {
     if ($execution -cnotmatch '^[a-f0-9]{32}$' -or $sequence -lt 0 -or $sequence -gt 100000) { throw 'Invalid recovery execution' }
     $directory = Join-Path $root $execution
     if ($operation -eq 'read') { if ($sequence -lt 1) { throw 'Invalid sequence' }; Assert-Private $directory; Write-Output (Read-Bounded (Join-Path $directory ($sequence.ToString()+'.json'))); return }
+    if ($operation -eq 'read-page') {
+        $limit = [int]$requestObject.limit
+        if ($sequence -lt 1 -or $limit -lt 1 -or $limit -gt 32 -or $sequence+$limit-1 -gt 100000) { throw 'Invalid record page' }
+        Assert-Private $directory
+        $records = @()
+        $bytes = 16
+        for ($offset=0; $offset -lt $limit; $offset++) {
+            $record = Read-Bounded (Join-Path $directory (($sequence+$offset).ToString()+'.json'))
+            $length = $utf8.GetByteCount($record)+1
+            if ($bytes+$length -gt 49152) { break }
+            $records += $record
+            $bytes += $length
+        }
+        if ($records.Count -eq 0) { throw 'Empty record page' }
+        Write-Output ('{"records":['+($records -join ',')+']}')
+        return
+    }
     $head = [string]$requestObject.head
     if ($operation -eq 'ownership') {
         Assert-Private $directory

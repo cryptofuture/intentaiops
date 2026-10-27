@@ -221,7 +221,7 @@ execution. These fixtures made no host application changes.
 1. Finish Magento. Moodle task 25 passed and is cleaned. Colima task 23 remains
    applied and retained. Moodle task 21 is cleaned and task 24 was never
    dispatched; neither may be replayed.
-2. Run `INTENT_MACOS_INTERVENTION=1 INTENT_WEB_DATA_ROOT=/home/vscode/.intentaiops INTENT_BROWSER_EXECUTABLE=/usr/bin/google-chrome npm run test:web -- browser-checks/macos-intervention.spec.js`.
+2. Run `INTENT_MACOS_INTERVENTION=1 INTENT_WEB_DATA_ROOT=/home/vscode/.intentaiops INTENT_BROWSER_EXECUTABLE=/usr/bin/google-chrome npm run test:web -- browser-checks/host-intervention.spec.js`.
    This actual-CLI browser fixture tests abort, explicit revision approval and
    a real Codex read-only consultation. It never executes AI-proposed commands.
    Do not treat catalog execution as AI-planning coverage. Both tests passed;

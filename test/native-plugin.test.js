@@ -111,16 +111,22 @@ test('native plugin starts, polls, cancels, and cleans durable command jobs', as
     transaction++
     return session.request(`job-tx-${transaction}`, functionName, createSignedCommand(value, ACTION_KEY))
   }
-  const command = 'printf job-started; sleep 2; printf -- "\\njob-finished\\n"'
-  const startRequest = `timeoutSeconds=10\ncommand=${Buffer.from(command).toString('base64url')}`
+  const completeFile = path.join(directory, 'complete-job')
+  const command = `printf job-started; i=0; while [ ! -f '${completeFile}' ]; do i=$((i+1)); [ "$i" -lt 600 ] || exit 1; sleep 0.05; done; printf -- "\\njob-finished\\n"`
+  const startRequest = `timeoutSeconds=30\ncommand=${Buffer.from(command).toString('base64url')}`
   const started = await request('job_start', startRequest)
   assert.equal(started.statusCode, 202)
   assert.match(started.body.jobId, /^[a-f0-9]{32}$/u)
 
-  await new Promise(resolve => setTimeout(resolve, 700))
-  const running = await request('job_status', started.body.jobId)
+  let running
+  for (let attempt = 0; attempt < 60; attempt++) {
+    running = await request('job_status', started.body.jobId)
+    if (Buffer.from(running.body.stdout, 'base64').toString() === 'job-started') break
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
   assert.equal(running.body.state, 'running')
   assert.equal(Buffer.from(running.body.stdout, 'base64').toString(), 'job-started')
+  await writeFile(completeFile, '')
 
   let completed
   for (let attempt = 0; attempt < 20; attempt++) {

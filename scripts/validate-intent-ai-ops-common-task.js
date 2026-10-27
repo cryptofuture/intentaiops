@@ -142,7 +142,8 @@ async function recoverPartialValidation (admin, server, serverId, catalogId, pla
     const state = platform === 'windows'
       ? `C:\\ProgramData\\WebminAI\\Tasks\\${task.id}-intent-ai-ops-install`
       : `/var/db/webminai/task-state/${task.id}-intent-ai-ops-install`
-    const root = platform === 'windows' ? 'C:\\ProgramData\\IntentAIOps' : '/usr/local/share/intent-ai-ops'
+    const root = platform === 'windows' ? 'C:\\ProgramData\\IntentAIOps\\Cli' : '/usr/local/share/intent-ai-ops'
+    if (platform === 'windows' && !task.plan?.modifiedFiles.includes(root)) throw new Error('Legacy Windows CLI cleanup requires operator review; preserve the recovery ledger parent')
     const command = platform === 'windows'
       ? `$state='${state}';$root='${root}';if((Test-Path -LiteralPath (Join-Path $state 'baseline'))-and-not(Test-Path -LiteralPath (Join-Path $state 'root.existed'))-and-not(Test-Path -LiteralPath (Join-Path $state 'installed'))){Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath $state -Recurse -Force}`
       : `state='${state}'; root='${root}'; if [ -e "$state/baseline" ] && [ ! -e "$state/root.existed" ] && [ ! -e "$state/installed" ]; then rm -rf -- "$root" "$state"; fi`

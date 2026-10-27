@@ -1,4 +1,5 @@
-import { validateDiagnostic } from './deployment-phases.js'
+import { validateDiagnostic, isWindowsComposeTarget } from './deployment-phases.js'
+import { windowsDockerPowerShellAdapter } from './windows-compose-foundation.js'
 import { containerRuntimeDiagnostics } from './workload-execution-evidence.js'
 import { observation } from './execution-diagnostics.js'
 
@@ -7,6 +8,7 @@ export async function collectComposeEvidence (client, diagnostic, startedAt, { p
   validateDiagnostic(diagnostic)
   const format = '{"Id":{{json .Id}},"State":{"OOMKilled":{{json .State.OOMKilled}},"ExitCode":{{json .State.ExitCode}},"FinishedAt":{{json .State.FinishedAt}},"Health":{"Status":{{with index .State "Health"}}{{json .Status}}{{else}}null{{end}}}}}'
   try {
+    if (platform === 'windows') return await collectWindowsComposeEvidence(client, diagnostic, startedAt, format)
     let context = ''
     if (platform !== undefined && !['linux', 'freebsd', 'macos'].includes(platform)) throw new Error('Unverified runtime platform')
     if (platform === 'macos') {
@@ -26,6 +28,24 @@ export async function collectComposeEvidence (client, diagnostic, startedAt, { p
   } catch {
     return [observation('EVIDENCE_UNAVAILABLE', 'unknown', 'container', 'runtime-inspect', 'Container runtime inspection failed or was unavailable. No cause is inferred.')]
   }
+}
+
+async function collectWindowsComposeEvidence (client, diagnostic, startedAt, format) {
+  if (!isWindowsComposeTarget(diagnostic.target)) throw new Error('Unverified Windows Compose path')
+  const prefix = windowsDockerPowerShellAdapter(3000)
+  const filter = `label=com.docker.compose.project.working_dir=${diagnostic.target.replaceAll('/', '\\')}`
+  const listing = await client.runCommand(`${prefix};& $docker ps --all --quiet --no-trunc --filter '${filter}';if($LASTEXITCODE -ne 0){throw 'Windows Compose enumeration failed'}`, { timeoutSeconds: 5 })
+  if (listing.exitCode !== 0 || listing.stdoutTruncated || String(listing.stdout ?? '').length > 1024) throw new Error('Container enumeration unavailable')
+  const ids = String(listing.stdout ?? '').trim().split(/\r?\n/u).filter(Boolean)
+  if (!ids.length || ids.length > 13 || ids.some(id => !/^[a-f0-9]{64}$/u.test(id)) || new Set(ids).size !== ids.length) throw new Error('Invalid container identities')
+  const selected = ids.slice(0, 12)
+  const result = await client.runCommand(`${prefix};& $docker inspect --type container --format '${format}' ${selected.join(' ')};if($LASTEXITCODE -ne 0){throw 'Windows container inspection failed'}`, { timeoutSeconds: 5 })
+  if (result.exitCode !== 0 || result.stdoutTruncated || String(result.stdout ?? '').length > 16384) throw new Error('Container inspection unavailable')
+  const records = String(result.stdout ?? '').trim().split(/\r?\n/u).filter(Boolean).map(line => JSON.parse(line))
+  if (records.length !== selected.length || new Set(records.map(record => record.Id)).size !== records.length || records.some(record => !selected.includes(record.Id))) throw new Error('Container identity changed')
+  const diagnostics = records.flatMap(record => containerRuntimeDiagnostics(record, { id: record.Id, startedAt }))
+  if (ids.length > 12) diagnostics.push(observation('EVIDENCE_UNAVAILABLE', 'unknown', 'container', 'runtime-inspect', 'Container evidence was limited to twelve project containers.', { availability: 'truncated' }))
+  return diagnostics
 }
 
 export async function collectContainerEvidence (client, { runtime, id, startedAt }) {

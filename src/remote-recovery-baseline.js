@@ -1,7 +1,9 @@
 import { n8nRecoveryBaselineCommand } from './n8n-recovery-baseline.js'
+import { readFileSync } from 'node:fs'
 
 export function recoveryBaselineCommand (catalogId, taskId, family) {
   if (!Number.isSafeInteger(taskId) || taskId < 1 || taskId > 2147483647) throw new Error('Invalid recovery baseline task identity')
+  if (catalogId === 'intent-ai-ops-windows') return `& {${readFileSync(new URL('../remote/windows-cli-recovery-baseline.ps1', import.meta.url), 'utf8')}\n} -TaskId ${taskId}`
   if (catalogId === 'intent-ai-ops-linux') return cliInstallBaselineCommand(taskId)
   if (catalogId === 'n8n-linux') return n8nRecoveryBaselineCommand(taskId, family)
   const files = {
@@ -80,7 +82,7 @@ function cliInstallBaselineCommand (taskId) {
 }
 
 export async function inspectRecoveryBaseline (client, catalogId, taskId, family) {
-  const result = await client.runCommand(recoveryBaselineCommand(catalogId, taskId, family), { timeoutSeconds: 10 })
+  const result = await client.runCommand(recoveryBaselineCommand(catalogId, taskId, family), { timeoutSeconds: catalogId === 'intent-ai-ops-windows' ? 60 : 10 })
   if (result.exitCode !== 0 || result.stdoutTruncated || result.stderrTruncated || Buffer.byteLength(result.stdout ?? '') > 256) throw new Error('Recovery baseline ownership or integrity inspection failed')
   const match = /^(?:SHA2?-?256\([^\n]*\)|SHA256|\(stdin\))?\s*=?\s*([a-f0-9]{64})\s*$/u.exec(result.stdout.trim())
   if (!match) throw new Error('Invalid recovery baseline digest')
@@ -90,6 +92,7 @@ export async function inspectRecoveryBaseline (client, catalogId, taskId, family
 export function guardRecoveryBaseline (command, catalogId, taskId, digest, family) {
   if (!/^[a-f0-9]{64}$/u.test(digest)) throw new Error('Invalid expected recovery baseline digest')
   const probe = recoveryBaselineCommand(catalogId, taskId, family)
+  if (catalogId === 'intent-ai-ops-windows') return { ...command, command: `$ErrorActionPreference='Stop';$observed=${probe};if($observed -cne '${digest}'){throw 'RECOVERY_BASELINE_CHANGED'};${command.command}` }
   const check = `observed=$(sh -c ${quote(probe)}); observed=\${observed##* }; [ "$observed" = ${quote(digest)} ] || { printf '%s\\n' 'RECOVERY_BASELINE_CHANGED' >&2; exit 1; }`
   return { ...command, command: `set -eu; ${check}; ${command.command}` }
 }

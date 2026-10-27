@@ -51,6 +51,7 @@ try {
     'src/remote-recovery-record.js',
     'remote/recovery-store.sh',
     'remote/recovery-store.ps1',
+    'remote/windows-cli-recovery-baseline.ps1',
     'scripts/install-better-sqlite3.js',
     'dist/SHA256SUMS',
     'dist/webminai.plugin',

@@ -34,6 +34,7 @@ import { OperatorHosts } from './operator-hosts.js'
 import { OperatorMetrics } from './operator-metrics.js'
 import { Stage2Service } from './stage2-service.js'
 import { SystemSsh } from './system-ssh.js'
+import { runInteractiveProcess } from './process-runner.js'
 import { updateIntentAiOps } from './self-update.js'
 import { TerminalUi } from './terminal-ui.js'
 import { FALLBACK_ADMIN_EMAIL, normalizeAdminEmailPreset } from './application-defaults.js'
@@ -101,6 +102,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
   const unlocked = await unlock(ui, settingsStore)
   const settings = unlocked.settings
   const baseSsh = new SystemSsh({
+    interactiveRunner: (...args) => ui.withTerminalSuspended(() => runInteractiveProcess(...args)),
     transport: settings.ssh,
     onDiagnostic: event => {
       if (cliOptions.debug && event.type !== 'channel') renderDebugEvent(ui, { phase: 'ssh-transport', message: JSON.stringify(event) })
@@ -2205,7 +2207,8 @@ export async function manageExecution ({ ui, controller, serverId, taskId }) {
     const view = controller.inspect(serverId, taskId)
     const localTask = controller.tasks.get(serverId, taskId)
     const localRevisions = controller.tasks.revisions(serverId, taskId)
-    const refreshableCatalog = localTask.kind === 'catalog' && listCommonTasks({ category: 'application' }).find(definition => definition.id === localTask.catalogId && ['linux', 'freebsd'].includes(definition.platform) && (!definition.prerequisite || definition.id === 'podman-freebsd'))
+    const refreshableCatalog = localTask.kind === 'catalog' && listCommonTasks({ category: 'application' }).find(definition => definition.id === localTask.catalogId && ['linux', 'freebsd', 'windows'].includes(definition.platform) && (!definition.prerequisite || definition.id === 'podman-freebsd'))
+    const catalogPlatform = { linux: 'native Linux', freebsd: 'native FreeBSD', windows: 'Windows' }[refreshableCatalog?.platform]
     ui.clear()
     ui.banner(`Operator / ${serverId} / task #${taskId}`)
     ui.line('Task status', view.task.status)
@@ -2215,7 +2218,7 @@ export async function manageExecution ({ ui, controller, serverId, taskId }) {
       { label: 'Pause at next command boundary', value: 'pause' },
       { label: 'Ask Codex a read-only question', value: 'analyze' },
       { label: 'Revise remaining steps', value: 'propose' },
-      ...(refreshableCatalog ? [{ label: `Refresh remaining native ${refreshableCatalog.platform === 'freebsd' ? 'FreeBSD' : 'Linux'} catalog steps`, value: 'refresh-catalog' }] : []),
+      ...(refreshableCatalog ? [{ label: `Refresh remaining ${catalogPlatform} catalog steps`, value: 'refresh-catalog' }] : []),
       { label: 'Propose rollback of confirmed changes', value: 'propose-rollback' },
       { label: 'Reconcile durable remote outcomes', value: 'reconcile' },
       { label: 'Record independently verified uncertain outcome', value: 'resolve' },
@@ -2231,7 +2234,8 @@ export async function manageExecution ({ ui, controller, serverId, taskId }) {
         renderPlan(ui, localTask.plan)
         renderResults(ui, localTask.results ?? [])
         ui.output.write(`${JSON.stringify(view.revisions.map(item => ({ id: item.id, parentId: item.parentId, approved: item.approved })), null, 2)}\n`)
-      } else if (action === 'pause' || action === 'abort') controller.control(serverId, taskId, action, view.stateVersion)
+      } else if (action === 'pause') controller.control(serverId, taskId, action, controller.inspect(serverId, taskId).stateVersion)
+      else if (action === 'abort') controller.control(serverId, taskId, action, view.stateVersion)
       else if (action === 'analyze') {
         const question = await ui.editor('Read-only question')
         if (question) ui.output.write(`${(await controller.analyze(serverId, taskId, question)).answer}\n`)

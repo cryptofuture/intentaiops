@@ -7,7 +7,7 @@ import { guardRecoveryBaseline } from './remote-recovery-baseline.js'
 const RECOVERY_PROFILES = new Set(['systemd-service', 'systemd-timer', 'logrotate-rule', 'tmpfiles-rule', 'intent-ai-ops-linux', 'n8n-linux'])
 
 export function commonTaskRecoverySupported (catalogId, platform) {
-  return platform === 'linux' && RECOVERY_PROFILES.has(catalogId)
+  return (platform === 'linux' && RECOVERY_PROFILES.has(catalogId)) || (platform === 'windows' && catalogId === 'intent-ai-ops-windows')
 }
 
 export function commonTaskRecoveryManifest ({ catalogId, taskId, target, options, plan }) {
@@ -90,9 +90,15 @@ export async function retrieveRecoveryExecution ({ transport, state, target, exe
   const checkpoint = state.checkpoint(target, executionId)
   if (checkpoint && (checkpoint.sequence > current.sequence || (checkpoint.sequence === current.sequence && checkpoint.head !== current.head))) throw new Error('Remote recovery history is older than or conflicts with the local checkpoint')
   let verified = { records: [], sequence: 0, head: null }
+  let pending = []
   for (let sequence = 1; sequence <= current.sequence; sequence++) {
     if (Date.now() >= deadline) throw new Error('Remote recovery retrieval deadline exceeded')
-    const envelope = await transport.read(executionId, sequence)
+    if (!pending.length) {
+      const limit = Math.min(32, current.sequence - sequence + 1)
+      pending = typeof transport.readPage === 'function' ? await transport.readPage(executionId, sequence, limit) : [await transport.read(executionId, sequence)]
+      if (!Array.isArray(pending) || !pending.length || pending.length > limit) throw new Error('Invalid remote recovery record page')
+    }
+    const envelope = pending.shift()
     let verificationTrust = trust
     if (envelope.keyFingerprint !== trust.pinnedFingerprint) {
       verificationTrust = state.trustedKey(target, envelope.keyFingerprint)
@@ -113,7 +119,7 @@ export function regenerateCommonTaskRecovery ({ records, head, options, baseline
   const original = records[0]
   if (!commonTaskRecoverySupported(original.catalogId, original.platform)) throw new Error('Common-task baseline validation is not registered for this task family')
   if (original.catalogId === 'intent-ai-ops-linux' && options.linuxContext?.identity?.id === 'alpine') throw new Error('Verified CLI recovery does not yet authorize Alpine package removal')
-  if (original.platform !== (options.platform ?? 'linux') || original.platform !== 'linux') throw new Error('Recovery platform does not match the audited task profile')
+  if (original.platform !== (options.platform ?? 'linux')) throw new Error('Recovery platform does not match the audited task profile')
   const built = buildCommonTask(original.catalogId, original.taskId, options)
   if (original.catalogId === 'n8n-linux' && !built.plan.compatibilityManifest?.selectedRoute?.id?.startsWith('native-')) throw new Error('Verified n8n recovery requires the native Linux route')
   if (original.catalogId === 'n8n-linux') {

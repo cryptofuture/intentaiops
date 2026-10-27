@@ -133,8 +133,15 @@ function Set-RestrictedAcl([string]$Path, [switch]$Directory) {
 function Install-Netdata {
     $msi = Join-Path $env:TEMP ('webminai-netdata-' + [guid]::NewGuid().ToString('N') + '.msi')
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri $NetdataDownload -OutFile $msi
-        $process = Start-Process msiexec.exe -ArgumentList @('/qn', '/i', $msi, '/norestart') -Wait -PassThru
+        $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+        if (Test-Path -LiteralPath $curl -PathType Leaf) {
+            & $curl --fail --silent --show-error --location --connect-timeout 15 --max-time 600 --output $msi $NetdataDownload
+            if ($LASTEXITCODE -ne 0) { throw "Netdata download failed with curl exit code $LASTEXITCODE" }
+        } else {
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -UseBasicParsing -Uri $NetdataDownload -OutFile $msi -TimeoutSec 600 -ErrorAction Stop
+        }
+        $process = Start-Process msiexec.exe -ArgumentList @('/qn', '/i', ('"' + $msi + '"'), '/norestart') -Wait -PassThru
         if ($process.ExitCode -notin @(0, 3010)) { throw "Netdata MSI failed with exit code $($process.ExitCode)" }
     } finally {
         Remove-Item -LiteralPath $msi -Force -ErrorAction SilentlyContinue

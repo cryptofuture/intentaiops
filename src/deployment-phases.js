@@ -1,3 +1,5 @@
+import { windowsDockerPowerShellAdapter } from './windows-compose-foundation.js'
+
 export const DEPLOYMENT_PHASES = Object.freeze([
   'preflight',
   'baseline',
@@ -20,6 +22,10 @@ export function isDeploymentPhase (value) {
   return PHASE_SET.has(value)
 }
 
+export function isWindowsComposeTarget (target) {
+  return typeof target === 'string' && /^C:\/ProgramData\/WebminAI\/Services\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(target)
+}
+
 export function validateDiagnostic (diagnostic) {
   if (diagnostic === undefined || diagnostic === null) return
   if (!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic) || !DIAGNOSTICS.has(diagnostic.kind)) throw new TypeError('invalid safe diagnostic')
@@ -27,7 +33,7 @@ export function validateDiagnostic (diagnostic) {
   if (diagnostic.kind === 'http') {
     if (typeof target !== 'string' || !/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?(?:\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*)?$/u.test(target)) throw new TypeError('HTTP diagnostics are restricted to loopback URLs')
   } else if (diagnostic.kind === 'filesystem' || diagnostic.kind === 'compose') {
-    if (typeof target !== 'string' || !/^\/[A-Za-z0-9_./@+-]+$/u.test(target) || target.includes('..')) throw new TypeError('diagnostic path must be an absolute safe path')
+    if (!(diagnostic.kind === 'compose' && isWindowsComposeTarget(target)) && (typeof target !== 'string' || !/^\/[A-Za-z0-9_./@+-]+$/u.test(target) || target.includes('..'))) throw new TypeError('diagnostic path must be an absolute safe path')
   } else if (typeof target !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9+_.:@/%=-]{0,191}$/u.test(target)) {
     throw new TypeError(`${diagnostic.kind} diagnostic target must be one identifier without spaces or shell syntax; split the command or use a null diagnostic when no single target applies`)
   }
@@ -35,6 +41,9 @@ export function validateDiagnostic (diagnostic) {
 
 export function buildSafeDiagnosticCommand (diagnostic) {
   validateDiagnostic(diagnostic)
+  if (diagnostic.kind === 'compose' && isWindowsComposeTarget(diagnostic.target)) {
+    return `${windowsDockerPowerShellAdapter(3000)};& $docker ps --all --filter 'label=com.docker.compose.project.working_dir=${diagnostic.target.replaceAll('/', '\\')}' --format '{{.ID}}|{{.State}}|{{.Names}}';if($LASTEXITCODE -ne 0){throw 'Windows Compose inspection failed'}`
+  }
   const target = shellQuote(diagnostic.target)
   if (diagnostic.kind === 'package') return `if command -v apt-cache >/dev/null 2>&1; then apt-cache policy ${target}; elif command -v dnf >/dev/null 2>&1; then dnf -q info ${target}; elif command -v apk >/dev/null 2>&1; then apk policy ${target}; elif command -v pacman >/dev/null 2>&1; then pacman -Si ${target}; elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive info ${target}; else exit 127; fi`
   if (diagnostic.kind === 'service') return `if command -v systemctl >/dev/null 2>&1; then systemctl status ${target} --no-pager -n 30; elif command -v rc-service >/dev/null 2>&1; then rc-service ${target} status; else service ${target} status; fi`

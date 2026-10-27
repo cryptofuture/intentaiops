@@ -54,9 +54,17 @@ export class OperatorShells {
             runner: (binary, args) => new Promise(resolve => {
               const env = Object.fromEntries(environmentKeys.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
               const terminal = spawn(binary, args, { ...dimensions, name: 'xterm-256color', env })
+              let exited = false
               entry.terminal = terminal; entry.status = 'running'
               terminal.onData(data => this.append(entry, { type: 'output', data }))
-              terminal.onExit(result => { entry.exitCode = result.exitCode; entry.signal = result.signal ?? null; resolve({ code: result.exitCode }) })
+              terminal.onExit(result => {
+                if (exited) return
+                exited = true
+                entry.exitCode = result.exitCode; entry.signal = result.signal ?? null
+                // ConPTY retains its pipe worker after natural process exit.
+                if (process.platform === 'win32') { try { terminal.kill() } catch {} }
+                resolve({ code: result.exitCode })
+              })
               readyResolve(this.summary(entry))
             })
           })

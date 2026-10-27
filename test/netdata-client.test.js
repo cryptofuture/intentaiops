@@ -463,6 +463,25 @@ test('root readiness executes a signed host filesystem write probe', async () =>
   assert.match(signedCommand, /rm -f/)
 })
 
+test('fresh Windows privilege checks use the existing protected Stage 2 directory', async () => {
+  let signedCommand
+  const client = new NetdataClient({
+    ssh: {
+      async execute (_url, _command, options) {
+        const payload = Buffer.from(JSON.parse(options.input).payload, 'base64url').toString('utf8')
+        signedCommand = Buffer.from(payload.split('\n').find(line => line.startsWith('command=')).slice(8), 'base64url').toString('utf8')
+        return { stdout: JSON.stringify({ exitCode: 0, stdout: 'WEBMINAI_WINDOWS_SYSTEM_OK', stderr: '' }) }
+      }
+    },
+    connectionUrl: 'ssh://windows.example',
+    actionKey: ACTION_KEY
+  })
+  assert.equal((await client.windowsSystemExecutionHealth()).identity, 'system')
+  assert.match(signedCommand, /Join-Path \$env:ProgramData 'WebminAI\\webminai-system-probe-/u)
+  assert.doesNotMatch(signedCommand, /Intent AI Ops\\/u)
+  assert.match(signedCommand, /Remove-Item -LiteralPath \$path -Force/u)
+})
+
 test('Windows execution inventory records package tools visible to LocalSystem', async () => {
   let signedCommand
   const client = new NetdataClient({
@@ -506,6 +525,9 @@ test('Windows execution inventory records package tools visible to LocalSystem',
   assert.match(signedCommand, /VirtualizationFirmwareEnabled/u)
   assert.match(signedCommand, /slatReportedByProcessor/u)
   assert.match(signedCommand, /consoleUser/u)
+  assert.match(signedCommand, /Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop\|Measure-Object Capacity -Sum/u)
+  assert.match(signedCommand, /\$installedMemory -ge 8GB/u)
+  assert.match(signedCommand, /catch\{\$installedMemory=0\}/u)
   assert.match(signedCommand, /Microsoft-Windows-Subsystem-Linux/u)
 })
 
@@ -530,6 +552,19 @@ test('Netdata HTTP failures preserve only status metadata and never replay comma
     })
     assert.equal(attempts, 1)
   }
+})
+
+test('expired signed payloads suggest clock inspection without disclosing response data or replaying', async () => {
+  let attempts = 0
+  const remote = Object.assign(new Error('HTTP request failed'), { result: { code: 22, stdout: JSON.stringify({ status: 403, error: 'expired signed payload', password: 'fixture-secret' }) } })
+  const client = new NetdataClient({ ssh: { async execute () { attempts++; throw remote } }, connectionUrl: 'ssh://server.example', actionKey: ACTION_KEY })
+  await assert.rejects(client.runCommand('true'), error => {
+    assert.match(error.message, /check host\/client UTC synchronization/u)
+    assert.doesNotMatch(error.message, /fixture-secret/u)
+    assert.equal(error.netdataHttpStatus, 403)
+    return true
+  })
+  assert.equal(attempts, 1)
 })
 
 test('Netdata HTTP metadata requires bounded valid evidence from a completed curl HTTP failure', async () => {

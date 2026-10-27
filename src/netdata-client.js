@@ -86,7 +86,7 @@ export class NetdataClient {
     const marker = `webminai-system-probe-${randomUUID()}`
     const command = [
       "$ErrorActionPreference='Stop'",
-      `$path=Join-Path $env:ProgramData 'Intent AI Ops\\${marker}'`,
+      `$path=Join-Path $env:ProgramData 'WebminAI\\${marker}'`,
       "[IO.File]::WriteAllText($path,'ok',[Text.Encoding]::ASCII)",
       'Remove-Item -LiteralPath $path -Force',
       "Write-Output 'WEBMINAI_WINDOWS_SYSTEM_OK'"
@@ -108,11 +108,12 @@ export class NetdataClient {
       '$dockerCli=[bool]$dockerPath;$dockerDaemon=$false;$dockerCompose=$false;$dockerServerOs=$null;$dockerServerVersion=$null;$dockerServerArchitecture=$null',
       'if($dockerPath){$out=[IO.Path]::GetTempFileName();$err=[IO.Path]::GetTempFileName();try{$process=Start-Process -FilePath $dockerPath -ArgumentList @(\'info\',\'--format\',\'{{.OSType}}|{{.ServerVersion}}|{{.Architecture}}\') -PassThru -RedirectStandardOutput $out -RedirectStandardError $err;if($process.WaitForExit(3000)){$dockerInfo=(Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue).Trim();$fields=@($dockerInfo -split \'\\|\',3);if($fields.Count -eq 3 -and $fields[0] -in @(\'linux\',\'windows\') -and -not[string]::IsNullOrWhiteSpace($fields[1]) -and -not[string]::IsNullOrWhiteSpace($fields[2])){$dockerDaemon=$true;$dockerServerOs=$fields[0];$dockerServerVersion=$fields[1];$dockerServerArchitecture=$fields[2]}};Remove-Item -LiteralPath $out,$err -Force -ErrorAction SilentlyContinue;$out=[IO.Path]::GetTempFileName();$err=[IO.Path]::GetTempFileName();$compose=Start-Process -FilePath $dockerPath -ArgumentList @(\'compose\',\'version\') -PassThru -RedirectStandardOutput $out -RedirectStandardError $err;if($compose.WaitForExit(3000)){$composeOutput=(Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue).Trim();if($composeOutput -match \'^Docker Compose version \'){$dockerCompose=$true}}}finally{Remove-Item -LiteralPath $out,$err -Force -ErrorAction SilentlyContinue}}',
       '$os=Get-CimInstance Win32_OperatingSystem;$computer=Get-CimInstance Win32_ComputerSystem;$cpu=Get-CimInstance Win32_Processor|Select-Object -First 1',
+      '$installedMemory=[int64]$computer.TotalPhysicalMemory;if($installedMemory -lt 8GB){try{$installedMemory=[int64](Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop|Measure-Object Capacity -Sum).Sum}catch{$installedMemory=0}}',
       '$featureStates=[ordered]@{};foreach($name in @(\'Microsoft-Windows-Subsystem-Linux\',\'VirtualMachinePlatform\')){$featureStates[$name]=[string](Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction SilentlyContinue).State}',
-      '$firmwareVirtualization=[bool]($computer.HypervisorPresent -or $cpu.VirtualizationFirmwareEnabled);$slat=[bool]($computer.HypervisorPresent -or $cpu.SecondLevelAddressTranslationExtensions);$dockerInstallSupported=[bool]($os.ProductType -eq 1 -and [int]$os.BuildNumber -ge 22631 -and [Environment]::Is64BitOperatingSystem -and $computer.TotalPhysicalMemory -ge 8GB -and $slat -and $firmwareVirtualization)',
+      '$firmwareVirtualization=[bool]($computer.HypervisorPresent -or $cpu.VirtualizationFirmwareEnabled);$slat=[bool]($computer.HypervisorPresent -or $cpu.SecondLevelAddressTranslationExtensions);$dockerInstallSupported=[bool]($os.ProductType -eq 1 -and [int]$os.BuildNumber -ge 22631 -and [Environment]::Is64BitOperatingSystem -and $installedMemory -ge 8GB -and $slat -and $firmwareVirtualization)',
       '[pscustomobject]@{platform=\'windows\';identity=\'LocalSystem\';powerShellVersion=$PSVersionTable.PSVersion.ToString();is64BitProcess=[Environment]::Is64BitProcess;nativeProcessMode=\'start-process-wait\';commands=[ordered]@{winget=$winget;chocolatey=$chocolatey;msiexec=$msiexec;curl=$curl;docker=$dockerCli};bootstrap=[ordered]@{osCaption=$os.Caption;osBuild=[int]$os.BuildNumber;productType=[int]$os.ProductType;memoryBytes=[int64]$computer.TotalPhysicalMemory;consoleUser=[string]$computer.UserName;hypervisorPresent=[bool]$computer.HypervisorPresent;firmwareVirtualization=$firmwareVirtualization;slat=$slat;slatReportedByProcessor=[bool]$cpu.SecondLevelAddressTranslationExtensions;features=$featureStates;pendingReboot=[bool](Test-Path \'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending\')};docker=[ordered]@{cliAvailable=$dockerCli;daemonReachable=$dockerDaemon;composeAvailable=$dockerCompose;composeCommand=$(if($dockerCompose){\'docker compose\'}else{$null});serverOs=$dockerServerOs;serverVersion=$dockerServerVersion;serverArchitecture=$dockerServerArchitecture;installSupported=$dockerInstallSupported;installMethod=\'wsl2-docker-desktop\';virtualizationRequired=$true;virtualizationAvailable=$firmwareVirtualization;virtualizationInstructions=\'Enable AMD SVM/AMD-V or Intel VT-x in BIOS/UEFI; for a Windows VM enable nested virtualization in the outer hypervisor, fully restart Windows, and retry.\'}} | ConvertTo-Json -Depth 6 -Compress'
     ].join(';')
-    const result = await this.runCommand(command, { timeoutSeconds: 10 })
+    const result = await this.runCommand(command, { timeoutSeconds: 30 })
     if (result.exitCode !== 0) {
       throw new Error(`could not inspect the Windows execution environment: ${result.stderr.trim() || `exit ${result.exitCode}`}`)
     }
@@ -623,13 +624,16 @@ function validateJobId (jobId) {
 
 function netdataRequestError (method, path, cause) {
   let status
+  let clockHint = ''
   if (cause?.result?.code === 22 && !cause.result.timedOut && !cause.result.signal && typeof cause.result.stdout === 'string' && Buffer.byteLength(cause.result.stdout) <= 16384) {
     try {
-      const value = JSON.parse(cause.result.stdout)?.status
+      const body = JSON.parse(cause.result.stdout)
+      const value = body?.status
       if (Number.isInteger(value) && value >= 400 && value <= 599) status = value
+      if (status === 403 && body.error === 'expired signed payload') clockHint = '; signed request expired, check host/client UTC synchronization before reviewed continuation'
     } catch {}
   }
-  const error = new Error(`Netdata ${method} ${path} failed${status ? ` (HTTP ${status})` : ''}: ${cause.message}`, { cause })
+  const error = new Error(`Netdata ${method} ${path} failed${status ? ` (HTTP ${status})` : ''}${clockHint}: ${cause.message}`, { cause })
   if (status) error.netdataHttpStatus = status
   return error
 }

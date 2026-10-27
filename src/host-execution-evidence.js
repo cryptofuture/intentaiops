@@ -63,7 +63,7 @@ const WINDOWS = [
 
 export function hostEvidenceCommand (platform, filesystemTarget = '/') {
   if (filesystemTarget !== '/') validateDiagnostic({ kind: 'filesystem', target: filesystemTarget })
-  if (platform === 'windows') return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(WINDOWS, 'utf16le').toString('base64')}`
+  if (platform === 'windows') return WINDOWS
   if (['linux', 'freebsd', 'macos'].includes(platform)) return filesystemTarget === '/' ? UNIX : `${UNIX}\ndf -Pk '${filesystemTarget}' 2>/dev/null | awk 'NR == 2 {print "taskAvailableKiB=" $4}'\ndf -Pi '${filesystemTarget}' 2>/dev/null | awk 'NR == 2 {print "taskAvailableInodes=" $4}'`
   return null
 }

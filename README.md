@@ -253,9 +253,9 @@ Failure details now separate **what happened** from **why it may have happened**
 
 Use **Review a pending plan revision** to reopen a proposal you did not approve earlier. Approval leaves execution paused; **Review and resume** is a separate step.
 
-If a native Linux or FreeBSD application failed and its catalog recipe has been
+If a Linux, FreeBSD or Windows application failed and its catalog recipe has been
 fixed, choose **Refresh remaining native Linux catalog steps** or **Refresh
-remaining native FreeBSD catalog steps**. This rebuilds remaining
+remaining native FreeBSD catalog steps**, or **Refresh remaining Windows catalog steps**. This rebuilds remaining
 steps from local catalog code without an AI call. Review the new plan, approve,
 then resume. It preserves completed commands and the original rollback, and
 refuses uncertain work or incompatible catalog changes. This requires local task
@@ -276,13 +276,20 @@ Review and approve that plan before anything changes.
 
 The audited recovery profiles cover the Linux systemd service, timer, logrotate
 and tmpfiles fixtures, plus native Intent AI Ops CLI installation on non-Alpine Linux.
+Windows CLI installations also support reviewed fresh-install recovery when their
+signed records contain the protected ownership baseline. Changed files, unsafe
+paths, old records without that evidence and other Windows task families remain
+ineligible. The Windows lab verified installation, fresh-profile review and exact
+trusted-probe restoration without repeating completed commands.
 Native n8n has an additional guarded recovery profile with fixture coverage
 and a reviewed Debian lab recovery.
 The CLI-install profile has fixture coverage and a reviewed Debian lab recovery.
 Other task families can be recorded but cannot yet use verified remote
 rollback. Changed catalogs, missing or modified baseline files, partial execution
-and unknown outcomes block that recovery path. Windows storage code is included
-but has not been live-validated. Kubernetes has a separate resource-bound recovery
+and unknown outcomes block that recovery path. Windows signed storage and
+read-only fresh-profile verification passed the lab checks, including tampered
+records and wrong-host rejection. Destructive Windows recovery is limited to the
+CLI profile above. Kubernetes has a separate resource-bound recovery
 path: enable a dedicated persistent PVC during gateway activation, then use the
 cluster task workspace to prepare, review and execute catalog plans. CLI and web
 share durable history. Remote discovery verifies signatures and regenerates a

@@ -74,7 +74,7 @@ and translated lock messages are not covered by this classifier.
 | FreeBSD | Boot time, root filesystem capacity/inodes, native process results and existing reviewed service diagnostics |
 | macOS | Boot-session UUID where available, boot-time fallback, root filesystem capacity/inodes, native process results and existing reviewed service diagnostics |
 | Windows | CIM boot time, free physical memory/system-drive capacity, latest resource-exhaustion/application-crash Event Log record IDs where readable, original native status interpreted without losing its unsigned representation |
-| Docker | Exact-container OOM/exit/health state; automatic bounded inspection for existing reviewed Compose project diagnostics |
+| Docker | Exact-container OOM/exit/health state; bounded Compose inspection on Unix and native Windows Docker paths |
 | Podman | Explicit exact-container OOM/exit inspection through `NetdataClient.collectContainerEvidence`, without deriving targets from AI command text |
 | Kubernetes | Scoped Pod/Deployment/Job reads; current/previous container termination, OOMKilled, restart count/backoff, image/start/scheduling/readiness/eviction/disruption state, rollout/Job deadlines, API authentication/authorization/conflict/throttling/availability |
 
@@ -155,10 +155,22 @@ Kubernetes UID/generation/time checks, namespace boundaries, uncertain writes,
 collector failures, exact-attempt reconciliation and journal/stream/export
 consistency. A local read-only Linux collector smoke test also runs on Linux.
 
-No destructive resource-exhaustion tests are automatic. Windows, FreeBSD, macOS,
-Docker/Podman and Kubernetes collector behavior is fixture-tested, not claimed
-as live-host validation. Native plugin source and binaries are unchanged by this
-  feature.
+No destructive resource-exhaustion tests are automatic. Windows lab checks passed
+for native status bits, strict-mode execution, timeout/cancellation, boot/memory/disk
+snapshots and durable jobs surviving an abruptly disconnected SSH master. No actual
+Windows OOM kill or process-specific Event Log attribution was reproduced.
+
+Windows Compose diagnostics accept only canonical
+`C:/ProgramData/WebminAI/Services/<application>` targets. Signed, bounded PowerShell
+reads inspect at most twelve exact container IDs and return allowlisted observations,
+not environment variables, command payloads or raw health output. Windows path,
+identity-substitution, output-limit and redaction fixtures pass; live application
+collector validation is recorded separately in the Windows lab checkpoint.
+
+Windows runner/plugin fixes preserve strict-mode cmdlet success and all native exit
+status bits. The durable result format is unchanged; old lossy results are not
+reinterpreted. Collectors continue using existing signed execution, without a new
+agent or diagnostic endpoint.
 
 Signed read-only collector checks passed on AlmaLinux 9, Fedora 44 and openSUSE
 16.0. Each reported the effective 2 GiB ancestor limit and its retained OOM
@@ -169,7 +181,7 @@ new full application-matrix pass and not a deliberate OOM test.
 | --- | --- | --- |
 | Shared observations | Existing failure classifier, process results and journal metadata; reason, timeout, cancellation and redaction regressions | Unknown reasons remain explicit |
 | Linux recovery | Signed Netdata commands, exact-attempt journal lookup and controller reconciliation; hierarchy fixture and three live signed collector checks | Shared counters cannot identify the victim |
-| Other native platforms | Existing Unix/Windows execution; fixed platform collectors and native-status fixtures | No live FreeBSD/macOS/Windows validation or process-specific crash-log attribution |
+| Other native platforms | Existing Unix/Windows execution; fixed collectors and native-status fixtures, plus Windows live status/reconnect/deadline checks | No process-specific crash-log attribution; see each platform checkpoint for live scope |
 | Workloads | Existing runtime commands and Kubernetes signed API gateway; exact ID/UID, generation, timestamp, namespace and mutation uncertainty tests | No extra events RBAC; Kubernetes persistence remains caller-owned |
 | Operator reporting | Existing CLI, console inspection, SSE events and sanitized export; exact-attempt replay regression | No new authorization or recovery decision is made |
 

@@ -1,6 +1,7 @@
 import { detectPersistedPlatform } from './platform-identity.js'
 
 const COMPOSE_INVOCATION = /\b(?:docker\s+compose|docker-compose(?:\.exe)?)(?![A-Za-z0-9_.-])/iu
+const WINDOWS_COMPOSE_INVOCATION = /(?:\$(?:docker|dockerCli)|\bdocker\.exe['"]?)\s+compose(?![A-Za-z0-9_.-])/iu
 
 export function detectPlannerPlatform (inventory) {
   return detectPersistedPlatform(inventory) ?? 'unknown'
@@ -24,7 +25,7 @@ export function validatePortablePlan (plan) {
   }
 }
 
-export function validateWindowsPlan (plan, inventory, request) {
+export function validateWindowsPlan (plan, inventory, request, { requireRevert = true, previousAttempts = [] } = {}) {
   const commands = inventory?.webminaiExecution?.commands ?? {}
   if (plan.modifiedFiles.some(file => !/^[A-Za-z]:[\\/]/u.test(file))) {
     throw new Error('Windows modifiedFiles must use native drive-letter paths such as C:\\ProgramData\\...')
@@ -50,12 +51,16 @@ export function validateWindowsPlan (plan, inventory, request) {
       throw new Error(`command ${item.id} requires an English Brave registry Publisher value, which can be localized; verify the executable Authenticode signer instead`)
     }
   }
-  if (!/\bbrave(?:\s+browser)?\b/iu.test(request)) return
-  const commandText = items.map(item => item.command).join('\n')
-  if (/Brave[^\s'";]*\.msi\b/iu.test(commandText) || plan.modifiedFiles.some(file => /Brave[^\\/]*\.msi$/iu.test(file))) {
+  if (!requireRevert || !/\bbrave(?:\s+browser)?\b/iu.test(request)) return
+  const commandText = plan.commands.map(item => item.command).join('\n')
+  const completedText = previousAttempts.flatMap(attempt => {
+    const completed = new Set((attempt.executionEvidence?.commands ?? []).filter(command => command.status === 'completed').map(command => command.commandId))
+    return (attempt.plan?.commands ?? []).filter(command => completed.has(command.id)).map(command => command.command)
+  }).join('\n')
+  if (items.some(item => /Brave[^\s'";]*\.msi\b/iu.test(item.command)) || plan.modifiedFiles.some(file => /Brave[^\\/]*\.msi$/iu.test(file))) {
     throw new Error('Brave Browser does not publish a BraveBrowser.msi; use its signed official standalone x64 EXE release asset')
   }
-  if (!/api\.github\.com\/repos\/brave\/brave-browser\/releases\/latest(?:[?'"\s]|$)/iu.test(commandText)) {
+  if (!/api\.github\.com\/repos\/brave\/brave-browser\/releases\/latest(?:[?'"\s]|$)/iu.test(commandText + '\n' + completedText)) {
     throw new Error('Brave installation must use the official releases/latest API endpoint so prerelease pagination cannot hide the stable release')
   }
   if (!/Get-AuthenticodeSignature/iu.test(commandText)) {
@@ -79,13 +84,17 @@ export function validateWindowsPlan (plan, inventory, request) {
 
 export function validateDockerAndSecrets (plan, inventory) {
   const macos = detectPlannerPlatform(inventory) === 'macos'
+  const windows = detectPlannerPlatform(inventory) === 'windows'
   const observedHome = inventory?.webminaiExecution?.runtimeHome
   const home = /^\/Users\/[a-z_][a-z0-9_-]{0,31}$/u.test(observedHome ?? '') ? observedHome : null
   const originalItems = [...plan.commands, ...plan.revertCommands]
   const items = macos ? macosPolicyItems(originalItems, home) : originalItems
   const commandText = items.map(item => item.command).join('\n')
+  const composeText = windows ? commandText.replace(/(['"])\^Docker Compose version \1/giu, "''") : commandText
+  const hasCompose = text => COMPOSE_INVOCATION.test(text) || (windows && WINDOWS_COMPOSE_INVOCATION.test(text))
+  const configuredComposeText = windows ? composeText.replace(/(?:\$(?:docker|dockerCli)|\bdocker(?:\.exe)?['"]?|\bdocker-compose(?:\.exe)?['"]?)[ \t]+(?:compose[ \t]+)?(?:version|--version)\b/giu, '') : composeText
   const docker = inventory?.webminaiDocker
-  const usesDocker = COMPOSE_INVOCATION.test(commandText) || /\bdocker\s+run\b/iu.test(commandText)
+  const usesDocker = hasCompose(composeText) || /\bdocker\s+run\b/iu.test(commandText)
   if (usesDocker && docker?.preferred !== true) {
     throw new Error(`Docker is not enabled by this host's effective Docker preference: ${docker?.reason ?? 'unavailable'}`)
   }
@@ -122,9 +131,11 @@ export function validateDockerAndSecrets (plan, inventory) {
   }
   const configListed = macos
     ? home && plan.modifiedFiles.some(file => file.startsWith(`${home}/.webminai/services/`) && /^[A-Za-z0-9][A-Za-z0-9_-]*\/(?:compose\.ya?ml|docker-compose\.ya?ml)$/u.test(file.slice(`${home}/.webminai/services/`.length)))
-    : plan.modifiedFiles.some(file => /^\/opt\/webminai\/services\/[^/]+\/(?:compose\.ya?ml|docker-compose\.ya?ml)$/u.test(file))
-  if (COMPOSE_INVOCATION.test(commandText) && !configListed) {
-    throw new Error(macos ? 'macOS Compose plans must list the service compose.yaml under the verified runtime home in .webminai/services' : 'Docker Compose service plans must list /opt/webminai/services/<service>/compose.yaml in modifiedFiles')
+    : windows
+      ? plan.modifiedFiles.some(file => /^C:[\\/]ProgramData[\\/]WebminAI[\\/]Services[\\/][A-Za-z0-9][A-Za-z0-9_-]*[\\/](?:compose\.ya?ml|docker-compose\.ya?ml)$/iu.test(file))
+      : plan.modifiedFiles.some(file => /^\/opt\/webminai\/services\/[^/]+\/(?:compose\.ya?ml|docker-compose\.ya?ml)$/u.test(file))
+  if (hasCompose(configuredComposeText) && !configListed) {
+    throw new Error(macos ? 'macOS Compose plans must list the service compose.yaml under the verified runtime home in .webminai/services' : windows ? 'Windows Compose service plans must list C:\\ProgramData\\WebminAI\\Services\\<service>\\compose.yaml in modifiedFiles' : 'Docker Compose service plans must list /opt/webminai/services/<service>/compose.yaml in modifiedFiles')
   }
 }
 

@@ -404,6 +404,7 @@ export class AdminService {
 
   async revertTask ({ settings, passphrase, serverId, taskId, reviewedPlan, approve, onResult, onProgress }) {
     const task = this.tasks.get(serverId, taskId)
+    if (task.catalogId === 'intent-ai-ops-windows' && ((reviewedPlan ?? task.plan)?.modifiedFiles ?? []).some(file => path.win32.normalize(file).replace(/[\\/]+$/u, '').toLowerCase() === 'c:\\programdata\\intentaiops')) throw new Error('Legacy Windows CLI rollback targets the recovery ledger parent; prepare a separately reviewed cleanup that preserves Recovery')
     if (!reviewedPlan && (!task.plan || !Array.isArray(task.plan.revertCommands) || task.plan.revertCommands.length === 0)) {
       throw new Error(`task ${taskId} has no revert plan`)
     }
@@ -514,7 +515,7 @@ export class AdminService {
         else this.tasks.appendResult(serverId, taskId, result)
         remoteJournal = await this.remoteTaskJournal({ settings, serverId, taskId, server, task, plan: command.rollbackRevision ? { ...task.plan, revertCommands: commands } : task.plan })
         if (remoteJournal) {
-          const baselineDigest = completed && !command.rollbackRevision && commonTaskRecoverySupported(task.catalogId, 'linux')
+          const baselineDigest = completed && !command.rollbackRevision && commonTaskRecoverySupported(task.catalogId, this.remoteRecovery.get(settings.servers?.[serverId]?.hostFingerprint, taskId)?.manifest.platform)
             ? await inspectRecoveryBaseline(netdata, task.catalogId, taskId, task.plan.compatibilityManifest?.host?.family).catch(() => null)
             : null
           await remoteJournal.append(completion, { operation: command.rollbackRevision ? 'rollback' : 'deployment', baselineDigest })

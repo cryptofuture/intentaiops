@@ -2,6 +2,17 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AdminService } from '../src/admin-service.js'
 
+test('legacy Windows CLI rollback cannot delete the recovery parent', async () => {
+  for (const root of ['C:\\ProgramData\\IntentAIOps', 'c:/programdata/intentaiops/']) {
+    let remote = false
+    const task = { catalogId: 'intent-ai-ops-windows', plan: { modifiedFiles: [root], revertCommands: [{}] } }
+    const context = { tasks: { get: () => task }, async serverSecrets () { remote = true; throw new Error('remote access sentinel') } }
+    await assert.rejects(AdminService.prototype.revertTask.call(context, { serverId: 'fixture', taskId: 1 }), /recovery ledger parent/u)
+    assert.equal(remote, false)
+    await assert.rejects(AdminService.prototype.revertTask.call(context, { serverId: 'fixture', taskId: 1, reviewedPlan: { modifiedFiles: ['C:\\ProgramData\\WebminAI\\Tasks\\1-intent-ai-ops-install'], commands: [] } }), /remote access sentinel/u)
+  }
+})
+
 test('AdminService composes executable verified foundations with only the AI application delta', async () => {
   let deploymentBlueprint
   const foundationCommand = { id: 'capture-baseline', phase: 'baseline', command: 'true', purpose: 'Capture baseline', risk: 'change', timeoutMs: 1000, requiresSudo: true, dependsOn: [], source: { type: 'verified-foundation', id: 'linux-baseline', version: 1 } }

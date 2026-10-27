@@ -17,6 +17,7 @@ async function fixture (t) {
   const settings = { servers: { host: { historyId: 'host' } } }
   const writes = []; const sizes = []; const launches = []
   let output; let exit; let leases = 0
+  let kills = 0
   const hosts = {
     states: new Map(),
     sessions: new Map([['host', { server: { connectionUrl: 'ssh://operator@example.invalid' }, ssh: new SystemSsh({ terminalCheck: () => false, controlPath: '/owned/control' }) }]]),
@@ -30,13 +31,27 @@ async function fixture (t) {
     settings,
     spawn: (binary, args, options) => {
       launches.push({ binary, args, options })
-      return { onData: listener => { output = listener }, onExit: listener => { exit = listener }, write: value => writes.push(value), resize: (cols, rows) => sizes.push([cols, rows]), kill: () => exit({ exitCode: 0 }) }
+      return { onData: listener => { output = listener }, onExit: listener => { exit = listener }, write: value => writes.push(value), resize: (cols, rows) => sizes.push([cols, rows]), kill: () => { kills++; exit({ exitCode: 0 }) } }
     }
   })
   t.after(() => shells.close())
   const body = { action: 'open', hostId: 'host', hostVersion: planFingerprint(settings.servers.host), requestKey: 'shell-test-request-01', approved: true, cols: 80, rows: 24 }
-  return { root, settings, hosts, shells, body, writes, sizes, launches, output: data => output(data), exit: code => exit({ exitCode: code }), leases: () => leases }
+  return { root, settings, hosts, shells, body, writes, sizes, launches, output: data => output(data), exit: code => exit({ exitCode: code }), leases: () => leases, kills: () => kills }
 }
+
+test('Windows natural terminal exit releases ConPTY once without replacing its original status', async t => {
+  const f = await fixture(t)
+  const shell = await f.shells.open(f.body)
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+  Object.defineProperty(process, 'platform', { value: 'win32' })
+  try {
+    f.exit(7)
+    await f.shells.get(shell.id).done
+    assert.equal(f.kills(), 1)
+    assert.equal(f.shells.get(shell.id).exitCode, 7)
+    assert.equal(f.leases(), 0)
+  } finally { Object.defineProperty(process, 'platform', descriptor) }
+})
 
 test('browser SSH uses strict system OpenSSH, owns the host and never duplicates input or session creation', async t => {
   const f = await fixture(t)

@@ -36,6 +36,7 @@ test('interactive task menus expose verified platform applications and AI-assist
   assert.match(source, /Describe the task for every selected host/)
   assert.match(source, /await session\?\.close\(\)/)
   assert.match(source, /ui\.withTerminalSuspended\(\(\) => ssh\.interactiveShell\(server\.connectionUrl\)\)/)
+  assert.match(source, /interactiveRunner: \(\.\.\.args\) => ui\.withTerminalSuspended\(\(\) => runInteractiveProcess\(\.\.\.args\)\)/u)
   assert.match(source, /buildCommonTask\([\s\S]*applicationDefaults/)
   assert.match(source, /buildCandidatePlanningContext\([\s\S]*\.\.\.options/)
   assert.match(source, /await admin\.plan\([\s\S]*applicationDefaults/)

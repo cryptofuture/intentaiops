@@ -16,6 +16,17 @@ import { CodexPlanner } from '../src/codex-planner.js'
 const command = id => ({ id, command: `echo ${id}`, purpose: 'Inspect', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [] })
 const plan = ids => ({ summary: 'Inspect', changeOverview: 'Inspect state', modifiedFiles: [], commands: ids.map(command), revertCommands: [] })
 
+test('remote recovery options use verified platform capabilities instead of assuming Linux', async t => {
+  const { controller, admin } = await fixture(t)
+  const execution = { platform: 'windows' }
+  admin.capabilities = async () => ({ platform: { os: 'windows' } })
+  admin.refreshInventory = async () => ({ webminaiExecution: execution })
+  admin.settings.decryptApplicationDefaults = async () => ({})
+  const options = await controller.remoteRecoveryOptions(admin, 'host')
+  assert.equal(options.platform, 'windows')
+  assert.equal(options.windowsExecution, execution)
+})
+
 async function fixture (t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'intent-operator-'))
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -209,6 +220,40 @@ test('FreeBSD catalog refresh preserves completed steps and requires separate ap
   assert.deepEqual(calls, [])
 })
 
+test('Windows catalog refresh preserves completed work and requires a verified target and fresh approval', async t => {
+  const { tasks, admin, controller, calls } = await fixture(t)
+  const execution = { platform: 'windows', identity: 'LocalSystem', docker: { serverOs: 'linux', serverVersion: '29' } }
+  const docker = { preference: 'auto', ready: true, preferred: true }
+  admin.settings.decryptApplicationDefaults = async () => ({})
+  admin.workspace.loadRules = async () => ({ policy: { executionIdentity: 'root' } })
+  admin.plan = async () => { throw new Error('AI must not be called') }
+  const created = tasks.create('host', 'Deploy Magento', { kind: 'catalog', catalogId: 'magento-windows' })
+  const original = buildCommonTask('magento-windows', created.id, { platform: 'windows', windowsExecution: execution, docker }).plan
+  original.commands.at(-1).command = 'old restart verifier'
+  tasks.savePlan('host', created.id, original)
+  const lease = tasks.acquireExecution('host', created.id, original)
+  for (const command of original.commands.slice(0, -1)) tasks.appendExecutionEvent('host', created.id, lease.owner, { type: 'command_completed', commandId: command.id, attemptId: command.id })
+  tasks.appendExecutionEvent('host', created.id, lease.owner, { type: 'command_failed', commandId: original.commands.at(-1).id, attemptId: 'failed-verifier' })
+  tasks.releaseExecution('host', created.id, lease.owner)
+  const before = controller.inspect('host', created.id)
+  admin.refreshInventory = async () => ({ webminaiExecution: { platform: 'linux' }, webminaiDocker: docker })
+  await assert.rejects(controller.proposeCatalogRefresh('host', created.id, before.stateVersion), /verified windows/u)
+  assert.equal(tasks.revisions('host', created.id).length, 0)
+  admin.refreshInventory = async () => ({ webminaiExecution: execution, webminaiDocker: docker })
+  const proposal = await controller.proposeCatalogRefresh('host', created.id, before.stateVersion)
+  const revision = tasks.revisions('host', created.id).find(item => item.id === proposal.revisionId)
+  assert.equal(revision.approved, 0)
+  assert.deepEqual(revision.plan.commands.slice(0, -1), original.commands.slice(0, -1))
+  assert.deepEqual(revision.plan.revertCommands, original.revertCommands)
+  assert.notEqual(revision.plan.commands.at(-1).id, original.commands.at(-1).id)
+  assert.deepEqual(tasks.get('host', created.id).plan, original)
+  controller.approve('host', created.id, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+  const approved = controller.inspect('host', created.id)
+  assert.equal(approved.control.action, 'pause')
+  await assert.rejects(controller.resume('host', created.id, before.stateVersion, before.fingerprint), /stale/u)
+  assert.deepEqual(calls, [])
+})
+
 test('catalog refresh rejects stale inventory decisions and non-native targets without mutating history', async t => {
   const { tasks, admin, controller, calls } = await fixture(t)
   const context = { fingerprint: 'fixture', identity: { id: 'ubuntu', versionId: '24.04', architecture: 'x86_64' }, management: { family: 'debian', packageManager: 'apt', serviceManager: 'systemd' }, applications: {} }
@@ -234,9 +279,9 @@ test('catalog refresh rejects stale inventory decisions and non-native targets w
 
 test('an empty replacement proposal cannot erase pending catalog work', async t => {
   const { controller, task, admin, calls } = await fixture(t)
-  admin.plan = async () => plan([])
+  admin.plan = async () => ({ ...plan([]), summary: 'Inspect remaining registry differences before cleanup' })
   const before = controller.inspect('host', task.id)
-  await assert.rejects(controller.propose('host', task.id, 'Update pending work', before.stateVersion), /no executable replacement commands/iu)
+  await assert.rejects(controller.propose('host', task.id, 'Update pending work', before.stateVersion), /no executable replacement commands.*Inspect remaining registry differences/iu)
   const after = controller.inspect('host', task.id)
   assert.deepEqual(after.task.plan, before.task.plan)
   assert.deepEqual(after.revisions, before.revisions)

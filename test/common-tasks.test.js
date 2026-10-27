@@ -271,7 +271,16 @@ test('Intent AI Ops macOS and Windows tasks install directly on the host', () =>
   })
   const windowsCommand = windows.plan.commands.find(command => command.id === 'install-intent-ai-ops').command
   assert.match(windowsCommand, /Copy-Item -LiteralPath/u)
-  assert.match(windowsCommand, /C:\\ProgramData\\IntentAIOps/u)
+  assert.match(windowsCommand, /C:\\ProgramData\\IntentAIOps\\Cli/u)
+  assert.ok(!windows.plan.modifiedFiles.includes('C:\\ProgramData\\IntentAIOps'))
+  assert.match(windows.plan.commands[0].command, /user-path-was-absent/u)
+  assert.match(windows.plan.revertCommands[0].command, /user-path-was-absent/u)
+  assert.match(windows.plan.commands[0].command, /DoNotExpandEnvironmentNames/u)
+  assert.match(windows.plan.commands[0].command, /Get-Command intentaiops\.cmd[^;]+-or \(\(Test-Path/u)
+  assert.match(windows.plan.revertCommands[0].command, /RegistryValueKind/u)
+  assert.match(windows.plan.revertCommands[0].command, /PATH_CHANGED/u)
+  assert.doesNotMatch(windows.plan.revertCommands[0].command, /SetEnvironmentVariable/u)
+  assert.match(windows.stateProbe, /machinePathDigest=.*userPathDigest=/u)
   assert.doesNotMatch(windowsCommand, /Docker|WSL|container/u)
 })
 

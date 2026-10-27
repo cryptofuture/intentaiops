@@ -14,7 +14,7 @@ export class RemoteRecoveryTransport {
   async request (operation, parameters = {}) {
     if (this.platform === 'kubernetes' && typeof this.client.runRecoveryRequest !== 'function') throw new Error('Remote recovery unavailable: persistent gateway backend is not configured')
     const command = await recoveryStorageCommand(this.platform, operation, parameters)
-    const readOnly = ['key', 'list', 'read', 'verification-key', 'ownership'].includes(operation)
+    const readOnly = ['key', 'list', 'read', 'read-page', 'verification-key', 'ownership'].includes(operation)
     const result = await (this.platform === 'kubernetes' ? this.client.runRecoveryRequest(command, { timeoutSeconds: readOnly ? 15 : 60 }) : this.client.runCommand(command, { timeoutSeconds: readOnly ? 15 : 60 }))
     if (result.exitCode !== 0 || result.stdoutTruncated || result.stderrTruncated) {
       const reasons = {
@@ -26,7 +26,7 @@ export class RemoteRecoveryTransport {
       const reason = !result.stdoutTruncated && !result.stderrTruncated && Object.hasOwn(reasons, message) ? reasons[message] : null
       throw new Error(`Remote recovery ${operation} failed${reason ? ': ' + reason : ''}; no automatic retry is authorized`)
     }
-    if (Buffer.byteLength(result.stdout ?? '') > 8192) throw new Error('Remote recovery response exceeds limit')
+    if (Buffer.byteLength(result.stdout ?? '') > (operation === 'read-page' ? 49152 : 8192)) throw new Error('Remote recovery response exceeds limit')
     try {
       const value = JSON.parse(result.stdout)
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid object')
@@ -101,6 +101,13 @@ export class RemoteRecoveryTransport {
   }
 
   async read (executionId, sequence) { return this.request('read', { executionId, sequence }) }
+
+  async readPage (executionId, sequence, limit) {
+    if (this.platform !== 'windows') return [await this.read(executionId, sequence)]
+    const result = await this.request('read-page', { executionId, sequence, limit })
+    if (Object.keys(result).length !== 1 || !Array.isArray(result.records) || result.records.length < 1 || result.records.length > limit || result.records.some(record => Buffer.byteLength(JSON.stringify(record)) > 8192)) throw new Error('Invalid remote recovery record page')
+    return result.records
+  }
 }
 
 export async function recoveryStorageCommand (platform, operation, parameters = {}) {
@@ -117,6 +124,9 @@ export async function recoveryStorageCommand (platform, operation, parameters = 
   } else if (operation === 'list') {
     if (parameters.after !== '' && !ID.test(parameters.after)) throw new Error('Invalid recovery cursor')
     args.push(parameters.after)
+  } else if (operation === 'read-page') {
+    if (platform !== 'windows' || !ID.test(parameters.executionId) || !Number.isSafeInteger(parameters.sequence) || parameters.sequence < 1 || parameters.sequence > 100000 || !Number.isInteger(parameters.limit) || parameters.limit < 1 || parameters.limit > 32 || parameters.sequence + parameters.limit - 1 > 100000) throw new Error('Invalid recovery record page')
+    args.push(parameters.executionId, String(parameters.sequence), String(parameters.limit))
   } else if (!['initialize', 'key'].includes(operation)) {
     const record = parameters.record
     const executionId = record?.executionId ?? parameters.executionId
@@ -153,7 +163,8 @@ export async function recoveryStorageCommand (platform, operation, parameters = 
     else if (!['key', 'initialize'].includes(operation)) {
       request.executionId = args[2]
       request.sequence = Number(args[3])
-      if (operation !== 'read') {
+      if (operation === 'read-page') request.limit = Number(args[4])
+      else if (operation !== 'read') {
         request.head = args[4]
         if (operation !== 'ownership') request.owner = args[5]
         if (operation === 'takeover') request.ownerFingerprint = args[6]

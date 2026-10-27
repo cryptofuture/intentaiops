@@ -5,8 +5,41 @@
 Host recovery acceptance testing covers the Linux lab with native installations.
 The separate kind lab also passed a browser-created n8n deployment, a gateway
 restart with the same signing key, and fresh-profile reviewed resource recovery.
-This does not establish live recovery coverage for Docker/Podman, Windows,
+Windows CLI task34 also passed reviewed installation and fresh-profile recovery,
+including wrong-fingerprint rejection, one cleanup dispatch and exact original
+trusted-probe baseline restoration. This does not establish recovery coverage for
+other Windows applications, Docker/Podman,
 FreeBSD or macOS, or every application through the new cluster workspace.
+
+## Windows CLI recovery
+
+For new `intent-ai-ops-windows` installations, open **Remote common-task recovery**
+in the CLI, or **recovery** in the host's browser workspace. Discover the signed
+execution, prepare a new recovery plan, inspect it, then approve separately.
+Normal verified SSH and active Stage 2 are required; no manual signing-key export
+or private-key transfer is needed.
+
+Recovery removes only the task-owned `C:\ProgramData\IntentAIOps\Cli` installation
+and its task state, and restores recorded machine/service-account PATH values.
+The sibling recovery ledger/key and the operator's normal local vault remain.
+It never executes a remote saved script or installed CLI to perform recovery.
+
+Only a completed, unchanged trusted catalog execution with signed baseline
+integrity is eligible. Existing CLI installations, uncertain/partial outcomes,
+old records without that digest, and modified templates are not eligible.
+Protected marker files, registry-baseline structure, owners/ACLs, parent safety,
+file identities and complete installed contents are inspected. Hard links,
+reparse points, unexpected task-state entries or changed content block cleanup.
+Each inspection is bounded to60 seconds,60000 entries and1 GiB; reaching a limit
+blocks recovery rather than weakening validation. The digest is rechecked inside
+the approved cleanup job immediately before the trusted rollback command.
+
+The Windows lab verified task34 from an isolated local profile with encrypted
+connection settings but no original task journal or recovery-key pins. Signed
+history was not fabricated as local execution. Recovery task1 survived review
+reload, rejected a wrong fingerprint, restored the original trusted probe and
+published signed completion while preserving the signing key. This is not a
+whole-filesystem restoration claim or coverage for other Windows task families.
 
 ## Implementation audit
 
@@ -187,7 +220,11 @@ intent, job acknowledgements, outcomes and pause/rollback events are unchanged.
 
 Windows uses `C:\ProgramData\IntentAIOps\Recovery`, LocalSystem execution,
 SYSTEM/Administrators-only ACLs, CNG, write-through files and atomic publication.
-Its backend is implemented but has not been executed on a Windows host here.
+The Windows lab verified CNG signing, fresh-client signature/key-pin checks,
+reboot persistence and ownership conflicts. The Windows CLI profile above also
+passed destructive fresh-install recovery. Other Windows task families remain
+unregistered; a live fresh-profile preparation test rejects a valid signed
+Magento record before baseline collection, task creation or remote mutation.
 FreeBSD/macOS storage is likewise not claimed live-validated by Linux fixtures.
 
 No new native plugin protocol or build is needed for these host helpers. They
@@ -218,13 +255,15 @@ activity cannot be treated as a fresh untouched deployment.
 2. Reviewed reconciliation of partial recovery.
    Current uncertain/partial sources and already-started recovery are blocked,
    not guessed or replayed.
-3. Kubernetes persistent volume configuration, established cluster identity,
-   gateway-native signing/storage and replica concurrency. Current CLI reports
-   unavailable and performs no RBAC mutation, pod-exec or SSH fallback.
-4. Native Windows, FreeBSD and macOS live validation, plus reboot/crash testing
-   on disposable targets. Source/crypto fixtures are not native OS coverage.
-5. Live validation of browser recovery mutations. Controller/HTTP/browser fixtures
-   and actual-binary console reads are not live browser-mutation coverage.
+3. Broader Kubernetes storage and replica-concurrency validation beyond the
+   configured kind PVC deployment. Unconfigured persistence remains unavailable;
+   there is no automatic RBAC expansion, pod-exec or SSH fallback.
+4. Additional Windows task families and native FreeBSD/macOS recovery profiles,
+   plus further crash testing. The Windows CLI live pass above is limited to that
+   completed task family, not general platform-wide destructive recovery.
+5. Broader live browser recovery mutations beyond the Windows CLI and kind n8n
+   cycles above. Mock/controller/browser fixtures do not establish other live
+   platform or task-family coverage.
 
 The earlier Ubuntu task50 cleanup proposal was not dispatched. Subsequent,
 independently reviewed test-residue cleanup task56 is recorded in the lab
@@ -233,8 +272,8 @@ Historical unsigned task records remain unchanged.
 
 ## Local catalog refresh
 
-The shared controller also exposes `proposeCatalogRefresh` for native Linux
-applications with local execution history. It reads fresh authorized inventory
+The shared controller also exposes `proposeCatalogRefresh` for native Linux,
+FreeBSD and supported Windows applications with local execution history. It reads fresh authorized inventory
 and rebuilds the same local catalog task ID, without asking AI to transcribe
 commands. Completed definitions and their dependency closure must match the
 current catalog exactly; rollback definitions, application version, route and

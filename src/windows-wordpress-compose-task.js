@@ -1,4 +1,4 @@
-import { applyWindowsComposeOperationDefaults, buildWindowsComposeFoundation, windowsDockerPowerShellAdapter } from './windows-compose-foundation.js'
+import { applyWindowsComposeOperationDefaults, buildWindowsComposeFoundation, windowsComposePullCommand, windowsDockerPowerShellAdapter } from './windows-compose-foundation.js'
 
 const WORDPRESS_VERSION = '7.0.2'
 const WORDPRESS_IMAGE = `wordpress:${WORDPRESS_VERSION}-php8.3-fpm`
@@ -27,7 +27,7 @@ export function buildWindowsWordpressComposeTask (taskId, windowsExecution, dock
   const state = foundation.paths.state
   const commands = foundation.commands.concat([
     item('write-compose', 'configure', composeCommand({ root, credentials, project, port }), 'Write the reviewed pinned Compose, PHP-FPM socket, and nginx configuration', ['generate-credentials']),
-    item('pull-images', 'acquire', dockerCommand(root, project, ['--profile', 'tools', 'pull'], 'images-pulled'), 'Pull the pinned WordPress, WP-CLI, nginx, and MariaDB images', ['write-compose']),
+    item('pull-images', 'acquire', windowsComposePullCommand(root, project, 'tools'), 'Pull the pinned WordPress, WP-CLI, nginx, and MariaDB images', ['write-compose']),
     item('start-compose', 'services', startCommand({ root, project, port }), 'Start the isolated Compose services and wait for HTTP readiness', ['pull-images']),
     item('initialize-wordpress', 'initialize', initializeCommand({ root, project, port, marker }), `Initialize ${wooCommerce ? 'the WordPress foundation' : 'WordPress'} without exposing host-generated credentials`, ['start-compose'])
   ])
@@ -35,7 +35,7 @@ export function buildWindowsWordpressComposeTask (taskId, windowsExecution, dock
     commands.push(item('install-woocommerce', 'initialize', wooCommerceCommand({ root, project }), `Install and activate digest-pinned WooCommerce ${WOO_VERSION}`, ['initialize-wordpress']))
   }
   commands.push(item('verify-restart', 'verify', verifyCommand({ root, project, port, marker, wooCommerce }), `Verify ${wooCommerce ? 'WooCommerce' : 'WordPress'}, external marker readiness, and restart recovery`, [wooCommerce ? 'install-woocommerce' : 'initialize-wordpress'], 300000, undefined, 'read'))
-  const boundedCommands = applyWindowsComposeOperationDefaults(commands)
+  const boundedCommands = applyWindowsComposeOperationDefaults(commands, root)
 
   return {
     plan: {
@@ -137,20 +137,9 @@ function composeCommand ({ root, credentials, project, port }) {
   ])
 }
 
-function dockerCommand (root, project, args, success) {
-  return ps([
-    '$ErrorActionPreference=\'Stop\'',
-    dockerDiscovery('$docker'),
-    `Set-Location -LiteralPath '${psQuote(root)}'`,
-    `& $docker compose -p '${project}' ${args.map(value => `'${psQuote(value)}'`).join(' ')}`,
-    'if($LASTEXITCODE -ne 0){throw \'Docker Compose command failed.\'}',
-    `Write-Output '${success}'`
-  ])
-}
-
 function startCommand ({ root, project, port }) {
   return ps([
-    "$ErrorActionPreference='Stop'", dockerDiscovery('$docker'), `Set-Location -LiteralPath '${psQuote(root)}'`,
+    "$ErrorActionPreference='Stop'", windowsDockerPowerShellAdapter(900000), `Set-Location -LiteralPath '${psQuote(root)}'`,
     `& $docker compose -p '${project}' up -d db wordpress nginx`, "if($LASTEXITCODE -ne 0){throw 'Compose startup failed.'}",
     `$ready=$false;for($attempt=0;$attempt -lt 120;$attempt++){try{$response=Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:${port}/' -TimeoutSec 5;if($response.StatusCode -ge 200){$ready=$true;break}}catch{};Start-Sleep -Seconds 2}`,
     "if(-not $ready){throw 'WordPress HTTP endpoint did not become ready.'}", "Write-Output 'compose-started'"
@@ -160,7 +149,7 @@ function startCommand ({ root, project, port }) {
 function initializeCommand ({ root, project, port, marker }) {
   const cli = `& $docker compose -p '${project}' --profile tools run --rm --no-deps -T --entrypoint /usr/local/bin/wp cli`
   return ps([
-    "$ErrorActionPreference='Stop'", dockerDiscovery('$docker'), `Set-Location -LiteralPath '${psQuote(root)}'`,
+    "$ErrorActionPreference='Stop'", windowsDockerPowerShellAdapter(1800000), `Set-Location -LiteralPath '${psQuote(root)}'`,
     `$databaseReady=$false;for($attempt=0;$attempt -lt 60;$attempt++){$databaseCheck=(${cli} --allow-root db check 2>$null|Out-String);if($databaseCheck -match 'Success: Database checked'){$databaseReady=$true;break};Start-Sleep -Seconds 2};if(-not $databaseReady){throw 'WordPress database did not become ready for WP-CLI.'}`,
     `$siteUrl=(${cli} --allow-root option get siteurl 2>$null|Out-String).Trim()`,
     `if($siteUrl -notmatch '^https?://'){& $docker compose -p '${project}' --profile tools run --rm --no-deps -T --entrypoint /bin/sh cli -c 'wp --allow-root core install --url=http://localhost:${port} --title="Intent AI Ops ${project}" --admin_user=webminai_admin --admin_email=intentaiops@example.invalid --admin_password="$(cat /run/secrets/admin_password)" --skip-email' *> $null;$siteUrl=(${cli} --allow-root option get siteurl 2>$null|Out-String).Trim();if($siteUrl -notmatch '^https?://'){throw 'WordPress initialization failed.'}}`,
@@ -175,7 +164,7 @@ function wooCommerceCommand ({ root, project }) {
   const artifact = `${root}\\woocommerce.${WOO_VERSION}.zip`
   const cli = `& $docker compose -p '${project}' --profile tools run --rm --no-deps -T --entrypoint /usr/local/bin/wp cli`
   return ps([
-    "$ErrorActionPreference='Stop'", dockerDiscovery('$docker'), `Set-Location -LiteralPath '${psQuote(root)}'`,
+    "$ErrorActionPreference='Stop'", windowsDockerPowerShellAdapter(1800000), `Set-Location -LiteralPath '${psQuote(root)}'`,
     `Invoke-WebRequest -UseBasicParsing -Uri '${WOO_URL}' -OutFile '${psQuote(artifact)}' -TimeoutSec 300`,
     `if((Get-FileHash -LiteralPath '${psQuote(artifact)}' -Algorithm SHA256).Hash.ToLowerInvariant() -ne '${WOO_SHA256}'){Remove-Item -LiteralPath '${psQuote(artifact)}' -Force;throw 'WooCommerce SHA-256 verification failed.'}`,
     `& $docker compose -p '${project}' cp '${psQuote(artifact)}' 'wordpress:/var/www/html/woocommerce.zip'`, "if($LASTEXITCODE -ne 0){throw 'WooCommerce artifact copy failed.'}",
@@ -189,7 +178,7 @@ function wooCommerceCommand ({ root, project }) {
 function verifyCommand ({ root, project, port, marker, wooCommerce, restart = true }) {
   const cli = `& $docker compose -p '${project}' --profile tools run --rm --no-deps -T --entrypoint /usr/local/bin/wp cli`
   return ps([
-    "$ErrorActionPreference='Stop'", dockerDiscovery('$docker'), `Set-Location -LiteralPath '${psQuote(root)}'`,
+    "$ErrorActionPreference='Stop'", windowsDockerPowerShellAdapter(900000), `Set-Location -LiteralPath '${psQuote(root)}'`,
     ...(wooCommerce ? [`${cli} --allow-root plugin is-active woocommerce *> $null`, "if($LASTEXITCODE -ne 0){throw 'WooCommerce activation verification failed.'}"] : []),
     ...(restart ? [`& $docker compose -p '${project}' restart db wordpress nginx`, "if($LASTEXITCODE -ne 0){throw 'Compose restart failed.'}"] : []),
     `$verified=$false;for($attempt=0;$attempt -lt 90;$attempt++){try{$body=(Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:${port}/' -TimeoutSec 5).Content;if($body -like '*${marker}*'){$verified=$true;break}}catch{};Start-Sleep -Seconds 2}`,
@@ -207,8 +196,4 @@ function ps (statements) {
 
 function psQuote (value) {
   return String(value).replaceAll("'", "''")
-}
-
-function dockerDiscovery (variable, timeoutMs = 300000) {
-  return `$dockerExe=(Get-Command docker.exe -ErrorAction SilentlyContinue).Source;if(-not $dockerExe){$dockerExe=Join-Path $env:ProgramFiles 'Docker\\Docker\\resources\\bin\\docker.exe'};if(-not (Test-Path -LiteralPath $dockerExe -PathType Leaf)){throw 'docker.exe is unavailable to LocalSystem.'};${variable}={$dockerArguments=@($args|ForEach-Object{$value=[string]$_;if($value -match '[\\s"]'){'"'+$value.Replace('"','\\"')+'"'}else{$value}});$stdout=[IO.Path]::GetTempFileName();$stderr=[IO.Path]::GetTempFileName();try{$process=Start-Process -FilePath $dockerExe -ArgumentList $dockerArguments -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr;if(-not $process.WaitForExit(${timeoutMs})){$process.Kill();throw 'Docker command timed out.'};$stdoutText=[string](Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue);$stderrText=[string](Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue);$global:LASTEXITCODE=if($null -ne $process.ExitCode){[int]$process.ExitCode}elseif($stderrText -match '(?im)^(error|failed|unknown command|docker:)'){1}else{0};if($stdoutText){Write-Output $stdoutText};if($stderrText){Write-Error -Message $stderrText -ErrorAction Continue}}finally{Remove-Item -LiteralPath $stdout,$stderr -Force -ErrorAction SilentlyContinue}}`
 }

@@ -22,6 +22,14 @@ export function executionDiagnostics ({ item = { id: 'execution' }, result = {},
   if (error?.result?.timedOut === true || error?.cause?.result?.timedOut === true) add('LOCAL_PROCESS_TIMEOUT', 'confirmed', 'local-client', 'The local transport process reached its deadline. This does not prove remote execution stopped.')
   if (Number.isInteger(result.signal) && result.signal > 0) add('PROCESS_SIGNAL', 'confirmed', 'remote-command', 'The remote process terminated with a recorded signal; the signal alone does not identify why.', { signal: result.signal })
   if (Number.isInteger(result.exitCode) && result.exitCode !== 0) add('PROCESS_EXIT', 'confirmed', 'remote-command', 'The process recorded a nonzero exit status.', { exitCode: result.exitCode })
+  if (!error && !result.timedOut && !['unknown', 'cancelled', 'timed_out'].includes(result.state) && result.exitCode === 75 && before?.platform === 'windows' && item.retry?.exitCodes?.includes(75)) {
+    const pending = /^download-pending state=(Queued|Connecting|Transferring|TransientError) bytes=(\d{1,16})\/(\d{1,16})\r?\n?$/u.exec(result.stdout ?? '')
+    if (pending && Number.isSafeInteger(Number(pending[2])) && Number.isSafeInteger(Number(pending[3])) && Number(pending[2]) <= Number(pending[3])) {
+      const diagnostic = observation('DOWNLOAD_PENDING', 'confirmed', 'remote-command', 'catalog-download-status', 'The poll reported an unfinished BITS download. The poll result does not mean the transfer stopped.', { state: pending[1], receivedBytes: Number(pending[2]), totalBytes: Number(pending[3]) })
+      diagnostic.nextAction = 'Inspect the existing transfer and review continuation. Do not start a duplicate download.'
+      observations.push(diagnostic)
+    }
+  }
   const patterns = [
     ['PACKAGE_MANAGER_FAILED', /\bDOCKER_PACKAGE_INSTALL_FAILED\b/u, 'remote-command', 'Docker package installation reported failure. Partial package changes may exist; inspect the captured package delta and review cleanup.'],
     ['DOCKER_SERVICE_NOT_READY', /\bDOCKER_LAB_RUNTIME_UNAVAILABLE\b/u, 'remote-command', 'Docker package checks completed, but its daemon was unavailable inside the LXC lab. This is not an installation rollback or permission to change host isolation.'],
@@ -34,7 +42,7 @@ export function executionDiagnostics ({ item = { id: 'execution' }, result = {},
     ['CONNECTION_LOST', /broken pipe|connection reset|connection (?:closed|lost)|\bECONNRESET\b|\bEPIPE\b/iu, error ? 'transport' : 'remote-command', 'An established connection was lost; remote execution may have continued.'],
     ['DISK_FULL', /no space left on device|\bENOSPC\b|disk (?:is )?full/iu, 'remote-command', 'The command reported insufficient filesystem space or inodes. Inspect the affected filesystem.'],
     ['PATH_NOT_FOUND', /no such file or directory|\bENOENT\b/iu, 'remote-command', 'The command reported a missing filesystem path or executable. Inspect required paths before reviewing continuation; partial changes remain possible.'],
-    ['TARGET_CONFLICT', /^task target already exists:/imu, 'remote-command', 'The target-preservation guard refused an existing path. Inspect ownership and preserve existing data before reviewing a new plan.'],
+    ['TARGET_CONFLICT', /^task target already exists:|\bINSTALL_ROOT_ALREADY_EXISTS\b/imu, 'remote-command', 'The target-preservation guard refused an existing path. Inspect ownership and preserve existing data before reviewing a new plan.'],
     ['OWNERSHIP_UNCONFIRMED', /\b(?:APPLICATION|DATABASE|MOODLE_CRON)_OWNERSHIP_UNCONFIRMED\b/iu, 'remote-command', 'The ownership guard could not authorize cleanup. Inspect task ownership evidence and remote state before reviewing any continuation.'],
     ['QUOTA_EXCEEDED', /disk quota exceeded|\bEDQUOT\b/iu, 'remote-command', 'The command reported a quota limit.'],
     ['PERMISSION_DENIED', /permission denied|operation not permitted|access is denied|\bEACCES\b|\bEPERM\b/iu, 'remote-command', 'The operation reported a permission denial.'],
@@ -73,7 +81,7 @@ export function executionDiagnostics ({ item = { id: 'execution' }, result = {},
   }
   if (comparable && before.bootId && before.bootId === after.bootId && Number.isSafeInteger(before.resourceExhaustionRecordId) && after.resourceExhaustionRecordId > before.resourceExhaustionRecordId) add('RESOURCE_EXHAUSTION', 'suspected', 'host', 'A newer Windows resource-exhaustion record was observed. It is not attributed to this process.', {}, 'windows-event-log')
   if (comparable && before.bootId && before.bootId === after.bootId && Number.isSafeInteger(before.applicationCrashRecordId) && after.applicationCrashRecordId > before.applicationCrashRecordId) add('HOST_APPLICATION_CRASH', 'suspected', 'host', 'A newer Windows application-crash record was observed. The application is not attributed to this task.', {}, 'windows-event-log')
-  if (before?.platform === 'windows' && Number.isInteger(result.exitCode) && result.exitCode !== 0) add('WINDOWS_NATIVE_STATUS', 'confirmed', 'remote-command', 'The original Windows process status is preserved separately from POSIX signals.', { nativeStatus: result.exitCode >>> 0 })
+  if (before?.platform === 'windows' && Number.isInteger(result.exitCode) && result.exitCode !== 0 && !result.timedOut && !['cancelled', 'timed_out'].includes(result.state)) add('WINDOWS_NATIVE_STATUS', 'confirmed', 'remote-command', 'The original Windows process status is preserved separately from POSIX signals.', { nativeStatus: result.exitCode >>> 0 })
   for (const snapshot of [before, after]) {
     if (snapshot && snapshot.availability !== 'available') add('EVIDENCE_UNAVAILABLE', 'unknown', 'host', 'Host evidence could not be collected; no cause is inferred.', { availability: snapshot.availability }, 'host-snapshot')
   }

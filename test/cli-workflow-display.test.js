@@ -138,12 +138,12 @@ test('plan rendering shows every complete apply and revert command without ANSI 
   assert.equal(hasSgr(output.text), false)
 })
 
-test('CLI catalog refresh matches controller eligibility for native FreeBSD, Linux and the Podman prerequisite', async () => {
-  for (const [kind, catalogId, label] of [['catalog', 'ghost-freebsd', 'FreeBSD'], ['catalog', 'odoo-freebsd', 'FreeBSD'], ['catalog', 'podman-freebsd', 'FreeBSD'], ['catalog', 'ghost-linux', 'Linux'], ['catalog', 'unknown-fixture', null], ['ordinary', 'ghost-freebsd', null]]) {
+test('CLI catalog refresh matches controller eligibility without offering Docker bootstrap refresh', async () => {
+  for (const [kind, catalogId, label] of [['catalog', 'ghost-freebsd', 'native FreeBSD'], ['catalog', 'odoo-freebsd', 'native FreeBSD'], ['catalog', 'podman-freebsd', 'native FreeBSD'], ['catalog', 'ghost-linux', 'native Linux'], ['catalog', 'magento-windows', 'Windows'], ['catalog', 'brave-windows', 'Windows'], ['catalog', 'docker-desktop-windows', null], ['catalog', 'unknown-fixture', null], ['ordinary', 'ghost-freebsd', null]]) {
     const { ui } = plainUi()
     ui.choose = async (_prompt, options) => {
       const action = options.find(option => option.value === 'refresh-catalog')
-      assert.equal(action?.label ?? null, label ? `Refresh remaining native ${label} catalog steps` : null)
+      assert.equal(action?.label ?? null, label ? `Refresh remaining ${label} catalog steps` : null)
       return null
     }
     const controller = {
@@ -183,6 +183,30 @@ test('local operator reviews show stored commands rather than sanitized browser 
     await manageExecution({ ui, controller, serverId: 'host', taskId: 1 })
     assert.ok(output.text.includes(checksum), action)
     assert.ok(!output.text.includes('[redacted-64-hex]'), action)
+  }
+})
+
+test('CLI pause refreshes live progress without weakening abort or execution decisions', async () => {
+  for (const action of ['pause', 'abort']) {
+    const { ui } = plainUi()
+    let version = 'shown'
+    const choices = [action, null]
+    ui.choose = async () => { version = 'advanced'; return choices.shift() }
+    ui.pause = async () => {}
+    let controlled = false
+    const controller = {
+      tasks: { get: () => ({ kind: 'ordinary' }), revisions: () => [] },
+      inspect: () => ({ task: { status: 'running' }, commands: [], revisions: [], stateVersion: version }),
+      control: (host, task, selected, expectedVersion) => {
+        assert.equal(host, 'host')
+        assert.equal(task, 1)
+        assert.equal(selected, action)
+        assert.equal(expectedVersion, action === 'pause' ? 'advanced' : 'shown')
+        controlled = true
+      }
+    }
+    await manageExecution({ ui, controller, serverId: 'host', taskId: 1 })
+    assert.ok(controlled)
   }
 })
 

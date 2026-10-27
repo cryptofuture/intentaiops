@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { executeApprovedPlan } from '../src/plan-validator.js'
+import { buildWindowsDockerBootstrapTask } from '../src/windows-docker-bootstrap-task.js'
+import { buildWindowsBraveTask } from '../src/windows-brave-task.js'
 import {
   detectPlannerPlatform,
   validateDockerAndSecrets,
@@ -28,6 +30,31 @@ function planWith (command, overrides = {}) {
 
 const macosInventory = { webminaiExecution: { platform: 'macos', runtimeHome: '/Users/mac' }, webminaiDocker: { preferred: true } }
 
+test('Brave continuation reuses only confirmed release acquisition and still requires fresh verification', () => {
+  const original = buildWindowsBraveTask(12, { platform: 'windows' }).plan
+  const remaining = { ...original, commands: original.commands.slice(1) }
+  const prior = status => [{ plan: original, executionEvidence: { commands: [{ commandId: 'start-brave-download', status }] } }]
+  assert.doesNotThrow(() => validateWindowsPlan(remaining, {}, 'install Brave', { previousAttempts: prior('completed') }))
+  for (const status of ['failed', 'pending', 'uncertain']) assert.throws(() => validateWindowsPlan(remaining, {}, 'install Brave', { previousAttempts: prior(status) }), /releases\/latest/u)
+  const unverified = { ...remaining, commands: remaining.commands.map(command => ({ ...command, command: command.command.replaceAll('Get-AuthenticodeSignature', 'Write-Output') })) }
+  assert.throws(() => validateWindowsPlan(unverified, {}, 'install Brave', { previousAttempts: prior('completed') }), /Authenticode/u)
+  const rollbackOnlySource = { ...original, commands: remaining.commands, revertCommands: original.commands }
+  assert.throws(() => validateWindowsPlan(rollbackOnlySource, {}, 'install Brave'), /releases\/latest/u)
+})
+
+test('Windows Docker readiness is not a Linux deployment and service plans require native paths', () => {
+  const inventory = { webminaiExecution: { platform: 'windows' }, webminaiDocker: { preferred: true } }
+  const bootstrap = buildWindowsDockerBootstrapTask(5, inventory.webminaiExecution, inventory.webminaiDocker).plan
+  assert.doesNotThrow(() => validateDockerAndSecrets(bootstrap, inventory))
+  for (const command of ['docker compose version', '& $docker compose version 2>&1|Out-String', '& $dockerCli compose --version']) assert.doesNotThrow(() => validateDockerAndSecrets(planWith(command), inventory))
+  for (const command of ['docker compose up -d', '& $docker compose up -d', '& $dockerCli compose pull', "& 'C:\\Program Files\\Docker\\docker.exe' compose up -d", 'docker compose version; docker compose up -d']) {
+    assert.throws(() => validateDockerAndSecrets(planWith(command), inventory), /Windows Compose service plans/u)
+    assert.throws(() => validateDockerAndSecrets(planWith(command, { modifiedFiles: ['/opt/webminai/services/app/compose.yaml'] }), inventory), /Windows Compose service plans/u)
+    assert.doesNotThrow(() => validateDockerAndSecrets(planWith(command, { modifiedFiles: ['C:\\ProgramData\\WebminAI\\Services\\app\\compose.yaml'] }), inventory))
+    assert.throws(() => validateDockerAndSecrets(planWith(command), { ...inventory, webminaiDocker: { preferred: false } }), /Docker is not enabled/u)
+  }
+})
+
 test('planner platform detection preserves inventory precedence and unknown fallback', () => {
   assert.equal(detectPlannerPlatform({ os: 'linux', platform: { os: 'Windows_NT' } }), 'windows')
   assert.equal(detectPlannerPlatform({ info: { agents: [{ application: { kernel: 'FreeBSD 15.1' } }] } }), 'freebsd')
@@ -48,6 +75,13 @@ test('Windows policy uses execution inventory for LocalSystem package tools', ()
     /Chocolatey but it is unavailable/u
   )
   assert.doesNotThrow(() => validateWindowsPlan(plan, { webminaiExecution: { commands: { chocolatey: true } } }, 'install a package'))
+})
+
+test('Windows rollback planning does not require a new Brave installation', () => {
+  const plan = planWith("Write-Output 'reviewed-cleanup'", { modifiedFiles: ['C:\\ProgramData\\WebminAI\\Tasks\\1-brave'] })
+  assert.throws(() => validateWindowsPlan(plan, {}, 'install Brave'), /official releases\/latest/u)
+  assert.doesNotThrow(() => validateWindowsPlan(plan, {}, 'install Brave', { requireRevert: false }))
+  assert.throws(() => validateWindowsPlan(planWith('& curl.exe', { modifiedFiles: plan.modifiedFiles }), {}, 'install Brave', { requireRevert: false }), /directly invokes a native process/u)
 })
 
 test('Docker credential policy and Netdata function policy remain independent', () => {

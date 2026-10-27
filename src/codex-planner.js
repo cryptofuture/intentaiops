@@ -124,7 +124,7 @@ export class CodexPlanner {
         }
         const plan = validateCommandPlan(proposed, policy, { requireRevert })
         if (deploymentBlueprint) validateApplicationDeltaPlan(plan)
-        validatePlatformPlan(plan, inventory, request, previousAttempts)
+        validatePlatformPlan(plan, inventory, request, previousAttempts, { requireRevert })
         return annotateAiPlan(validateNetdataFunctions(plan, inventory))
       } catch (error) {
         validationError = error
@@ -861,12 +861,12 @@ function summarizeRetryEvidence (attempt) {
   })
 }
 
-function validatePlatformPlan (plan, inventory, request, previousAttempts) {
+function validatePlatformPlan (plan, inventory, request, previousAttempts, { requireRevert }) {
   validateDockerAndSecrets(plan, inventory)
   validatePortablePlan(plan)
   const platform = detectPlannerPlatform(inventory)
   if (platform === 'linux') validateLinuxPlan(plan, request, inventory, previousAttempts)
-  if (platform === 'windows') validateWindowsPlan(plan, inventory, request)
+  if (platform === 'windows') validateWindowsPlan(plan, inventory, request, { requireRevert, previousAttempts })
   return plan
 }
 

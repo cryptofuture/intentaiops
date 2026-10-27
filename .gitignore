@@ -34,3 +34,4 @@ core.*
 /artifacts/kubernetes-common/
 /artifacts/native/
 /artifacts/macos-lab/
+/artifacts/windows-lab/

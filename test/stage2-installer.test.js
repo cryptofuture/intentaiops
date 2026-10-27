@@ -10,6 +10,20 @@ import { fileURLToPath } from 'node:url'
 const installer = fileURLToPath(new URL('../remote/webminai-stage2.sh', import.meta.url))
 const windowsInstaller = fileURLToPath(new URL('../remote/webminai-stage2-windows.ps1', import.meta.url))
 
+test('Windows command runner reads optional native status safely after strict-mode scripts', async () => {
+  const source = await readFile(new URL('../remote/webminai-command-runner-windows.ps1', import.meta.url), 'utf8')
+  assert.match(source, /Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue/u)
+  assert.match(source, /if \(\$nativeStatus -is \[int\] -and \$nativeStatus -ne 0\) \{ exit \$nativeStatus \}/u)
+  assert.doesNotMatch(source, /if \(\$LASTEXITCODE/u)
+})
+
+test('Windows native process statuses retain all DWORD bits in the existing signed result field', async () => {
+  const source = await readFile(new URL('../plugin/webminai.plugin.windows.c', import.meta.url), 'utf8')
+  assert.match(source, /result->exit_code = \(int32_t\)exit_code;/u)
+  assert.doesNotMatch(source, /exit_code <= INT_MAX \? \(int\)exit_code : 1/u)
+  assert.match(source, /int32_t exit_code;/u)
+})
+
 test('stage 2 installs a setuid root plugin and a root-only host token', async () => {
   const source = await readFile(installer, 'utf8')
   assert.match(source, /install -o root -g "\$NETDATA_GROUP" -m 4750 "\$plugin_source"/)
@@ -89,6 +103,13 @@ test('Windows Stage 2 installs a LocalSystem plugin with guarded lifecycle state
   const source = await readFile(windowsInstaller, 'utf8')
 
   assert.match(source, /netdata-x64\.msi/)
+  assert.match(source, /System32\\curl\.exe/)
+  assert.match(source, /Test-Path -LiteralPath \$curl -PathType Leaf/)
+  assert.match(source, /--fail --silent --show-error --location --connect-timeout 15 --max-time 600 --output \$msi \$NetdataDownload/)
+  assert.match(source, /if \(\$LASTEXITCODE -ne 0\) \{ throw "Netdata download failed/)
+  assert.match(source, /'\/i', \('"' \+ \$msi \+ '"'\), '\/norestart'/)
+  assert.match(source, /Invoke-WebRequest -UseBasicParsing -Uri \$NetdataDownload -OutFile \$msi -TimeoutSec 600 -ErrorAction Stop/)
+  assert.doesNotMatch(source, /--insecure/)
   assert.match(source, /Win32_Service/)
   assert.match(source, /StartName -notin @\('LocalSystem', 'Local System'\)/)
   assert.match(source, /S-1-5-18/)

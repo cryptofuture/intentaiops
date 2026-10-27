@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { randomBytes } from 'node:crypto'
+import assert from 'node:assert/strict'
 import { accessSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,7 +13,7 @@ const TARGETS = [
   { serverId: 'webminai-ubuntu-2404', platform: 'linux' },
   { serverId: 'webminai-freebsd-15-1', platform: 'freebsd' },
   { serverId: process.env.WEBMINAI_MACOS_SERVER_ID ?? 'macos-15', platform: 'macos', credentialEnv: 'SSH_HOST_MAC_PWD' },
-  { serverId: 'windows-11', platform: 'windows', credentialEnv: 'SSH_HOST_PWD' }
+  { serverId: process.env.WEBMINAI_WINDOWS_SERVER_ID ?? 'windows-11', platform: 'windows', credentialEnv: process.env.SSH_HOST_WIN_PWD ? 'SSH_HOST_WIN_PWD' : 'SSH_HOST_PWD' }
 ]
 
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
@@ -45,15 +46,19 @@ async function validateTarget (target, tarball) {
     ? `C:/Windows/Temp/webminai.${token}`
     : `/tmp/webminai.${token}`
   const remoteTarball = `${remoteDirectory}/intent-ai-ops.tgz`
+  let created = false
   try {
+    assert.equal(await session.ssh.hostFingerprint(server.connectionUrl), server.hostFingerprint, 'Package test target identity changed')
     await session.ssh.execute(server.connectionUrl, createDirectoryCommand(target.platform, remoteDirectory), { timeoutMs: 30000 })
+    created = true
     await session.ssh.copy(server.connectionUrl, tarball, remoteTarball, { timeoutMs: 120000 })
+    if (target.platform === 'windows') await session.ssh.copy(server.connectionUrl, path.join(projectRoot, 'scripts/installed-web-smoke.js'), `${remoteDirectory}/installed-web-smoke.mjs`, { timeoutMs: 30000 })
     const result = await session.ssh.execute(server.connectionUrl, validationCommand(target.platform, remoteDirectory), { timeoutMs: target.platform === 'macos' ? 900000 : 300000 })
     if (!result.stdout.includes('PACKAGE_INSTALL_OK')) throw new Error(`${target.serverId} did not return its package-install marker`)
     process.stdout.write(`PASS: ${target.serverId} (${target.platform}) installed dist/intent-ai-ops.tgz and ran Intent AI Ops\n`)
   } finally {
     try {
-      await session.ssh.execute(server.connectionUrl, cleanupCommand(target.platform, remoteDirectory), { timeoutMs: 120000 })
+      if (created) await session.ssh.execute(server.connectionUrl, cleanupCommand(target.platform, remoteDirectory), { timeoutMs: 120000 })
     } catch {}
     await session.close()
   }
@@ -100,6 +105,7 @@ function posixStoreSmoke (directory, node) {
 
 function windowsValidation (directory) {
   const archive = `node-v${NODE_VERSION}-win-x64.zip`
+  const webSmoke = `const {installedWebSmoke}=await import('file:///${directory}/installed-web-smoke.mjs');await import('data:text/javascript;base64,'+Buffer.from(installedWebSmoke('${directory}/prefix/node_modules/intent-ai-ops','${directory}/data')).toString('base64'))`
   const script = [
     "$ErrorActionPreference='Stop'",
     "$ProgressPreference='SilentlyContinue'",
@@ -123,6 +129,8 @@ function windowsValidation (directory) {
     '$smoke="import {TaskStore} from \'"+$moduleUrl+"\';const s=new TaskStore(\'"+$data+"\');const t=s.create(\'install-smoke\',\'Validate installed package\');s.cancel(\'install-smoke\',t.id);if(s.get(\'install-smoke\',t.id).status!==\'cancelled\')process.exit(1)"',
     '& (Join-Path $nodeRoot \'node.exe\') --input-type=module --eval $smoke',
     "if($LASTEXITCODE-ne 0){throw 'Installed SQLite smoke test failed.'}",
+    `& (Join-Path $nodeRoot 'node.exe') --input-type=module --eval "${webSmoke}"`,
+    "if($LASTEXITCODE-ne 0){throw 'Installed Windows web workspace smoke test failed.'}",
     "Write-Output 'PACKAGE_INSTALL_OK'"
   ].join(';')
   return powershell(script)

@@ -7,6 +7,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { installedWebSmoke } from './installed-web-smoke.js'
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
 const temporary = mkdtempSync(path.join(os.tmpdir(), 'intentaiops-package-'))
@@ -39,6 +40,7 @@ try {
   assert.equal(installedPackage.scripts?.['verify:sqlite'], 'node scripts/install-better-sqlite3.js')
   assert.equal(existsSync(path.join(packageRoot, 'dist', 'intent-ai-ops.tgz')), false)
   assert.equal(existsSync(path.join(packageRoot, 'dist', 'intent-ai-ops.tgz.sha256')), false)
+  assert.equal(existsSync(path.join(packageRoot, 'remote', 'windows-cli-recovery-baseline.ps1')), true)
   for (const asset of ['operator-controller.js', 'operator-console.js', 'operator-console.html', 'operator-console-browser.js']) assert.equal(existsSync(path.join(packageRoot, 'src', asset)), true, asset)
   for (const artifact of [
     'webminai.plugin',
@@ -52,10 +54,7 @@ try {
   const databaseRoot = path.join(temporary, 'database')
   const smoke = `import { TaskStore } from ${JSON.stringify(storeModule)}; const store = new TaskStore(${JSON.stringify(databaseRoot)}); const task = store.create('package-smoke', 'Validate installed SQLite'); if (task.status !== 'planning') process.exit(1); store.cancel('package-smoke', task.id); if (store.get('package-smoke', task.id).status !== 'cancelled') process.exit(1)`
   run(process.execPath, ['--input-type=module', '--eval', smoke], temporary)
-  const consoleModule = pathToFileURL(path.join(packageRoot, 'src', 'operator-console.js')).href
-  const controllerModule = pathToFileURL(path.join(packageRoot, 'src', 'operator-controller.js')).href
-  const webSmoke = `import assert from 'node:assert/strict'; import { readdirSync } from 'node:fs'; import { startOperatorConsole } from ${JSON.stringify(consoleModule)}; import { OperatorController } from ${JSON.stringify(controllerModule)}; const controller = new OperatorController({ dataRoot: ${JSON.stringify(databaseRoot)}, settings: { servers: {}, clusters: {} } }); const server = await startOperatorConsole({ controller }); try { const response = await fetch(server.url); const html = await response.text(); assert.match(html, /Intent AI Ops Workspace/); const script = /src="([^"]+\\.js)"/.exec(html)?.[1]; assert.ok(script); assert.equal((await fetch(server.origin + script)).status, 200); assert.match(response.headers.get('content-security-policy'), /wasm-unsafe-eval/); const engine = readdirSync(${JSON.stringify(path.join(packageRoot, 'src/operator-web/assets'))}).find(name => name.endsWith('.wasm')); assert.ok(engine); const wasm = await fetch(server.origin + '/assets/' + engine); assert.equal(wasm.status, 200); assert.equal(wasm.headers.get('content-type'), 'application/wasm'); assert.deepEqual([...new Uint8Array(await wasm.arrayBuffer()).slice(0, 4)], [0, 97, 115, 109]); assert.equal((await fetch(server.origin + '/fonts/geist-400.ttf')).status, 200); assert.match(await (await fetch(server.origin + '/licenses/OFL.txt')).text(), /SIL OPEN FONT LICENSE/i); const session = await fetch(server.origin + '/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: new URL(server.url).hash.slice(1) }) }); assert.equal(session.status, 200); } finally { await server.close(); }`
-  run(process.execPath, ['--input-type=module', '--eval', webSmoke], temporary)
+  run(process.execPath, ['--input-type=module', '--eval', installedWebSmoke(packageRoot, databaseRoot)], temporary)
   if (process.platform === 'linux') {
     const ptySmoke = `import {createRequire} from 'node:module'; const require=createRequire(${JSON.stringify(path.join(packageRoot, 'package.json'))}); const pty=require('node-pty');const child=pty.spawn(process.execPath,['-e','process.stdout.write("PTY_SMOKE_OK")'],{name:'xterm-256color',cols:80,rows:24,env:{PATH:process.env.PATH}});let output='';const timer=setTimeout(()=>{child.kill();process.exitCode=1},5000);child.onData(data=>{output+=data});child.onExit(result=>{clearTimeout(timer);if(result.exitCode!==0||!output.includes('PTY_SMOKE_OK'))process.exitCode=1})`
     run(process.execPath, ['--input-type=module', '--eval', ptySmoke], temporary)

@@ -5,11 +5,11 @@ const hostId = process.env.INTENT_WEB_HOST
 const dataRoot = process.env.INTENT_WEB_DATA_ROOT
 const enabled = Boolean(hostId && dataRoot && process.env.VAULT_TEST)
 const platform = process.env.INTENT_WEB_SHELL_PLATFORM ?? 'Linux'
-if (!['Linux', 'FreeBSD', 'Darwin'].includes(platform)) throw new Error('Unsupported POSIX lab platform')
+if (!['Linux', 'FreeBSD', 'Darwin', 'Windows'].includes(platform)) throw new Error('Unsupported lab platform')
 let cli, launch, hostSnapshot
 const errors = new WeakMap()
 
-test.describe('opt-in existing POSIX lab, actual CLI and read-only browser', () => {
+test.describe('opt-in existing host lab, actual CLI and read-only browser', () => {
   test.skip(!enabled, 'Requires INTENT_WEB_HOST, existing INTENT_WEB_DATA_ROOT and VAULT_TEST')
   test.beforeAll(async () => {
     test.setTimeout(120000)
@@ -96,5 +96,39 @@ test.describe('opt-in existing POSIX lab, actual CLI and read-only browser', () 
     expect(status).toBe(403)
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Your infrastructure' })).toBeVisible()
+  })
+
+  test('recorded events reconnect from Last-Event-ID without repeating history', async ({ page }) => {
+    const result = await page.evaluate(async () => {
+      const history = await (await fetch('history')).json()
+      if (history.length < 2) throw new Error('Lab needs at least two recorded events')
+      const previous = history.at(-2).id
+      const expected = history.at(-1).id
+      const abort = new AbortController()
+      const timer = setTimeout(() => abort.abort(), 15000)
+      let reader
+      try {
+        const response = await fetch('events', { headers: { 'Last-Event-ID': String(previous) }, signal: abort.signal })
+        if (!response.ok || !response.headers.get('content-type')?.startsWith('text/event-stream')) throw new Error('Authenticated event stream unavailable')
+        reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let text = ''
+        for (;;) {
+          const chunk = await reader.read()
+          if (chunk.done) throw new Error('Event stream ended before catch-up')
+          text += decoder.decode(chunk.value, { stream: true })
+          if (text.length > 131072) throw new Error('Catch-up exceeded fixture bound')
+          const frames = text.split('\n\n').slice(0, -1)
+          const ids = frames.flatMap(frame => [...frame.matchAll(/^id: (\d+)$/gmu)].map(match => Number(match[1])))
+          if (ids.includes(expected)) return { previous, expected, ids }
+        }
+      } finally { clearTimeout(timer); await reader?.cancel().catch(() => {}); abort.abort() }
+    })
+    expect(result.ids[0]).toBe(result.expected)
+    expect(result.ids.every((id, index) => id > (result.ids[index - 1] ?? result.previous))).toBe(true)
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'Your infrastructure' })).toBeVisible()
+    const restored = await page.evaluate(async () => (await (await fetch('workspace')).json()).cursor)
+    expect(restored).toBeGreaterThanOrEqual(result.expected)
   })
 })

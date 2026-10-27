@@ -126,8 +126,9 @@ export class OperatorController {
 
   async remoteRecoveryOptions (admin, hostId) {
     const connection = { settings: this.settings, passphrase: this.passphrase, serverId: hostId }
+    const capabilities = await admin.capabilities(connection)
     const inventory = await admin.refreshInventory(connection)
-    return { platform: 'linux', linuxContext: inventory.webminaiLinuxContext, docker: inventory.webminaiDocker, applicationDefaults: await admin.settings.decryptApplicationDefaults(connection) }
+    return { platform: capabilities.platform?.os, linuxContext: inventory.webminaiLinuxContext, windowsExecution: inventory.webminaiExecution, freebsdExecution: inventory.webminaiExecution, macosExecution: inventory.webminaiExecution, docker: inventory.webminaiDocker, applicationDefaults: await admin.settings.decryptApplicationDefaults(connection) }
   }
 
   async prepareRemoteRecovery (hostId, executionId) {
@@ -165,7 +166,7 @@ export class OperatorController {
       const executedIds = new Set(evidence.commands.filter(command => command.status !== 'pending').map(command => command.commandId))
       this.record({ type: 'revision_planning', hostId, taskId })
       const replacement = await admin.plan({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, request: this.sanitize(task.request), taskId, catalogId: task.catalogId, requireRevert: !rollback, previousAttempts: [this.sanitize({ ...task, executionEvidence: evidence })], retryInstructions: `${this.sanitize(instructions)}\n${rollback ? 'Propose ONLY rollback commands as the forward commands, in rollback order. Revert only confirmed completed changes. Never include rollback for uncertain or failed commands without separately verified evidence.' : 'Generate only replacement UNEXECUTED work. Use new command IDs. Do not repeat completed changes. Preserve cumulative rollback coverage for original completed changes and replacement work.'} Completed IDs: ${completedIds.join(', ')}. Return self-contained dependencies.`, onProgress: event => this.record({ type: 'planner_progress', hostId, taskId, event }) })
-      if (!replacement.commands.length) throw new Error('No executable replacement commands were proposed; original plan is unchanged')
+      if (!replacement.commands.length) throw new Error(`No executable replacement commands were proposed; original plan is unchanged. ${String(this.sanitize(replacement.summary ?? '')).slice(0, 1000)}`)
       if (replacement.commands.some(command => executedIds.has(command.id))) throw new Error('replacement reuses an executed command ID')
       const completed = task.plan.commands.filter(command => completedIds.includes(command.id))
       const plan = { ...replacement, commands: rollback ? replacement.commands : [...completed, ...replacement.commands], operatorRollback: rollback }
@@ -181,8 +182,8 @@ export class OperatorController {
   async proposeCatalogRefresh (hostId, taskId, expectedVersion) {
     this.checkVersion(hostId, taskId, expectedVersion)
     const task = this.tasks.get(hostId, taskId)
-    const definition = listCommonTasks({ category: 'application' }).find(definition => definition.id === task.catalogId && (!definition.prerequisite || definition.id === 'podman-freebsd') && ['linux', 'freebsd'].includes(definition.platform))
-    if (task.kind !== 'catalog' || !definition) throw new Error('Catalog refresh requires a native Linux or FreeBSD application task')
+    const definition = listCommonTasks({ category: 'application' }).find(definition => definition.id === task.catalogId && (!definition.prerequisite || definition.id === 'podman-freebsd') && ['linux', 'freebsd', 'windows'].includes(definition.platform))
+    if (task.kind !== 'catalog' || !definition) throw new Error('Catalog refresh requires a supported Linux, FreeBSD or Windows application task')
     if (!this.tasks.executionEvents(hostId, taskId).length && (task.results?.length || task.status !== 'planned')) throw new Error('Legacy execution has no journal; operator investigation required')
     if (task.revertResults?.length || this.tasks.rollbackState(hostId, taskId).some(command => command.status !== 'pending')) throw new Error('Rollback has started; do not refresh deployment work')
     const execution = this.tasks.executionState(hostId, taskId)
@@ -191,9 +192,9 @@ export class OperatorController {
       const inventory = await admin.refreshInventory({ settings: this.settings, passphrase: this.passphrase, serverId: hostId })
       this.checkVersion(hostId, taskId, expectedVersion)
       if (definition.platform === 'linux' && (!inventory.webminaiLinuxContext || inventory.webminaiDocker?.preferred)) throw new Error('Catalog refresh currently requires a native Linux route')
-      if (definition.platform === 'freebsd' && inventory.webminaiExecution?.platform !== 'freebsd') throw new Error('Catalog refresh requires a verified FreeBSD execution target')
+      if (['freebsd', 'windows'].includes(definition.platform) && inventory.webminaiExecution?.platform !== definition.platform) throw new Error(`Catalog refresh requires a verified ${definition.platform} execution target`)
       const applicationDefaults = await admin.settings.decryptApplicationDefaults({ settings: this.settings, passphrase: this.passphrase })
-      const options = { platform: definition.platform, linuxContext: inventory.webminaiLinuxContext, freebsdExecution: inventory.webminaiExecution, docker: inventory.webminaiDocker, applicationDefaults }
+      const options = { platform: definition.platform, linuxContext: inventory.webminaiLinuxContext, freebsdExecution: inventory.webminaiExecution, windowsExecution: inventory.webminaiExecution, docker: inventory.webminaiDocker, applicationDefaults }
       const eligibility = commonTaskEligibility(task.catalogId, options)
       if (!eligibility.eligible) throw new Error(`Catalog task is no longer eligible: ${eligibility.reason}`)
       const plan = regenerateCatalogRevision(task, execution, buildCommonTask(task.catalogId, task.id, options).plan)

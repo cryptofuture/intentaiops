@@ -21,7 +21,7 @@ export async function launchLabCli ({ actions = false, onPrompt = () => null } =
         clearTimeout(timer)
         let safe = stripVTControlCharacters(buffer)
         for (const secret of secrets) safe = safe.replaceAll(secret, '[redacted]')
-        const error = safe.split(/[\r\n]/u).findLast(line => /error|failed|locked|busy/iu.test(line)) ?? 'check vault and foreground-session ownership'
+        const error = safe.split(/[\r\n]/u).findLast(line => /error|failed|locked|busy|owns this profile/iu.test(line)) ?? 'check vault and foreground-session ownership'
         reject(new Error('Lab CLI did not start: ' + redactDiagnosticText(error).slice(0, 600)))
       }
       child.once('error', fail); child.once('exit', fail)

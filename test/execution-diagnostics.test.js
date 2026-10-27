@@ -15,6 +15,36 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { createKubernetesApiCommand } from '../src/netdata-client.js'
 
+test('a protected CLI installation root conflict is explained without inferring no changes', () => {
+  const diagnostics = executionDiagnostics({ result: { exitCode: 1, stderr: 'INSTALL_ROOT_ALREADY_EXISTS: refusing to overwrite an unowned Intent AI Ops directory' } })
+  assert.ok(diagnostics.some(value => value.code === 'TARGET_CONFLICT'))
+  assert.ok(!diagnostics.some(value => value.code === 'CAUSE_UNKNOWN'))
+})
+
+test('Windows bounded download polling explains pending transfer without changing its outcome', () => {
+  const item = { id: 'wait-wsl-download', retry: { exitCodes: [75] } }
+  const before = { platform: 'windows', availability: 'available' }
+  const result = { exitCode: 75, stdout: 'download-pending state=Transferring bytes=47476864/258990080\r\n' }
+  const diagnostics = executionDiagnostics({ item, before, result })
+  assert.deepEqual(diagnostics.find(value => value.code === 'DOWNLOAD_PENDING').evidence, { state: 'Transferring', receivedBytes: 47476864, totalBytes: 258990080 })
+  assert.ok(!diagnostics.some(value => value.code === 'CAUSE_UNKNOWN'))
+  assert.equal(result.exitCode, 75)
+  for (const change of [
+    { item: { id: item.id } },
+    { error: new Error('Connection lost') },
+    { result: { ...result, exitCode: 0 } },
+    { result: { ...result, timedOut: true } },
+    { result: { ...result, state: 'unknown' } },
+    { result: { ...result, stdout: result.stdout + 'password=fixture-secret' } },
+    { result: { ...result, stdout: 'download-pending state=Transferring bytes=9/8' } },
+    { result: { ...result, stdout: 'download-pending state=Transferring bytes=1/9999999999999999' } }
+  ]) {
+    const observations = executionDiagnostics({ item, before, result, ...change })
+    assert.ok(!observations.some(value => value.code === 'DOWNLOAD_PENDING'))
+    assert.doesNotMatch(JSON.stringify(observations), /fixture-secret/u)
+  }
+})
+
 const before = { availability: 'available', platform: 'linux', bootId: 'boot-a', scopeId: 'group-a', oomKills: 0, memoryLimitBytes: 805306368, observedAt: '2026-10-16T01:00:00Z' }
 const codes = observations => observations.map(value => value.code)
 const window = { uid: 'pod-a', startedAt: '2026-10-16T01:00:00Z', observedAt: '2026-10-16T02:00:00Z' }
@@ -82,6 +112,7 @@ test('structured reasons do not retain raw errors, payloads or secrets', () => {
   assert.ok(!JSON.stringify(executionDiagnostics({ error: wrapped })).includes('KNOWN_SECRET'))
   const windows = executionDiagnostics({ result: { exitCode: -1073741801 }, before: { platform: 'windows' } })
   assert.equal(windows.find(value => value.code === 'WINDOWS_NATIVE_STATUS').evidence.nativeStatus, 3221225495)
+  for (const result of [{ exitCode: 124, timedOut: true }, { exitCode: 124, state: 'timed_out' }, { exitCode: 143, state: 'cancelled' }]) assert.ok(!codes(executionDiagnostics({ result, before: { platform: 'windows' } })).includes('WINDOWS_NATIVE_STATUS'))
   const hostEvents = executionDiagnostics({ before: { ...before, platform: 'windows', resourceExhaustionRecordId: 10, applicationCrashRecordId: 20 }, after: { ...before, platform: 'windows', resourceExhaustionRecordId: 11, applicationCrashRecordId: 21 }, result: { exitCode: null } })
   assert.ok(codes(hostEvents).includes('RESOURCE_EXHAUSTION'))
   assert.ok(codes(hostEvents).includes('HOST_APPLICATION_CRASH'))
@@ -97,7 +128,8 @@ test('fixed platform collectors use bounded allowlisted snapshots', async () => 
     assert.ok(!JSON.stringify(evidence).includes('KNOWN_SECRET'))
     assert.ok(!JSON.stringify(evidence).includes('/private/path'))
   }
-  assert.match(hostEvidenceCommand('windows'), /-EncodedCommand/u)
+  assert.match(hostEvidenceCommand('windows'), /Get-CimInstance Win32_OperatingSystem/u)
+  assert.doesNotMatch(hostEvidenceCommand('windows'), /powershell\.exe|-EncodedCommand/u)
   assert.equal(hostEvidenceCommand('kubernetes'), null)
   assert.throws(() => hostEvidenceCommand('linux', "/tmp/x';echo unsafe"), /safe path/u)
   assert.match(hostEvidenceCommand('linux', '/var/lib/app'), /df -Pk '\/var\/lib\/app'/u)
