@@ -21,6 +21,7 @@ import { commonTaskRecoveryManifest, commonTaskRecoverySupported, RemoteCommonTa
 import { inspectRecoveryBaseline } from './remote-recovery-baseline.js'
 import { startExecutionHeartbeat } from './execution-heartbeat.js'
 import { guardAdminMutations } from './host-mutation-ownership.js'
+import { recordApplicationSecurity } from './software-security.js'
 
 const REMOTE_RECOVERY_EXECUTION = Symbol('reviewed remote common-task recovery')
 
@@ -395,7 +396,13 @@ export class AdminService {
       })
       const confirmed = state.filter(command => command.status === 'completed').map(command => previous.find(result => result.id === command.commandId && result.status === 'completed') ?? { id: command.commandId, status: 'completed', result: { exitCode: 0, stdout: '[completion confirmed by execution journal]', stderr: '' } })
       if (remoteJournal && !this.tasks.executionState(serverId, taskId).some(command => command.status === 'uncertain')) await remoteJournal.release()
-      return [...confirmed, ...results]
+      const all = [...confirmed, ...results]
+      if (plan.commands.every(command => all.some(result => result.id === command.id && result.status === 'completed'))) {
+        try { recordApplicationSecurity({ admin: this, serverId, task: saved, results: all, onProgress }) } catch {
+          try { onProgress?.({ type: 'security_report_unavailable', message: 'Security assessment unavailable; installation outcomes are unchanged and patch state remains unknown.' }) } catch {}
+        }
+      }
+      return all
     } finally {
       heartbeat.stop()
       this.tasks.releaseExecution(serverId, taskId, lease.owner)

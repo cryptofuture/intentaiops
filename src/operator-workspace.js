@@ -12,6 +12,7 @@ import { OperatorShells } from './operator-shells.js'
 
 const actions = new Set(['prepare', 'execute', 'host-connect', 'host-disconnect', 'host-add', 'host-edit', 'host-remove', 'stage2-activate', 'stage2-update', 'stage2-deactivate', 'propose', 'refresh-catalog', 'approve', 'resume', 'rollback', 'reconcile', 'resolve', 'analyze', 'pause', 'abort', 'prepare-remote-recovery', 'execute-remote-recovery', 'run-resume', 'run-pause'])
 for (const action of ['cluster-prepare', 'cluster-execute', 'cluster-pause', 'cluster-abort', 'cluster-prepare-recovery']) actions.add(action)
+actions.add('remediate-security')
 export class OperatorWorkspace {
   constructor ({ controller, hosts, metrics }) {
     this.controller = controller; this.hosts = hosts; this.metrics = metrics; this.pending = new Map(); this.stopping = false
@@ -124,6 +125,7 @@ export class OperatorWorkspace {
     if (b.action === 'approve') return c.approve(b.hostId, b.taskId, b.revisionId, b.expectedVersion, b.fingerprint)
     if (b.action === 'propose') return c.propose(b.hostId, b.taskId, b.instructions, b.expectedVersion, b.rollback === true)
     if (b.action === 'refresh-catalog') return c.proposeCatalogRefresh(...args)
+    if (b.action === 'remediate-security') return c.proposeSecurityRemediation(...args)
     if (b.action === 'rollback') return c.rollback(...args, b.fingerprint, b.revisionId)
     if (b.action === 'reconcile') return c.reconcile(...args)
     if (b.action === 'resolve') return c.resolve(...args, b.commandId, b.status, b.evidence, b.rollbackRevision)

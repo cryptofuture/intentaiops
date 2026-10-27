@@ -286,6 +286,8 @@ action or execution endpoint and does not extend audited remote recovery profile
 The local CLI reviews the actual stored proposal and results, rather than the
 sanitized public-console projection. Browser views and exports remain sanitized.
 
+Windows Docker prerequisite tasks also support this local refresh. A confirmed polling-window failure can receive new reviewed remaining-work IDs while preserving the existing BITS transfer and completed installers. Unknown outcomes still require reconciliation; refresh does not restart a download or approve execution.
+
 Native Ubuntu Ghost now records whether `/var/lib/mysql` was absent before
 installation. If newly created data remains after package removal, rollback
 stops with `DATABASE_DATA_REMAINS` and retains its baseline for inspection.

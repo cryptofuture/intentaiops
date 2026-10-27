@@ -42,6 +42,43 @@ async function fixture (t) {
   return { root, tasks, task, controller, calls, admin }
 }
 
+test('detected security issues prepare real updates without inheriting deployment approval or replaying completed commands', async t => {
+  const { controller, tasks, task, admin, calls } = await fixture(t)
+  const audit = { ...command('audit-software-security'), command: 'echo versions' }
+  const originalRollback = [command('original-cleanup')]
+  tasks.savePlan('host', task.id, { ...plan(['first']), commands: [command('first'), audit], revertCommands: originalRollback })
+  const initial = controller.inspect('host', task.id)
+  await controller.resume('host', task.id, initial.stateVersion, initial.fingerprint)
+  const results = tasks.get('host', task.id).results.map(item => item.id === audit.id ? { ...item, result: { exitCode: 0, stdout: 'INTENT_SECURITY_PHP host-cli 8.4.23\nINTENT_SECURITY_END' } } : item)
+  tasks.saveResults('host', task.id, results)
+  admin.workspace.loadRules = async () => ({ policy: { allowSudo: true, executionIdentity: 'root' } })
+  admin.capabilities = async () => ({ platform: { os: 'windows' } })
+  admin.plan = async options => {
+    assert.match(options.retryInstructions, /executable security updates/u)
+    assert.match(options.retryInstructions, /8.4.27/u)
+    return plan(['patch-owned-image'])
+  }
+  const before = controller.inspect('host', task.id)
+  assert.equal(before.securityRemediationAvailable, true)
+  const proposal = await controller.proposeSecurityRemediation('host', task.id, before.stateVersion)
+  assert.equal(calls.length, 2)
+  const revision = tasks.revisions('host', task.id).find(item => item.id === proposal.revisionId)
+  assert.equal(revision.approved, 0)
+  assert.deepEqual(revision.plan.commands.slice(0, 2), tasks.get('host', task.id).plan.commands)
+  assert.match(revision.plan.commands.at(-1).id, /^audit-software-security-[a-f0-9]{12}$/u)
+  assert.deepEqual(revision.plan.commands.at(-1).dependsOn, ['patch-owned-image'])
+  assert.deepEqual(revision.plan.revertCommands, originalRollback)
+  admin.plan = async () => ({ ...plan(['other-repair']), revertCommands: [{ ...originalRollback[0], command: 'echo changed-rollback' }] })
+  await assert.rejects(controller.proposeSecurityRemediation('host', task.id, before.stateVersion), /cannot replace original rollback/u)
+  assert.throws(() => controller.approve('host', task.id, proposal.revisionId, before.stateVersion, 'bad'), /approval/u)
+  controller.approve('host', task.id, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+  const approved = controller.inspect('host', task.id)
+  await controller.resume('host', task.id, approved.stateVersion, approved.fingerprint)
+  assert.equal(calls.length, 4)
+  assert.equal(calls.filter(text => text === 'echo first').length, 1)
+  assert.equal(tasks.get('host', task.id).status, 'completed')
+})
+
 test('reviewed catalog maintenance keeps the CLI one-way policy without exempting AI plans', async t => {
   for (const kind of ['catalog', 'ai']) {
     const { controller, tasks, admin } = await fixture(t)
@@ -139,6 +176,25 @@ test('remote recovery HTTP endpoints enforce tokens, origin, read-only mode and 
     const execute = await fetch(server.origin + '/action', { method: 'POST', headers, body: JSON.stringify({ action: 'execute-remote-recovery', hostId: 'host', taskId: 1 }) })
     assert.equal(execute.status, actions ? 409 : 403)
   }
+})
+
+test('security repair HTTP preparation enforces read-only and CSRF while retaining canonical fingerprints', async t => {
+  const { controller } = await fixture(t)
+  let proposals = 0
+  controller.proposeSecurityRemediation = async () => { proposals++; return { fingerprint: 'a'.repeat(64), revisionId: 2 } }
+  for (const actions of [false, true]) {
+    const server = await startOperatorConsole({ controller, actions })
+    t.after(() => server.close())
+    const login = await fetch(server.origin + '/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: new URL(server.url).hash.slice(1) }) })
+    const { csrf } = await login.json()
+    const headers = { 'Content-Type': 'application/json', Cookie: login.headers.get('set-cookie').split(';')[0], Origin: server.origin }
+    const body = JSON.stringify({ action: 'remediate-security', hostId: 'host', taskId: 1, expectedVersion: 'fixture' })
+    assert.equal((await fetch(server.origin + '/action', { method: 'POST', headers, body })).status, 403)
+    const response = await fetch(server.origin + '/action', { method: 'POST', headers: { ...headers, 'X-Intent-CSRF': csrf }, body })
+    assert.equal(response.status, actions ? 200 : 403)
+    if (actions) assert.equal((await response.json()).fingerprint, 'a'.repeat(64))
+  }
+  assert.equal(proposals, 1)
 })
 
 test('revision catalog context comes from the saved task, not operator instructions', async t => {
@@ -274,6 +330,34 @@ test('catalog refresh rejects stale inventory decisions and non-native targets w
   before = controller.inspect('host', created.id)
   assert.deepEqual(before.task.plan, controller.sanitize(original))
   assert.equal(before.revisions.length, 0)
+  assert.deepEqual(calls, [])
+})
+
+test('Windows Docker continuation refresh preserves completed installers and the existing BITS transfer', async t => {
+  const { tasks, admin, controller, calls } = await fixture(t)
+  const execution = { platform: 'windows' }
+  const docker = { preference: 'auto', ready: false, preferred: false }
+  admin.settings.decryptApplicationDefaults = async () => ({})
+  admin.workspace.loadRules = async () => ({ policy: { executionIdentity: 'root' } })
+  admin.plan = async () => { throw new Error('AI must not be called') }
+  admin.refreshInventory = async () => ({ webminaiExecution: execution, webminaiDocker: docker })
+  const task = tasks.create('host', 'Continue Docker installation', { kind: 'catalog', catalogId: 'docker-desktop-windows' })
+  const original = buildCommonTask(task.catalogId, task.id, { platform: 'windows', windowsExecution: execution, docker }).plan
+  tasks.savePlan('host', task.id, original)
+  const index = original.commands.findIndex(command => command.id === 'wait-docker-download')
+  const lease = tasks.acquireExecution('host', task.id, original)
+  for (const command of original.commands.slice(0, index)) tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_completed', commandId: command.id, attemptId: command.id })
+  tasks.appendExecutionEvent('host', task.id, lease.owner, { type: 'command_failed', commandId: 'wait-docker-download', attemptId: 'bounded-poll-ended', metadata: { exitCode: 75 } })
+  tasks.releaseExecution('host', task.id, lease.owner)
+  const before = controller.inspect('host', task.id)
+  const proposal = await controller.proposeCatalogRefresh('host', task.id, before.stateVersion)
+  const revised = tasks.revisions('host', task.id).find(item => item.id === proposal.revisionId)
+  assert.equal(revised.approved, 0)
+  assert.deepEqual(revised.plan.commands.slice(0, index), original.commands.slice(0, index))
+  assert.equal(revised.plan.commands[index].command, original.commands[index].command)
+  assert.notEqual(revised.plan.commands[index].id, original.commands[index].id)
+  assert.deepEqual(revised.plan.revertCommands, original.revertCommands)
+  assert.equal(revised.plan.commands.filter(command => command.command === original.commands[index - 1].command).length, 1)
   assert.deepEqual(calls, [])
 })
 

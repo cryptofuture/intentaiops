@@ -1,5 +1,7 @@
 # Intent AI Ops
 
+Application installs include reviewed, read-only security checks and saved recommendations. See [application security checks](docs/software-security.md) for advisory coverage, update review and evidence limitations.
+
 <p align="center">
   <a href="https://intentaiops.top">
     <img src="public/logo-md.png" alt="Intent AI Ops logo" width="220">
@@ -260,6 +262,8 @@ steps from local catalog code without an AI call. Review the new plan, approve,
 then resume. It preserves completed commands and the original rollback, and
 refuses uncertain work or incompatible catalog changes. This requires local task
 history; it is not fresh-install remote recovery.
+
+Windows Docker setup supports the same reviewed refresh after download polling expires. It continues the existing BITS transfer without repeating completed installers.
 
 For example: “Use port 8080 instead of 80 for the remaining deployment steps.” You can also ask Codex a read-only question, abort remaining work, or review a rollback. A partly completed task needs a separately reviewed rollback proposal.
 

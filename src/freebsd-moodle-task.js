@@ -68,6 +68,7 @@ memory_limit = 512M
 max_input_vars = 5000
 zlib.output_compression = On
 expose_php = Off
+session.upload_progress.enabled = 0
 CONF
 cat > "$root/nginx.conf" <<'CONF'
 user root wheel;

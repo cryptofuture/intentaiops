@@ -13,6 +13,9 @@ import { completeTaskReport } from './task-completion-report.js'
 import { withHostMutation } from './host-mutation-ownership.js'
 import { isSystemUpdateTask } from './system-update-task.js'
 import { KubernetesTaskService } from './kubernetes-task-service.js'
+import { securityRemediationInstructions, parseSecurityEvidence } from './software-security.js'
+import { withSoftwareSecurity } from './software-security-collector.js'
+import { randomBytes } from 'node:crypto'
 
 export class OperatorController {
   constructor ({ dataRoot, settings, passphrase, adminFor, tasks, runs }) {
@@ -70,7 +73,8 @@ export class OperatorController {
     const rollback = [...revisions].reverse().find(item => item.approved && item.plan.operatorRollback)
     const rollbackCommands = this.tasks.rollbackState(hostId, taskId).map(command => ({ ...this.sanitize(command), rollbackRevision: command.rollbackRevision }))
     const publicRevisions = revisions.map(revision => ({ ...this.sanitize(revision), fingerprint: planFingerprint(revision.plan), differences: planDifferences(task.plan, revision.plan) }))
-    return { ...this.sanitize({ version: 1, hostId, task, control: this.tasks.control(hostId, taskId), commands: this.tasks.executionState(hostId, taskId), rollbackAvailable: Boolean(task.plan?.revertCommands?.length || rollback) }), revisions: publicRevisions, rollbackCommands, stateVersion: this.tasks.stateVersion(hostId, taskId), fingerprint: planFingerprint(task.plan), rollbackFingerprint: planFingerprint(task.plan?.revertCommands), reviewedRollbackFingerprint: rollback ? planFingerprint(rollback.plan) : null }
+    const security = parseSecurityEvidence(task.results)
+    return { ...this.sanitize({ version: 1, hostId, task, control: this.tasks.control(hostId, taskId), commands: this.tasks.executionState(hostId, taskId), rollbackAvailable: Boolean(task.plan?.revertCommands?.length || rollback) }), securityRemediationAvailable: task.status === 'completed' && security.complete && security.observations.some(item => item.status === 'potentially_vulnerable'), revisions: publicRevisions, rollbackCommands, stateVersion: this.tasks.stateVersion(hostId, taskId), fingerprint: planFingerprint(task.plan), rollbackFingerprint: planFingerprint(task.plan?.revertCommands), reviewedRollbackFingerprint: rollback ? planFingerprint(rollback.plan) : null }
   }
 
   assertHost (hostId) {
@@ -155,7 +159,16 @@ export class OperatorController {
     })
   }
 
-  async propose (hostId, taskId, instructions, expectedVersion, rollback = false) {
+  async proposeSecurityRemediation (hostId, taskId, expectedVersion) {
+    this.checkVersion(hostId, taskId, expectedVersion)
+    const task = this.tasks.get(hostId, taskId)
+    if (task.status !== 'completed') throw new Error('Finish or reconcile the original task before preparing security remediation')
+    if (!this.tasks.executionEvents(hostId, taskId).length || this.tasks.executionState(hostId, taskId).some(command => command.status !== 'completed')) throw new Error('Confirmed execution history is required before security remediation')
+    if (this.tasks.rollbackState(hostId, taskId).some(command => command.status !== 'pending')) throw new Error('Rollback has started; inspect recovery before security remediation')
+    return this.propose(hostId, taskId, securityRemediationInstructions(task.results), expectedVersion, false, true)
+  }
+
+  async propose (hostId, taskId, instructions, expectedVersion, rollback = false, security = false) {
     this.checkVersion(hostId, taskId, expectedVersion)
     if (typeof instructions !== 'string' || !instructions.trim() || instructions.length > 8192) throw new TypeError('revision instructions must contain 1-8192 characters')
     const evidence = this.inspect(hostId, taskId)
@@ -165,9 +178,19 @@ export class OperatorController {
       const completedIds = evidence.commands.filter(command => command.status === 'completed').map(command => command.commandId)
       const executedIds = new Set(evidence.commands.filter(command => command.status !== 'pending').map(command => command.commandId))
       this.record({ type: 'revision_planning', hostId, taskId })
-      const replacement = await admin.plan({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, request: this.sanitize(task.request), taskId, catalogId: task.catalogId, requireRevert: !rollback, previousAttempts: [this.sanitize({ ...task, executionEvidence: evidence })], retryInstructions: `${this.sanitize(instructions)}\n${rollback ? 'Propose ONLY rollback commands as the forward commands, in rollback order. Revert only confirmed completed changes. Never include rollback for uncertain or failed commands without separately verified evidence.' : 'Generate only replacement UNEXECUTED work. Use new command IDs. Do not repeat completed changes. Preserve cumulative rollback coverage for original completed changes and replacement work.'} Completed IDs: ${completedIds.join(', ')}. Return self-contained dependencies.`, onProgress: event => this.record({ type: 'planner_progress', hostId, taskId, event }) })
+      let replacement = await admin.plan({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, request: this.sanitize(task.request), taskId, catalogId: task.catalogId, requireRevert: !rollback, previousAttempts: [this.sanitize({ ...task, executionEvidence: evidence })], retryInstructions: `${this.sanitize(instructions)}\n${rollback ? 'Propose ONLY rollback commands as the forward commands, in rollback order. Revert only confirmed completed changes. Never include rollback for uncertain or failed commands without separately verified evidence.' : 'Generate only replacement UNEXECUTED work. Use new command IDs. Do not repeat completed changes. Preserve cumulative rollback coverage for original completed changes and replacement work.'} Completed IDs: ${completedIds.join(', ')}. Return self-contained dependencies.`, onProgress: event => this.record({ type: 'planner_progress', hostId, taskId, event }) })
       if (!replacement.commands.length) throw new Error(`No executable replacement commands were proposed; original plan is unchanged. ${String(this.sanitize(replacement.summary ?? '')).slice(0, 1000)}`)
       if (replacement.commands.some(command => executedIds.has(command.id))) throw new Error('replacement reuses an executed command ID')
+      if (security) {
+        const originalRollback = task.plan.revertCommands ?? []
+        for (const original of originalRollback) {
+          const proposed = replacement.revertCommands?.find(command => command.id === original.id)
+          if (proposed && planFingerprint(proposed) !== planFingerprint(original)) throw new Error('Security remediation cannot replace original rollback definitions')
+        }
+        replacement = { ...replacement, modifiedFiles: [...new Set([...task.plan.modifiedFiles, ...replacement.modifiedFiles])], revertCommands: [...(replacement.revertCommands ?? []).filter(command => !originalRollback.some(original => original.id === command.id)), ...originalRollback] }
+        const platform = (await admin.capabilities({ settings: this.settings, passphrase: this.passphrase, serverId: hostId })).platform.os
+        replacement = withSoftwareSecurity(replacement, { platform, catalogId: task.catalogId ?? `runtime-${platform}`, commandId: `audit-software-security-${randomBytes(6).toString('hex')}` })
+      }
       const completed = task.plan.commands.filter(command => completedIds.includes(command.id))
       const plan = { ...replacement, commands: rollback ? replacement.commands : [...completed, ...replacement.commands], operatorRollback: rollback }
       const rules = await admin.workspace.loadRules(hostId)
@@ -182,7 +205,7 @@ export class OperatorController {
   async proposeCatalogRefresh (hostId, taskId, expectedVersion) {
     this.checkVersion(hostId, taskId, expectedVersion)
     const task = this.tasks.get(hostId, taskId)
-    const definition = listCommonTasks({ category: 'application' }).find(definition => definition.id === task.catalogId && (!definition.prerequisite || definition.id === 'podman-freebsd') && ['linux', 'freebsd', 'windows'].includes(definition.platform))
+    const definition = listCommonTasks({ category: 'application' }).find(definition => definition.id === task.catalogId && (!definition.prerequisite || ['podman-freebsd', 'docker-desktop-windows'].includes(definition.id)) && ['linux', 'freebsd', 'windows'].includes(definition.platform))
     if (task.kind !== 'catalog' || !definition) throw new Error('Catalog refresh requires a supported Linux, FreeBSD or Windows application task')
     if (!this.tasks.executionEvents(hostId, taskId).length && (task.results?.length || task.status !== 'planned')) throw new Error('Legacy execution has no journal; operator investigation required')
     if (task.revertResults?.length || this.tasks.rollbackState(hostId, taskId).some(command => command.status !== 'pending')) throw new Error('Rollback has started; do not refresh deployment work')

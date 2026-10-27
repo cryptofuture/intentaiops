@@ -51,6 +51,7 @@ import { applyApplicationDefaults } from './application-defaults.js'
 import { buildHostHealthTask } from './host-health-task.js'
 import { buildSystemUpdateTask } from './system-update-task.js'
 import { buildIntentAiOpsInstallTask } from './intent-ai-ops-install-task.js'
+import { withSoftwareSecurity } from './software-security-collector.js'
 
 const STATE_ROOT = '/var/lib/webminai/task-state'
 
@@ -745,6 +746,7 @@ export function buildCommonTask (catalogId, taskId, options = {}) {
     throw new Error('Podman is disabled by this host preference and this task has no native-only route')
   }
   const diagnostic = definition.category === 'diagnostic'
+  if (definition.category === 'application') built.plan = withSoftwareSecurity(built.plan, { catalogId, platform })
   const foundationIds = catalogFoundationIds(catalogId, options)
   return {
     ...built,

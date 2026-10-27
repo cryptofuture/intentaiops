@@ -307,6 +307,7 @@ for (const application of ['odoo', 'home-assistant', 'magento']) {
     const built = buildFreebsdPodmanApplicationTask(application, 42, execution)
     validateCommandPlan(built.plan, rootExecutionPolicy({}))
     for (const step of native.plan.commands) {
+      if (step.id === 'audit-software-security') continue
       const wrapped = built.plan.commands.find(item => item.id === `podman-${step.id}`)
       assert.ok(wrapped)
       assert.equal(wrapped.risk, step.risk)

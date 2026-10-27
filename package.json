@@ -34,6 +34,7 @@
     "docs/ssh-connection-reuse.md",
     "docs/magento-opensearch-images.md",
     "docs/ghost-mysql-images.md",
+    "docs/software-security.md",
     "README.md"
   ],
   "engines": {
@@ -51,6 +52,7 @@
     "build:package": "node scripts/build-package-tarball.js",
     "benchmark:vault-kdf": "node scripts/benchmark-vault-kdf.js",
     "benchmark:ssh": "node scripts/benchmark-ssh.js",
+    "audit:software": "node scripts/audit-common-software-security.js",
     "test:ssh": "node --test test/system-ssh.test.js test/host-session-factory.test.js test/ssh-session-manager.test.js test/ssh-integration.test.js",
     "test:linux-reliability": "node --test test/linux-reliability.integration.test.js",
     "check:checksums": "sh scripts/dist-checksums.sh verify",

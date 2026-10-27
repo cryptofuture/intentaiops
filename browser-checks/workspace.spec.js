@@ -42,6 +42,36 @@ test.beforeAll(async () => {
 })
 test.afterAll(async () => { await server?.close(); await rm(root, { recursive: true, force: true }) })
 
+test('detected security issues open an unapproved repair revision without replaying installation', async ({ page }) => {
+  const admin = await controller.adminFor('other')
+  const previousRules = admin.workspace.loadRules
+  admin.workspace.loadRules = async () => ({ policy: { executionIdentity: 'root' } })
+  try {
+    const task = tasks.create('other', 'Security repair fixture')
+    const audit = { ...command, id: 'audit-software-security' }
+    tasks.savePlan('other', task.id, { ...plan, summary: 'Security repair fixture', commands: [audit] })
+    const lease = tasks.acquireExecution('other', task.id, tasks.get('other', task.id).plan)
+    try {
+      for (const type of ['command_prepared', 'command_dispatched', 'command_completed']) tasks.appendExecutionEvent('other', task.id, lease.owner, { type, commandId: audit.id, attemptId: 'fixture-security-attempt', metadata: { exitCode: 0 } })
+    } finally { tasks.releaseExecution('other', task.id, lease.owner) }
+    tasks.saveResults('other', task.id, [{ id: audit.id, status: 'completed', result: { exitCode: 0, stdout: 'INTENT_SECURITY_PHP host-cli 8.4.23\nINTENT_SECURITY_END' } }])
+    await page.goto(server.url)
+    await page.getByRole('button', { name: `#${task.id} Security repair fixture completed` }).click()
+    await expect(page.getByRole('button', { name: 'Patch detected security issues' })).toBeVisible()
+    await page.getByRole('button', { name: 'Patch detected security issues' }).click()
+    await expect.poll(() => tasks.revisions('other', task.id).length).toBe(2)
+    await expect(page.getByRole('button', { name: 'Approve revision only' }).last()).toBeEnabled()
+    expect(tasks.revisions('other', task.id).at(-1).approved).toBe(0)
+    expect(tasks.get('other', task.id).plan.commands).toEqual([audit])
+    expect(tasks.allExecutionEvents('other', task.id).filter(event => event.type === 'command_dispatched')).toHaveLength(1)
+    await page.screenshot({ path: path.resolve('artifacts/browser-screenshots/security-repair-review.png'), fullPage: true })
+    await Promise.all([
+      page.waitForResponse(response => response.url().endsWith('/preferences') && response.request().method() === 'POST'),
+      page.getByRole('button', { name: 'Close task view only', exact: true }).click()
+    ])
+  } finally { admin.workspace.loadRules = previousRules }
+})
+
 test('all 27 component galleries render without horizontal overflow or browser errors', async ({ page }) => {
   const errors = []
   page.on('pageerror', error => errors.push(error.message))

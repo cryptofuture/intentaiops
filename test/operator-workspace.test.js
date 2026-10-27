@@ -173,6 +173,22 @@ test('catalog refresh is an idempotent proposal operation and never implicitly e
   assert.deepEqual(calls, [])
 })
 
+test('security remediation is idempotent preparation, not implicit approval or execution', async t => {
+  const { workspace, controller, calls } = await fixture(t)
+  let proposals = 0
+  controller.proposeSecurityRemediation = async (hostId, taskId, version) => {
+    assert.deepEqual([hostId, taskId, version], ['host', 1, 'current-version'])
+    proposals++
+    return { revisionId: 2, fingerprint: 'a'.repeat(64) }
+  }
+  const request = { action: 'remediate-security', requestKey: 'security-repair-0001', hostId: 'host', taskId: 1, expectedVersion: 'current-version' }
+  const accepted = workspace.submit(request)
+  assert.equal(workspace.submit(request).id, accepted.id)
+  await workspace.pending.get(accepted.id).promise
+  assert.equal(proposals, 1)
+  assert.deepEqual(calls, [])
+})
+
 test('browser preparation is durable, idempotent and distinct from explicit canonical execution', async t => {
   const { workspace, controller, tasks, calls } = await fixture(t)
   const request = { action: 'prepare', requestKey: 'prepare-request-0001', hostId: 'host', request: 'Inspect fixture' }

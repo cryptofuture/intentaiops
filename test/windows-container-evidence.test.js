@@ -53,6 +53,6 @@ test('every Windows Docker application annotates its relevant execution phases',
     const built = buildCommonTask(`${app}-windows`, 901, { platform: 'windows', windowsExecution: execution, docker: { ready: true, preferred: true } })
     const phases = built.plan.commands.filter(command => ['services', 'initialize', 'verify'].includes(command.phase))
     assert.ok(phases.length)
-    for (const command of phases) assert.deepEqual(command.diagnostic, { kind: 'compose', target: `C:/ProgramData/WebminAI/Services/${app}` })
+    for (const command of phases.filter(item => item.id !== 'audit-software-security')) assert.deepEqual(command.diagnostic, { kind: 'compose', target: `C:/ProgramData/WebminAI/Services/${app}` })
   }
 })

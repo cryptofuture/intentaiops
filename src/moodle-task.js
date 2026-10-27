@@ -6,8 +6,8 @@ const VERSION = '5.2.1'
 const SOURCE_COMMIT = '63e16b757ca8fee05b672a27c23ee27cc8f9fabb'
 const ARCHIVE_URL = `https://codeload.github.com/moodle/moodle/tar.gz/${SOURCE_COMMIT}`
 const ARCHIVE_SHA256 = 'cbbd7176c9e88a33e577666347566b557cb97ef8c48d0e40da7a980c43fd16ab'
-const PHP_IMAGE = 'php:8.4.23-fpm-bookworm'
-const MOODLE_IMAGE = 'webminai/moodle:5.2.1-php8.4-fpm-r2'
+const PHP_IMAGE = 'php:8.4.27-fpm-bookworm@sha256:df5a5113e1179ddf4560cd15727eb3812f6457829756d2a96c6c11bb4c250089'
+const MOODLE_IMAGE = 'webminai/moodle:5.2.1-php8.4-fpm-r3'
 const NGINX_IMAGE = 'nginx:1.30.4-alpine'
 const DATABASE_IMAGE = 'mariadb:11.8.8'
 const PORT = 18106
@@ -565,7 +565,7 @@ function composeCommand (returnAssets = false) {
       dockerfile: [...dockerfile],
       entrypoint: [...entrypoint],
       fpm: fpmSocketConfig(),
-      phpIni: ['max_input_vars=5000', 'memory_limit=256M', 'upload_max_filesize=64M', 'post_max_size=64M'],
+      phpIni: ['max_input_vars=5000', 'memory_limit=256M', 'upload_max_filesize=64M', 'post_max_size=64M', 'session.upload_progress.enabled=0'],
       nginx: nginxConfig(),
       installer: installerBootstrapLines()
     }
@@ -577,7 +577,7 @@ function composeCommand (returnAssets = false) {
     writeCandidate(`${SERVICE_ROOT}/Dockerfile`, dockerfile, '0444'),
     writeCandidate(`${SERVICE_ROOT}/docker-entrypoint.sh`, entrypoint, '0555'),
     writeCandidate(`${SERVICE_ROOT}/php-fpm.conf`, fpmSocketConfig(), '0444'),
-    writeCandidate(`${SERVICE_ROOT}/php.ini`, ['max_input_vars=5000', 'memory_limit=256M', 'upload_max_filesize=64M', 'post_max_size=64M'], '0444'),
+    writeCandidate(`${SERVICE_ROOT}/php.ini`, ['max_input_vars=5000', 'memory_limit=256M', 'upload_max_filesize=64M', 'post_max_size=64M', 'session.upload_progress.enabled=0'], '0444'),
     writeCandidate(`${SERVICE_ROOT}/nginx.conf`, nginxConfig(), '0444'),
     writeCandidate(`${SERVICE_ROOT}/installer-argv.php`, installerBootstrapLines(), '0444'),
     `grep -Fq 'fastcgi_pass unix:/run/php-fpm/webminai.sock' ${quote(`${SERVICE_ROOT}/nginx.conf`)}`,

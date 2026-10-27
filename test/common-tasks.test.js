@@ -1019,7 +1019,7 @@ test('verified Moodle task resolves public-root nginx, PHP-FPM socket, off-web d
       const compose = built.plan.commands.find(item => item.id === 'write-compose').command
       const pullImages = built.plan.commands.find(item => item.id === 'pull-images')
       const initialize = built.plan.commands.find(item => item.id === 'initialize-moodle')
-      assert.match(compose, /FROM php:8\.4\.23-fpm-bookworm/u)
+      assert.match(compose, /FROM php:8\.4\.27-fpm-bookworm@sha256:[a-f0-9]{64}/u)
       assert.equal(compose.includes('%s  %s\\n'), true)
       assert.match(compose, /root \/var\/www\/html\/public/u)
       assert.match(compose, /fastcgi_pass unix:\/run\/php-fpm\/webminai\.sock/u)
@@ -1035,7 +1035,7 @@ test('verified Moodle task resolves public-root nginx, PHP-FPM socket, off-web d
       assert.match(pullImages.command, /moby\/buildkit:buildx-stable-1/u)
       assert.match(built.plan.revertCommands.find(item => item.id === 'remove-compose-project').command, /docker buildx rm --force 'webminai-moodle-[0-9]+'/u)
       assert.match(built.verifyReverted, /docker buildx inspect 'webminai-moodle-[0-9]+'/u)
-      assert.doesNotMatch(pullImages.command, /docker image inspect 'php:8\.4\.23-fpm-bookworm'/u)
+      assert.doesNotMatch(pullImages.command, /docker image inspect 'php:8\.4\.27-fpm-bookworm/u)
       assert.doesNotMatch(pullImages.command, /nohup|moodle-build\.pid|build-still-running/u)
       assert.equal(initialize.executionMode, 'job')
       assert.equal(initialize.timeoutMs, 30 * 60 * 1000)

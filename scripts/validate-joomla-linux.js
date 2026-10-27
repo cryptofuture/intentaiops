@@ -11,6 +11,7 @@ import { evaluatePromotionEvidence } from '../src/promotion-policy.js'
 import { runProcess } from '../src/process-runner.js'
 import { SettingsStore } from '../src/settings-store.js'
 import { SystemSsh } from '../src/system-ssh.js'
+import { moodleRelease } from '../src/moodle-task.js'
 
 const LINUX_HOSTS = [
   'webminai-almalinux-9',
@@ -28,7 +29,7 @@ const activeLinuxHosts = requestedHosts.length > 0 ? LINUX_HOSTS.filter(serverId
 if (requestedHosts.length > 0 && activeLinuxHosts.length !== requestedHosts.length) throw new Error('WEBMINAI_LINUX_HOSTS contains an unknown Linux lab host')
 const ISMET = process.env.WEBMINAI_DOCKER_HOST ?? 'ismet'
 const candidate = process.argv.includes('--moodle')
-  ? { app: 'moodle-linux', label: 'Moodle', slug: 'moodle', port: 18106, marker: 'WEBMINAI_MOODLE_OK', path: '/webminai-health.txt', database: 'webminai_moodle_18106', images: ['webminai/moodle:5.2.1-php8.4-fpm-r2', 'nginx:1.30.4-alpine', 'mariadb:11.8.8', 'php:8.4.23-fpm-bookworm'] }
+  ? { app: 'moodle-linux', label: 'Moodle', slug: 'moodle', port: 18106, marker: 'WEBMINAI_MOODLE_OK', path: '/webminai-health.txt', database: 'webminai_moodle_18106', images: [moodleRelease().image, 'nginx:1.30.4-alpine', 'mariadb:11.8.8', moodleRelease().phpImage] }
   : process.argv.includes('--prestashop')
     ? { app: 'prestashop-linux', label: 'PrestaShop', slug: 'prestashop', port: 18105, marker: 'WEBMINAI_PRESTASHOP_OK', database: 'webminai_prestashop_18105', images: ['prestashop/prestashop:9.1.4-5.0-classic-8.4-fpm', 'nginx:1.30.4-alpine', 'mariadb:11.8.8'] }
     : process.argv.includes('--drupal')

@@ -204,7 +204,8 @@ test('boundary pause and resume are signed remotely without repeating completed 
     })
     const task = admin.createTask('lab', 'Install CLI', { kind: 'catalog', catalogId: 'intent-ai-ops-linux' })
     const plan = buildCommonTask('intent-ai-ops-linux', task.id, options).plan
-    assert.equal(plan.commands.length, 2)
+    assert.equal(plan.commands.length, 3)
+    assert.equal(plan.commands.at(-1).id, 'audit-software-security')
     admin.saveTaskPlan('lab', task.id, plan, { catalogId: 'intent-ai-ops-linux', options, target })
     const args = { settings, passphrase: 'unused', serverId: 'lab', taskId: task.id, plan, approve: async () => true, onResult: result => admin.appendTaskResult('lab', task.id, result) }
     await admin.execute({ ...args, beforeCommand: async item => item.id === plan.commands[0].id })

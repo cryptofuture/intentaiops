@@ -56,6 +56,7 @@ export function ClusterWorkspace ({ clusterId, api, submit, actions, refresh, op
       {view && (
         <Card title={`Task #${view.taskId}: ${view.summary}`}>
           <Badge status={view.status} /><p>Execution: {view.executionId}</p>
+          {view.securityReport && <Card title='Security recommendations'><pre class='output'>{view.securityReport.answer}</pre></Card>}
           {view.warnings?.map(warning => <p key={warning} class='notice'>{warning}</p>)}
           <table><thead><tr><th>Step</th><th>API operation</th><th>Purpose and risk</th><th>State</th></tr></thead><tbody>{view.commands.map(command => <tr key={command.id}><td>{command.id}</td><td><code>{command.method} {command.path}</code>{command.resourceUid && <p>Original UID: {command.resourceUid}</p>}{command.images?.map(image => <p key={image}>{image}</p>)}</td><td>{command.purpose}<p>{command.risk}</p></td><td><Badge status={view.execution.find(state => state.commandId === command.id)?.status ?? 'pending'} /></td></tr>)}</tbody></table>
           {view.takeoverRequired && <label class='check'><input type='checkbox' checked={takeover} onChange={event => setTakeover(event.target.checked)} />I inspected the prior operation and explicitly approve ownership takeover. Lease expiry alone is not permission to replay work.</label>}

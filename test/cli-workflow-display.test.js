@@ -138,8 +138,8 @@ test('plan rendering shows every complete apply and revert command without ANSI 
   assert.equal(hasSgr(output.text), false)
 })
 
-test('CLI catalog refresh matches controller eligibility without offering Docker bootstrap refresh', async () => {
-  for (const [kind, catalogId, label] of [['catalog', 'ghost-freebsd', 'native FreeBSD'], ['catalog', 'odoo-freebsd', 'native FreeBSD'], ['catalog', 'podman-freebsd', 'native FreeBSD'], ['catalog', 'ghost-linux', 'native Linux'], ['catalog', 'magento-windows', 'Windows'], ['catalog', 'brave-windows', 'Windows'], ['catalog', 'docker-desktop-windows', null], ['catalog', 'unknown-fixture', null], ['ordinary', 'ghost-freebsd', null]]) {
+test('CLI catalog refresh matches controller eligibility including reviewed Windows Docker continuation', async () => {
+  for (const [kind, catalogId, label] of [['catalog', 'ghost-freebsd', 'native FreeBSD'], ['catalog', 'odoo-freebsd', 'native FreeBSD'], ['catalog', 'podman-freebsd', 'native FreeBSD'], ['catalog', 'ghost-linux', 'native Linux'], ['catalog', 'magento-windows', 'Windows'], ['catalog', 'brave-windows', 'Windows'], ['catalog', 'docker-desktop-windows', 'Windows'], ['catalog', 'unknown-fixture', null], ['ordinary', 'ghost-freebsd', null]]) {
     const { ui } = plainUi()
     ui.choose = async (_prompt, options) => {
       const action = options.find(option => option.value === 'refresh-catalog')

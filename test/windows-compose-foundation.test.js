@@ -56,6 +56,6 @@ test('Windows Moodle is assembled from its own plan and shared Compose mechanics
   ])
   const serialized = JSON.stringify(built)
   assert.match(serialized, /WEBMINAI_MOODLE_OK/u)
-  assert.match(serialized, /webminai\/moodle:5\.2\.1-php8\.4-fpm-r2/u)
+  assert.match(serialized, /webminai\/moodle:5\.2\.1-php8\.4-fpm-r3/u)
   assert.doesNotMatch(serialized, /Drupal|drupal:11\.4\.4/u)
 })

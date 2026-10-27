@@ -871,6 +871,7 @@ async function reviewKubernetesTask ({ ui, clusterTasks, clusterId, taskId }) {
     const view = await clusterTasks.inspect(clusterId, taskId)
     ui.heading(`Kubernetes ${clusterId} / task #${taskId}: ${view.status}`)
     ui.output.write(view.summary + '\n')
+    if (view.securityReport) { ui.heading('Security recommendations'); writeWrapped(ui, view.securityReport.answer) }
     for (const command of view.commands) ui.output.write(`[${command.risk}] ${command.id}: ${command.method} ${command.path}\n  ${command.purpose}\n`)
     for (const warning of view.warnings ?? []) ui.warn(warning)
     const action = await ui.choose('Reviewed cluster controls', [{ label: view.recovery ? 'Review and execute recovery' : 'Review and continue remaining commands', value: 'execute' }, { label: 'Pause before the next command', value: 'pause' }, { label: 'Abort remaining work (does not kill workloads)', value: 'abort' }, ...(!view.recovery ? [{ label: 'Prepare a separate recovery review', value: 'recover' }] : []), { label: 'Back', value: null }])
@@ -2056,6 +2057,7 @@ async function runTask ({
     admin.saveTaskResults(serverId, task.id, savedResults)
     renderResults(ui, savedResults)
     if (admin.tasks.control(serverId, task.id).action !== 'run') await manageExecution({ ui, controller, serverId, taskId: task.id })
+    if (controller.inspect(serverId, task.id).securityRemediationAvailable && await ui.confirm('Security issues were detected. Prepare and review updates now?', false)) await manageExecution({ ui, controller, serverId, taskId: task.id, initialAction: 'remediate-security' })
     const reportResults = completedReportResults(admin.getTask(serverId, task.id))
     if (healthTask && reportResults) {
       await renderAndSaveHostHealthReport({
@@ -2202,22 +2204,23 @@ async function browseTaskHistory ({ ui, admin, settings, passphrase, serverId, s
   }
 }
 
-export async function manageExecution ({ ui, controller, serverId, taskId }) {
+export async function manageExecution ({ ui, controller, serverId, taskId, initialAction }) {
   for (;;) {
     const view = controller.inspect(serverId, taskId)
     const localTask = controller.tasks.get(serverId, taskId)
     const localRevisions = controller.tasks.revisions(serverId, taskId)
-    const refreshableCatalog = localTask.kind === 'catalog' && listCommonTasks({ category: 'application' }).find(definition => definition.id === localTask.catalogId && ['linux', 'freebsd', 'windows'].includes(definition.platform) && (!definition.prerequisite || definition.id === 'podman-freebsd'))
+    const refreshableCatalog = localTask.kind === 'catalog' && listCommonTasks({ category: 'application' }).find(definition => definition.id === localTask.catalogId && ['linux', 'freebsd', 'windows'].includes(definition.platform) && (!definition.prerequisite || ['podman-freebsd', 'docker-desktop-windows'].includes(definition.id)))
     const catalogPlatform = { linux: 'native Linux', freebsd: 'native FreeBSD', windows: 'Windows' }[refreshableCatalog?.platform]
     ui.clear()
     ui.banner(`Operator / ${serverId} / task #${taskId}`)
     ui.line('Task status', view.task.status)
     ui.renderTable([{ key: 'commandId', label: 'COMMAND' }, { key: 'status', label: 'STATE' }], view.commands)
-    const action = await ui.choose('Execution controls', [
+    const action = initialAction ?? await ui.choose('Execution controls', [
       { label: 'Inspect recorded commands and results', value: 'inspect' },
       { label: 'Pause at next command boundary', value: 'pause' },
       { label: 'Ask Codex a read-only question', value: 'analyze' },
       { label: 'Revise remaining steps', value: 'propose' },
+      ...(view.securityRemediationAvailable ? [{ label: 'Patch detected security issues: prepare, review and execute', value: 'remediate-security' }] : []),
       ...(refreshableCatalog ? [{ label: `Refresh remaining ${catalogPlatform} catalog steps`, value: 'refresh-catalog' }] : []),
       { label: 'Propose rollback of confirmed changes', value: 'propose-rollback' },
       { label: 'Reconcile durable remote outcomes', value: 'reconcile' },
@@ -2228,6 +2231,7 @@ export async function manageExecution ({ ui, controller, serverId, taskId }) {
       ...(view.revisions.some(revision => !revision.approved) ? [{ label: 'Review a pending plan revision', value: 'review-revision' }] : []),
       { label: 'Back', value: null }
     ])
+    initialAction = null
     if (!action) return
     try {
       if (action === 'inspect') {
@@ -2254,6 +2258,17 @@ export async function manageExecution ({ ui, controller, serverId, taskId }) {
         ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
         renderPlan(ui, controller.tasks.revisions(serverId, taskId).find(revision => revision.id === proposal.revisionId).plan)
         if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+      } else if (action === 'remediate-security') {
+        ui.info('Preparing actual updates against fresh host inventory. No new command runs without approval.')
+        const proposal = await controller.proposeSecurityRemediation(serverId, taskId, view.stateVersion)
+        const revision = controller.tasks.revisions(serverId, taskId).find(item => item.id === proposal.revisionId)
+        ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
+        renderPlan(ui, revision.plan)
+        if (await ui.confirm('Approve and execute these exact security updates and verification commands?', false)) {
+          controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+          const current = controller.inspect(serverId, taskId)
+          await controller.resume(serverId, taskId, current.stateVersion, current.fingerprint, event => renderTaskProgress(ui, event))
+        }
       } else if (action === 'propose' || action === 'propose-rollback') {
         const instructions = await ui.editor('Changes to remaining work')
         if (!instructions) continue
@@ -2589,6 +2604,7 @@ export function renderResults (ui, results, heading = 'Execution results') {
 }
 
 function renderTaskProgress (ui, event) {
+  if (event.type === 'security_report') { ui.heading('Security recommendations'); writeWrapped(ui, event.message); return }
   const prefix = event.phase === 'execution-retry' ? `Retry / ${event.commandId}` : event.phase === 'execution-diagnostics' ? `Evidence / ${event.commandId} / ${event.outcome}` : event.phase === 'execution-recovery' ? `Recovery / ${event.commandId}` : event.type === 'reasoning' ? 'Codex reasoning' : `Codex ${event.type}`
   ui.output.write(`\n${ui.paint('muted', `[${prefix}]`)} ${event.message}\n`)
 }

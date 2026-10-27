@@ -14,6 +14,7 @@ import { RemoteRecoveryTransport } from './remote-recovery-transport.js'
 import { RemoteCommonTaskJournal, retrieveRecoveryExecution } from './remote-common-task-recovery.js'
 import { withHostMutation } from './host-mutation-ownership.js'
 import { startExecutionHeartbeat } from './execution-heartbeat.js'
+import { recordApplicationSecurity } from './software-security.js'
 
 const policy = { maxCommands: 64, maxTimeoutMs: 1260000 }
 
@@ -113,7 +114,7 @@ export class KubernetesTaskService {
       const body = request.body ? JSON.parse(request.body) : null
       return { id: command.id, purpose: command.purpose, risk: command.risk, dependsOn: command.dependsOn ?? [], timeoutMs: command.timeoutMs, source: command.source, method: request.method, path: request.path, kind: body?.kind, name: body?.metadata?.name, images: body?.spec?.template?.spec?.containers?.map(container => container.image) ?? [], resourceUid: body?.preconditions?.uid }
     })
-    return { clusterId, taskId, request: task.request, status: task.status, catalogId: task.catalogId, summary: task.plan.summary, warnings: task.plan.warnings, commands, execution: this.tasks.executionState(c.historyId, taskId), control: this.tasks.control(c.historyId, taskId), expectedVersion: this.tasks.stateVersion(c.historyId, taskId), fingerprint: planFingerprint(task.plan), executionId: task.plan.kubernetes?.executionId, recovery: Boolean(task.plan.kubernetes?.recovery), takeoverRequired: Boolean(task.plan.kubernetes?.recovery?.ownerFingerprint), takeoverFingerprint: task.plan.kubernetes?.recovery?.ownerFingerprint ?? null }
+    return { clusterId, taskId, request: task.request, status: task.status, catalogId: task.catalogId, summary: task.plan.summary, warnings: task.plan.warnings, securityReport: task.progress?.findLast(event => event.type === 'security_report')?.report ?? null, commands, execution: this.tasks.executionState(c.historyId, taskId), control: this.tasks.control(c.historyId, taskId), expectedVersion: this.tasks.stateVersion(c.historyId, taskId), fingerprint: planFingerprint(task.plan), executionId: task.plan.kubernetes?.executionId, recovery: Boolean(task.plan.kubernetes?.recovery), takeoverRequired: Boolean(task.plan.kubernetes?.recovery?.ownerFingerprint), takeoverFingerprint: task.plan.kubernetes?.recovery?.ownerFingerprint ?? null }
   }
 
   async inspect (clusterId, taskId) { const c = await this.connect(clusterId); return this.view(c, clusterId, taskId) }
@@ -219,7 +220,10 @@ export class KubernetesTaskService {
           }
         })
         const all = [...(task.results ?? []), ...results]
-        this.tasks.saveResults(c.historyId, taskId, all)
+        const saved = this.tasks.saveResults(c.historyId, taskId, all)
+        if (saved.status === 'completed') {
+          try { recordApplicationSecurity({ admin: { appendTaskProgress: (_host, id, event) => this.tasks.appendProgress(c.historyId, id, event) }, serverId: c.historyId, task: saved, results: all }) } catch {}
+        }
         const controlAfter = this.tasks.control(c.historyId, taskId)
         if (controlAfter.action !== 'run') await event({ type: 'execution_paused', metadata: { action: controlAfter.action } })
       } catch (error) { unsafe = true; throw error } finally {

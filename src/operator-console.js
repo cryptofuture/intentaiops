@@ -212,6 +212,7 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
       else if (action === 'reconcile') result = await controller.reconcile(hostId, taskId, expectedVersion)
       else if (action === 'resolve') result = controller.resolve(hostId, taskId, expectedVersion, body.commandId, body.status, body.evidence, body.rollbackRevision)
       else if (action === 'propose') result = await controller.propose(hostId, taskId, body.instructions, expectedVersion, body.rollback === true)
+      else if (action === 'remediate-security') result = await controller.proposeSecurityRemediation(hostId, taskId, expectedVersion)
       else if (action === 'approve') result = controller.approve(hostId, taskId, body.revisionId, expectedVersion, fingerprint)
       else if (action === 'prepare-remote-recovery') result = await controller.prepareRemoteRecovery(hostId, body.executionId)
       else if (action === 'execute-remote-recovery') {
@@ -233,7 +234,7 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
         operation.catch(error => controller.record({ type: 'operator_action_failed', hostId, taskId, message: String(error.message) }))
         result = { accepted: true, action }
       } else throw new Error('unsupported operator action')
-      if (action === 'propose' || action === 'prepare-remote-recovery') {
+      if (['propose', 'remediate-security', 'prepare-remote-recovery'].includes(action)) {
         response.writeHead(200, { 'Content-Type': 'application/json' })
         return response.end(JSON.stringify(result))
       }
