@@ -52,7 +52,7 @@ export function buildWindowsComposeApplicationTask ({
 }) {
   if (!Array.isArray(commands) || commands.length === 0) throw new TypeError('Windows Compose application requires explicit application commands')
   const foundation = buildWindowsComposeFoundation({ taskId, windowsExecution, docker, application, port, images, credentials })
-  const applicationCommands = applyWindowsComposeOperationDefaults(commands)
+  const applicationCommands = applyWindowsComposeOperationDefaults(commands, foundation.paths.root)
   return {
     plan: {
       summary,
@@ -70,12 +70,14 @@ export function buildWindowsComposeApplicationTask ({
   }
 }
 
-export function applyWindowsComposeOperationDefaults (commands) {
+export function applyWindowsComposeOperationDefaults (commands, root) {
   if (!Array.isArray(commands)) throw new TypeError('Windows Compose operation defaults require a command array')
   return commands.map(item => {
     const operation = windowsOperationDefaults(item)
     const inheritedDefaultTimeout = item.executionMode === undefined && item.timeoutMs === 300000 && operation.executionMode === 'job'
-    return windowsComposeCommand(item.id, item.phase, item.command, item.purpose, item.dependsOn, inheritedDefaultTimeout ? operation.timeoutMs : item.timeoutMs ?? operation.timeoutMs, item.executionMode ?? operation.executionMode, item.risk)
+    const command = windowsComposeCommand(item.id, item.phase, item.command, item.purpose, item.dependsOn, inheritedDefaultTimeout ? operation.timeoutMs : item.timeoutMs ?? operation.timeoutMs, item.executionMode ?? operation.executionMode, item.risk)
+    if (root && ['services', 'initialize', 'verify'].includes(item.phase)) command.diagnostic = { kind: 'compose', target: windowsPathForCompose(root) }
+    return command
   })
 }
 
@@ -87,7 +89,7 @@ export function windowsComposePowerShell (root, body, timeoutMs = 300000) {
   return powershell(["$ErrorActionPreference='Stop'", windowsDockerPowerShellAdapter(timeoutMs), `Set-Location -LiteralPath '${powerShellQuote(root)}'`, body])
 }
 
-export function windowsComposePullCommand (root, project, profile = null, timeoutMs = 300000) {
+export function windowsComposePullCommand (root, project, profile = null, timeoutMs = 3600000) {
   const profileArgs = profile ? ` --profile '${powerShellQuote(profile)}'` : ''
   return windowsComposePowerShell(root, `& $docker compose -p '${powerShellQuote(project)}'${profileArgs} pull;if($LASTEXITCODE-ne 0){throw 'Docker Compose image pull failed.'};Write-Output 'images-pulled'`, timeoutMs)
 }
@@ -177,5 +179,6 @@ function command (id, phase, commandText, purpose, dependsOn = [], timeoutMs = 3
 }
 
 function dockerDiscovery (variable, timeoutMs = 300000) {
-  return `$dockerExe=(Get-Command docker.exe -ErrorAction SilentlyContinue).Source;if(-not $dockerExe){$dockerExe=Join-Path $env:ProgramFiles 'Docker\\Docker\\resources\\bin\\docker.exe'};if(-not (Test-Path -LiteralPath $dockerExe -PathType Leaf)){throw 'docker.exe is unavailable to LocalSystem.'};${variable}={$dockerArguments=@($args|ForEach-Object{$value=[string]$_;if($value -match '[\\s"]'){'"'+$value.Replace('"','\\"')+'"'}else{$value}});$stdout=[IO.Path]::GetTempFileName();$stderr=[IO.Path]::GetTempFileName();try{$process=Start-Process -FilePath $dockerExe -ArgumentList $dockerArguments -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr;if(-not $process.WaitForExit(${timeoutMs})){$process.Kill();throw 'Docker command timed out.'};$stdoutText=[string](Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue);$stderrText=[string](Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue);$global:LASTEXITCODE=if($null -ne $process.ExitCode){[int]$process.ExitCode}elseif($stderrText -match '(?im)^(error|failed|unknown command|docker:)'){1}else{0};if($stdoutText){Write-Output $stdoutText};if($stderrText){Write-Error -Message $stderrText -ErrorAction Continue}}finally{Remove-Item -LiteralPath $stdout,$stderr -Force -ErrorAction SilentlyContinue}}`
+  // Pin the process handle: Windows PowerShell otherwise loses completed exit codes.
+  return `$dockerExe=(Get-Command docker.exe -ErrorAction SilentlyContinue).Source;if(-not $dockerExe){$dockerExe=Join-Path $env:ProgramFiles 'Docker\\Docker\\resources\\bin\\docker.exe'};if(-not (Test-Path -LiteralPath $dockerExe -PathType Leaf)){throw 'docker.exe is unavailable to LocalSystem.'};${variable}={$dockerArguments=@($args|ForEach-Object{$value=[string]$_;if($value -match '[\\s"]'){'"'+$value.Replace('"','\\"')+'"'}else{$value}});$stdout=[IO.Path]::GetTempFileName();$stderr=[IO.Path]::GetTempFileName();try{$process=Start-Process -FilePath $dockerExe -ArgumentList $dockerArguments -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr;$null=$process.Handle;if(-not $process.WaitForExit(${timeoutMs})){$process.Kill();throw 'Docker command timed out.'};$stdoutText=[string](Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue);$stderrText=[string](Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue);$exitCode=$process.ExitCode;if($null -eq $exitCode){throw 'Docker native exit status is unavailable; inspect the outcome before continuation.'};$global:LASTEXITCODE=[int]$exitCode;if($stdoutText){Write-Output $stdoutText};if($stderrText){Write-Error -Message $stderrText -ErrorAction Continue}}finally{Remove-Item -LiteralPath $stdout,$stderr -Force -ErrorAction SilentlyContinue}}`
 }

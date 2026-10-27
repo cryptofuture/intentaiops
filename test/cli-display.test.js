@@ -150,7 +150,7 @@ test('connected host actions preserve every operation and platform availability'
   const linux = values('linux')
   for (const action of [
     'refresh', 'activate', 'activate-plugin', 'claim-cloud', 'deactivate', 'remove',
-    'docker-preference', 'ssh-credential', 'common-application', 'task', 'history', 'shell',
+    'docker-preference', 'ssh-credential', 'common-application', 'task', 'history', 'remote-recovery', 'shell',
     'requirements', 'switch', 'forget-host', 'back'
   ]) assert.ok(linux.includes(action), `missing connected-host action: ${action}`)
   assert.equal(values('windows').includes('common-application'), true)
@@ -210,7 +210,6 @@ test('package metadata exposes Intent AI Ops while retaining legacy command alia
   assert.equal(packageJson.author, 'Intent AI Ops <admin@intentaiops.top>')
   assert.equal(packageJson.license, 'Apache-2.0')
   assert.equal(packageJson.files.includes('LICENSE'), true)
-  assert.equal(packageJson.files.includes('NOTICE'), true)
   assert.equal(packageJson.scripts.prepare, undefined)
   assert.equal(packageJson.dependencies['better-sqlite3'], '13.0.3')
   assert.equal(packageJson.scripts.install, undefined)

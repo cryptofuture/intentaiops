@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import os from 'node:os'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { AdminService } from '../src/admin-service.js'
 import { buildCommonTask, commonTaskEligibility, listCommonTasks } from '../src/common-tasks.js'
 import { SettingsStore } from '../src/settings-store.js'
+import { ServerWorkspace } from '../src/server-workspace.js'
 import { SystemSsh } from '../src/system-ssh.js'
+import { planFingerprint } from '../src/execution-journal.js'
 
 const HOSTS = [
   'webminai-almalinux-9',
@@ -36,20 +40,32 @@ const ENDPOINTS = new Map([
 
 const selectedHost = option('host')
 const selectedTask = option('task')
-if (process.argv.includes('--help') || process.argv.includes('-h')) {
-  process.stdout.write('Usage: validate-linux-common-tasks.js [--host=SERVER_ID] [--task=CATALOG_ID]\n')
-  process.exit(0)
-}
-if (!process.env.VAULT_TEST) throw new Error('VAULT_TEST is required')
-if (selectedHost && !HOSTS.includes(selectedHost)) throw new Error(`unknown Linux lab host: ${selectedHost}`)
-
+const resumedValidation = option('resume-validation')
 const dataRoot = path.resolve(process.env.WEBMINAI_DATA_ROOT ?? path.join(os.homedir(), '.webminai'))
-const settingsStore = new SettingsStore(dataRoot)
-const settings = await settingsStore.load()
-const passphrase = process.env.VAULT_TEST
-const applicationDefaults = await settingsStore.decryptApplicationDefaults({ settings, passphrase })
+let settingsStore
+let settings
+let workspace
+let passphrase
+let applicationDefaults
 
-for (const serverId of selectedHost ? [selectedHost] : HOSTS) await validateHost(serverId)
+async function main () {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    process.stdout.write('Usage: validate-linux-common-tasks.js [--host=SERVER_ID] [--task=CATALOG_ID] [--resume-validation=TASK_ID]\nResume is limited to completed, operator-recovered n8n tasks with a saved validation baseline.\n')
+    return
+  }
+  if (!process.env.VAULT_TEST) throw new Error('VAULT_TEST is required')
+  if (process.argv.includes('--resume-validation')) throw new Error('use --resume-validation=TASK_ID')
+  if (selectedHost && !HOSTS.includes(selectedHost)) throw new Error(`unknown Linux lab host: ${selectedHost}`)
+  if (resumedValidation !== null) assert.ok(selectedHost && selectedTask === 'n8n-linux' && Number.isSafeInteger(Number(resumedValidation)) && Number(resumedValidation) > 0, 'resume-validation requires one host, n8n-linux and a positive task ID')
+  settingsStore = new SettingsStore(dataRoot)
+  settings = await settingsStore.load()
+  workspace = new ServerWorkspace(dataRoot, {
+    directoryAliases: new Map(Object.entries(settings.servers).map(([id, server]) => [id, server.historyId ?? id]))
+  })
+  passphrase = process.env.VAULT_TEST
+  applicationDefaults = await settingsStore.decryptApplicationDefaults({ settings, passphrase })
+  for (const serverId of selectedHost ? [selectedHost] : HOSTS) await validateHost(serverId)
+}
 
 async function validateHost (serverId) {
   const server = await settingsStore.decryptServer({ settings, passphrase, serverId })
@@ -57,8 +73,10 @@ async function validateHost (serverId) {
     authentication: server.authentication,
     credential: server.sshCredential
   })
+  let installSource
+  let finished = false
   try {
-    const admin = new AdminService({ dataRoot, settings: settingsStore, ssh: session.ssh })
+    const admin = new AdminService({ dataRoot, settings: settingsStore, ssh: session.ssh, workspace })
     const inventory = await admin.refreshInventory({ settings, passphrase, serverId })
     const options = {
       platform: 'linux',
@@ -81,62 +99,55 @@ async function validateHost (serverId) {
     const identity = options.linuxContext.identity
     process.stdout.write(`\n${serverId} ${identity.id} ${identity.versionId}: validating ${definitions.length} eligible common tasks\n`)
     for (const definition of definitions) {
-      await recoverIncomplete(admin, server, serverId, definition.id, options)
+      if (resumedValidation === null) await recoverIncomplete(admin, server, serverId, definition.id, options)
+      if (definition.id === 'intent-ai-ops-linux') {
+        installSource = await stageInstallSource(session.ssh, server.connectionUrl)
+        options.intentAiOpsInstallSource = installSource
+      }
       if (definition.category === 'diagnostic') await validateReadOnly(admin, serverId, definition, options)
       else if (definition.category === 'maintenance') await validateOneWay(admin, serverId, definition, options)
       else await validateLifecycle(admin, server, serverId, definition, options)
     }
+    finished = true
   } finally {
-    await session.close()
+    try {
+      if (finished && installSource) await session.ssh.execute(server.connectionUrl, `rm -f -- '${installSource.installerPath}' '${installSource.packageUrl}'; rmdir '${path.posix.dirname(installSource.installerPath)}'`)
+    } finally { await session.close() }
   }
 }
 
-async function recoverIncomplete (admin, server, serverId, catalogId, options) {
+export async function stageInstallSource (ssh, connectionUrl) {
+  const result = await ssh.execute(connectionUrl, 'umask 077; mktemp -d /tmp/webminai.XXXXXXXX')
+  const directory = result.stdout.trim()
+  assert.match(directory, /^\/tmp\/webminai\.[A-Za-z0-9]+$/u)
+  const source = { installerPath: `${directory}/install.sh`, packageUrl: `${directory}/intent-ai-ops.tgz` }
+  await ssh.copy(connectionUrl, fileURLToPath(new URL('./install.sh', import.meta.url)), source.installerPath)
+  await ssh.copy(connectionUrl, fileURLToPath(new URL('../dist/intent-ai-ops.tgz', import.meta.url)), source.packageUrl)
+  return source
+}
+
+export async function recoverIncomplete (admin, server, serverId, catalogId, options) {
   const tasks = admin.listTasks(serverId, { limit: 100 }).filter(task =>
     task.catalogId === catalogId && task.request.startsWith('Validate Linux common task:') && task.status !== 'cancelled'
   )
   for (const summary of tasks) {
     const task = admin.getTask(serverId, summary.id)
     if (!task.plan?.revertCommands?.length) continue
+    if (admin.tasks.executionState(serverId, task.id).some(command => command.status === 'uncertain')) {
+      throw new Error(`task #${task.id} has an uncertain outcome; reconcile remote evidence before further validation`)
+    }
     const built = buildCommonTask(catalogId, task.id, options)
     if (built.verifyReverted) {
-      const clean = await admin.netdata(server).runCommand(built.verifyReverted, { timeoutSeconds: 300 })
+      const statePaths = (task.plan.modifiedFiles ?? []).filter(file => file.startsWith('/var/lib/webminai/task-state/'))
+      const absent = statePaths.map(file => `test ! -e '${file.replaceAll("'", "'\\''")}'`).join(' && ')
+      const clean = await admin.netdata(server).runCommand(`${built.verifyReverted}${absent ? ` && ${absent}` : ''}`, { timeoutSeconds: 300 })
       if (clean.exitCode === 0) {
         admin.saveTaskRevertResults(serverId, task.id, [{ id: 'verify-recovered-state', status: 'completed', result: clean }])
         continue
       }
     }
-    process.stdout.write(`[${serverId}/${catalogId}] recovering task #${task.id}\n`)
-    admin.markTaskReverting(serverId, task.id)
-    const results = await executeRecoveryPlan(admin, serverId, task.id, built.plan.revertCommands)
-    admin.saveTaskRevertResults(serverId, task.id, results)
+    throw new Error(`task #${task.id} needs a separately reviewed rollback before further validation`)
   }
-}
-
-async function executeRecoveryPlan (admin, serverId, taskId, commands) {
-  const plan = {
-    summary: `Recover task #${taskId}`,
-    changeOverview: 'Run the current reviewed rollback for an earlier interrupted validation task.',
-    modifiedFiles: [],
-    warnings: [],
-    requiresConfirmation: true,
-    commands,
-    revertCommands: []
-  }
-  const results = await admin.execute({
-    settings,
-    passphrase,
-    serverId,
-    plan,
-    requireRevert: false,
-    approve: async () => true,
-    onResult: result => {
-      admin.appendTaskRevertResult(serverId, taskId, result)
-      process.stdout.write(`  ${result.id}: ${result.status}\n`)
-    }
-  })
-  requireCompleted(results, 'recovery')
-  return results
 }
 
 async function validateReadOnly (admin, serverId, definition, options) {
@@ -174,17 +185,24 @@ async function validateOneWay (admin, serverId, definition, options) {
 }
 
 async function validateLifecycle (admin, server, serverId, definition, options) {
-  const task = create(admin, serverId, definition)
+  const resuming = resumedValidation !== null
+  const task = resuming ? admin.getTask(serverId, Number(resumedValidation)) : create(admin, serverId, definition)
+  assert.equal(task.catalogId, definition.id)
   const built = buildCommonTask(definition.id, task.id, options)
-  admin.saveTaskPlan(serverId, task.id, built.plan)
+  if (!resuming) admin.saveTaskPlan(serverId, task.id, built.plan)
+  const confirmed = resuming ? completedValidationResults(task, admin.tasks.executionState(serverId, task.id), admin.tasks.rollbackState(serverId, task.id), built.plan) : null
+  if (resuming) assert.ok(!admin.listTasks(serverId).some(item => item.status === 'running'), 'another validation is running on this host')
   const netdata = admin.netdata(server)
-  const baseline = await probe(netdata, built.stateProbe, 'initial baseline')
+  const baseline = definition.id === 'n8n-linux'
+    ? await validationBaseline(dataRoot, { serverId, taskId: task.id, plan: built.plan, baseline: resuming ? undefined : await probe(netdata, built.stateProbe, 'initial baseline') })
+    : await probe(netdata, built.stateProbe, 'initial baseline')
   let cleanupRequired = false
   try {
     process.stdout.write(`[${serverId}/${definition.id}] task #${task.id}: apply 1/2\n`)
-    admin.markTaskRunning(serverId, task.id)
+    if (!resuming) admin.markTaskRunning(serverId, task.id)
     cleanupRequired = true
-    const first = await execute(admin, serverId, task.id, built.plan, 'apply 1')
+    if (resuming) process.stdout.write('  Using confirmed recovered apply 1; no completed command is replayed in the original task.\n')
+    const first = confirmed ?? await execute(admin, serverId, task.id, built.plan, 'apply 1')
     await verify(netdata, built.verifyApplied, `${definition.id} apply 1`)
     await verifyExternal(server, definition.id, true)
     const applied = await probe(netdata, built.stateProbe, 'applied state')
@@ -233,36 +251,57 @@ function create (admin, serverId, definition) {
   return admin.createTask(serverId, `Validate Linux common task: ${definition.label}`, { kind: 'catalog', catalogId: definition.id })
 }
 
-async function execute (admin, serverId, taskId, plan, label, requireRevert = true) {
+export async function execute (admin, serverId, taskId, plan, label, requireRevert = true) {
+  const executionTask = label === 'apply 2'
+    ? admin.createTask(serverId, `Reapply Linux validation task #${taskId}`, { kind: 'catalog', catalogId: admin.getTask(serverId, taskId).catalogId })
+    : null
+  const executionTaskId = executionTask?.id ?? taskId
+  if (executionTask) {
+    admin.saveTaskPlan(serverId, executionTaskId, plan)
+    admin.markTaskRunning(serverId, executionTaskId)
+  }
   const results = await admin.execute({
     settings,
     passphrase,
     serverId,
+    taskId: executionTaskId,
     plan,
     requireRevert,
     approve: async () => true,
     onResult: result => {
-      admin.appendTaskResult(serverId, taskId, result)
+      admin.appendTaskResult(serverId, executionTaskId, result)
       process.stdout.write(`  ${result.id}: ${result.status}\n`)
     }
   })
-  requireCompleted(results, label)
+  if (executionTask) admin.saveTaskResults(serverId, executionTaskId, results)
+  requireCompleted(results, label, plan.commands.length)
   return results
 }
 
-async function revert (admin, serverId, taskId, label) {
+export async function revert (admin, serverId, taskId, label) {
+  const task = admin.getTask(serverId, taskId)
+  const reviewedPlan = label === 'revert 2'
+    ? {
+        ...task.plan,
+        summary: `Verify repeat rollback for task #${taskId}`,
+        changeOverview: 'Explicitly repeat the verified rollback to test idempotence after the first rollback restored the baseline.',
+        commands: task.plan.revertCommands,
+        revertCommands: []
+      }
+    : undefined
   const results = await admin.revertTask({
     settings,
     passphrase,
     serverId,
     taskId,
+    reviewedPlan,
     approve: async () => true,
     onResult: result => {
       admin.appendTaskRevertResult(serverId, taskId, result)
       process.stdout.write(`  ${result.id}: ${result.status}\n`)
     }
   })
-  requireCompleted(results, label)
+  requireCompleted(results, label, task.plan.revertCommands.length)
   return results
 }
 
@@ -301,12 +340,54 @@ async function verifyExternal (server, catalogId, shouldExist) {
   throw new Error(`${catalogId} external verification failed at ${url}: ${evidence}`)
 }
 
-function requireCompleted (results, label) {
+export function requireCompleted (results, label, expectedCount) {
   const failed = results.find(result => result.status !== 'completed')
-  if (!failed) return
-  throw new Error(`${label} failed at ${failed.id}: ${failed.failure?.code ?? failed.status}${failed.failure?.evidence ? ` (${failed.failure.evidence})` : ''}`)
+  if (failed) throw new Error(`${label} failed at ${failed.id}: ${failed.failure?.code ?? failed.status}${failed.failure?.evidence ? ` (${failed.failure.evidence})` : ''}`)
+  assert.equal(results.length, expectedCount, `${label}: execution paused or stopped before all reviewed commands completed`)
+}
+
+export function completedValidationResults (task, commands, rollback, expectedPlan) {
+  assert.equal(task.catalogId, 'n8n-linux')
+  assert.equal(task.status, 'completed', 'finish operator-reviewed recovery before resuming validation')
+  assert.notEqual(task.plan.operatorRollback, true)
+  assert.deepEqual(task.plan.modifiedFiles, expectedPlan.modifiedFiles, 'recovered plan changed managed paths')
+  assert.deepEqual(task.plan.commands.map(command => command.command), expectedPlan.commands.map(command => command.command), 'recovered plan changed catalog commands')
+  assert.equal(rollback.length, 0, 'rollback already started; create a fresh validation')
+  assert.equal(commands.length, task.plan.commands.length)
+  assert.ok(commands.every(command => command.status === 'completed'), 'uncertain or incomplete commands require operator review')
+  assert.deepEqual(commands.map(command => command.commandId).sort(), task.plan.commands.map(command => command.id).sort())
+  const resultsById = new Map((task.results ?? []).map(result => [result.id, result]))
+  const results = task.plan.commands.map(command => resultsById.get(command.id))
+  assert.ok(results.every(Boolean), 'confirmed command results are missing')
+  requireCompleted(results, 'recovered apply 1', task.plan.commands.length)
+  return results
+}
+
+export async function validationBaseline (root, { serverId, taskId, plan, baseline }) {
+  assert.ok(HOSTS.includes(serverId) && Number.isSafeInteger(taskId) && taskId > 0)
+  const fingerprint = planFingerprint({ commands: plan.commands, revertCommands: plan.revertCommands })
+  const directory = path.join(root, 'lab-validation-baselines')
+  const file = path.join(directory, `${serverId}-${taskId}.json`)
+  if (baseline !== undefined) {
+    assert.ok(typeof baseline === 'string' && baseline.length <= 65536)
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+    await writeFile(file, JSON.stringify({ version: 1, serverId, taskId, fingerprint, modifiedFiles: plan.modifiedFiles, baseline }), { mode: 0o600, flag: 'wx' })
+    return baseline
+  }
+  assert.ok((await stat(file)).size <= 131072, 'validation baseline exceeds its size limit')
+  let saved
+  try { saved = JSON.parse(await readFile(file, 'utf8')) } catch { throw new Error('saved validation baseline is invalid') }
+  assert.equal(saved.version, 1)
+  assert.equal(saved.serverId, serverId)
+  assert.equal(saved.taskId, taskId)
+  assert.equal(saved.fingerprint, fingerprint, 'catalog commands changed; start a fresh validation')
+  assert.deepEqual(saved.modifiedFiles, plan.modifiedFiles, 'managed paths changed; start a fresh validation')
+  assert.ok(typeof saved.baseline === 'string' && saved.baseline.length <= 65536)
+  return saved.baseline
 }
 
 function option (name) {
   return process.argv.find(argument => argument.startsWith(`--${name}=`))?.slice(name.length + 3) ?? null
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main()

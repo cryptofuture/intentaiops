@@ -1,9 +1,27 @@
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import test from 'node:test'
-import { createKubernetesApiCommand, createSignedCommand, NetdataClient } from '../src/netdata-client.js'
+import { createKubernetesApiCommand, parseKubernetesApiCommand, createSignedCommand, NetdataClient } from '../src/netdata-client.js'
+import { KubernetesNetdataClient } from '../src/kubernetes-netdata-client.js'
+import { executionDiagnostics } from '../src/execution-diagnostics.js'
+import { classifyFailure } from '../src/failure-signature.js'
 
 const ACTION_KEY = '11'.repeat(32)
+
+test('shared Kubernetes command execution accepts only canonical API requests and never shell commands', async () => {
+  const request = { method: 'POST', path: '/api/v1/namespaces/webminai-tasks/configmaps', body: { apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: 'reviewed' } } }
+  const command = createKubernetesApiCommand(request)
+  assert.deepEqual(parseKubernetesApiCommand(command), { ...request, body: JSON.stringify(request.body), contentType: 'application/json' })
+  const client = new KubernetesNetdataClient({ kubernetes: {}, actionKey: ACTION_KEY })
+  const calls = []
+  client.runApiRequest = async request => { calls.push(request); return { exitCode: 0, stdout: '{}' } }
+  await client.runCommand(command, { timeoutSeconds: 5 })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].timeoutSeconds, 5)
+  assert.equal(calls[0].path, request.path)
+  for (const invalid of ['echo unsafe', command + '\nmethod=DELETE', command.replace('v=1', 'v=2'), command.replace(/\npath=([^\n]+)/u, '\npath=$1=')]) await assert.rejects(client.runCommand(invalid))
+  assert.equal(calls.length, 1)
+})
 
 test('signed command envelope authenticates exactly the encoded payload', () => {
   const envelope = createSignedCommand('printf hello', ACTION_KEY, 1710000000000)
@@ -77,12 +95,24 @@ test('FreeBSD execution inventory recognizes ready Podman Compose on a non-jail 
   }
   const inventory = await client.freebsdExecutionInventory()
   assert.equal(inventory.platform, 'freebsd')
+  assert.equal(inventory.memoryBytes, null)
   assert.equal(inventory.docker.runtime, 'podman')
   assert.equal(inventory.docker.installSupported, true)
   assert.equal(inventory.docker.composeCommand, 'podman-compose')
   assert.equal(inventory.docker.requiresExplicitLinuxPlatform, true)
   assert.equal(inventory.docker.virtualizationRequired, false)
   assert.match(inventory.docker.virtualizationInstructions, /jails and VFS/u)
+})
+
+test('FreeBSD inventory exposes only bounded numeric physical memory values', async () => {
+  const client = new NetdataClient({ ssh: {}, connectionUrl: 'ssh://freebsd.example', actionKey: ACTION_KEY })
+  for (const [value, expected] of [['4294967296', 4294967296], ['-1', null], ['invalid', null], ['99999999999999999999999', null]]) {
+    client.runCommand = async command => {
+      assert.match(command, /sysctl -n hw[.]physmem/u)
+      return { exitCode: 0, stdout: `memoryBytes=${value}\n`, stderr: '' }
+    }
+    assert.equal((await client.freebsdExecutionInventory()).memoryBytes, expected)
+  }
 })
 
 test('macOS execution inventory distinguishes Homebrew availability from hypervisor support', async () => {
@@ -168,6 +198,32 @@ test('Netdata client runs a durable job through short signed polling requests an
   assert.equal(calls.every(call => call.options.timeoutMs === 15000), true)
 })
 
+for (const [state, message] of [['unknown', 'detached job controller exited before recording a result'], ['failed', 'detached job controller exited before recording a result'], ['failed', 'job worker exited without a result']]) {
+  test(`Netdata client preserves ${state} ${message} uncertainty without cleanup or replay`, async () => {
+    const jobId = 'ab'.repeat(16)
+    const calls = []
+    const client = new NetdataClient({
+      ssh: {
+        async execute (connectionUrl, command) {
+          calls.push(command)
+          const body = calls.length === 1 ? { status: 'accepted', state: 'running', jobId } : { status: 'ok', state, jobId, exitCode: 125, stdout: '', stderr: message }
+          return { stdout: JSON.stringify(body) }
+        }
+      },
+      connectionUrl: 'ssh://server.example',
+      actionKey: ACTION_KEY
+    })
+    const result = await client.runJob('change-once', { pollIntervalMs: 100 })
+    assert.equal(result.state, 'unknown')
+    assert.equal(result.exitCode, null)
+    assert.equal(result.recoveryRequired, true)
+    assert.equal(result.cleaned, false)
+    assert.equal(calls.length, 2)
+    assert.match(calls[0], /job_start/u)
+    assert.match(calls[1], /job_status/u)
+  })
+}
+
 test('Netdata client exposes signed job cancellation', async () => {
   let request
   const client = new NetdataClient({
@@ -210,7 +266,8 @@ test('durable job polling survives a short Netdata plugin restart', async () => 
   })
   assert.deepEqual(states, ['temporarily_unavailable', 'succeeded'])
   assert.equal(result.stdout, 'resumed')
-  assert.equal(result.cleaned, true)
+  assert.equal(result.cleaned, false)
+  assert.equal(result.recoveryRequired, true)
 })
 
 test('durable job polling recovers from an SSH transport timeout', async () => {
@@ -232,6 +289,54 @@ test('durable job polling recovers from an SSH transport timeout', async () => {
   assert.equal(result.state, 'succeeded')
   assert.equal(result.stdout, 'resumed')
   assert.equal(polls, 2)
+})
+
+test('job recovery forwards progress, checks the same job, and retains its result', async () => {
+  const jobId = '56'.repeat(16)
+  const calls = []
+  const states = []
+  let polls = 0
+  const client = new NetdataClient({
+    connectionUrl: 'ssh://host',
+    actionKey: ACTION_KEY,
+    ssh: {
+      execute: async (_url, command, options) => {
+        calls.push(command)
+        if (command.includes('job_start')) return { stdout: JSON.stringify({ status: 'accepted', state: 'running', jobId }) }
+        assert.ok(command.includes('job_status'))
+        if (++polls === 1) {
+          await options.onRecovery({ state: 'reconnecting', attempt: 1, attempts: 3 })
+          await options.onRecovery({ state: 'reconnected', attempt: 1 })
+          const cause = new Error('SSH command failed with exit code 255')
+          cause.reconnected = true
+          throw cause
+        }
+        return { stdout: JSON.stringify({ status: 'ok', state: polls === 2 ? 'running' : 'succeeded', jobId, exitCode: polls === 2 ? null : 0 }) }
+      }
+    }
+  })
+  const result = await client.runJob('change-once', { pollIntervalMs: 100, onStatus: event => states.push(event.state) })
+  assert.equal(calls.filter(command => command.includes('job_start')).length, 1)
+  assert.deepEqual(states, ['reconnecting', 'reconnected', 'temporarily_unavailable', 'running', 'succeeded'])
+  assert.equal(result.recoveryRequired, true)
+  assert.equal(result.cleaned, false)
+})
+
+test('exhausted SSH recovery stops polling and requests operator review', async () => {
+  const client = new NetdataClient({ ssh: {}, connectionUrl: 'ssh://host', actionKey: ACTION_KEY })
+  const jobId = '78'.repeat(16)
+  let polls = 0
+  const states = []
+  client.startJob = async () => ({ status: 'accepted', state: 'running', jobId })
+  client.jobStatus = async () => {
+    polls++
+    const cause = new Error('connection reset')
+    cause.recoveryExhausted = true
+    throw new Error('Netdata status unavailable', { cause })
+  }
+  await assert.rejects(client.runJob('change-once', { onStatus: event => states.push(event.state) }), /status unavailable/u)
+  assert.equal(polls, 1)
+  assert.deepEqual(states, ['operator_review_required'])
 })
 
 test('Docker execution inventory detects Compose and a containerized host', async () => {
@@ -358,6 +463,25 @@ test('root readiness executes a signed host filesystem write probe', async () =>
   assert.match(signedCommand, /rm -f/)
 })
 
+test('fresh Windows privilege checks use the existing protected Stage 2 directory', async () => {
+  let signedCommand
+  const client = new NetdataClient({
+    ssh: {
+      async execute (_url, _command, options) {
+        const payload = Buffer.from(JSON.parse(options.input).payload, 'base64url').toString('utf8')
+        signedCommand = Buffer.from(payload.split('\n').find(line => line.startsWith('command=')).slice(8), 'base64url').toString('utf8')
+        return { stdout: JSON.stringify({ exitCode: 0, stdout: 'WEBMINAI_WINDOWS_SYSTEM_OK', stderr: '' }) }
+      }
+    },
+    connectionUrl: 'ssh://windows.example',
+    actionKey: ACTION_KEY
+  })
+  assert.equal((await client.windowsSystemExecutionHealth()).identity, 'system')
+  assert.match(signedCommand, /Join-Path \$env:ProgramData 'WebminAI\\webminai-system-probe-/u)
+  assert.doesNotMatch(signedCommand, /Intent AI Ops\\/u)
+  assert.match(signedCommand, /Remove-Item -LiteralPath \$path -Force/u)
+})
+
 test('Windows execution inventory records package tools visible to LocalSystem', async () => {
   let signedCommand
   const client = new NetdataClient({
@@ -401,7 +525,69 @@ test('Windows execution inventory records package tools visible to LocalSystem',
   assert.match(signedCommand, /VirtualizationFirmwareEnabled/u)
   assert.match(signedCommand, /slatReportedByProcessor/u)
   assert.match(signedCommand, /consoleUser/u)
+  assert.match(signedCommand, /Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop\|Measure-Object Capacity -Sum/u)
+  assert.match(signedCommand, /\$installedMemory -ge 8GB/u)
+  assert.match(signedCommand, /catch\{\$installedMemory=0\}/u)
   assert.match(signedCommand, /Microsoft-Windows-Subsystem-Linux/u)
+})
+
+test('Netdata HTTP failures preserve only status metadata and never replay commands', async () => {
+  for (const status of [403, 500, 503]) {
+    let attempts = 0
+    const remote = Object.assign(new Error('SSH command failed with exit code 22'), { result: { code: 22, stdout: JSON.stringify({ status, error: 'password=fixture-only-secret' }), stderr: '' } })
+    const client = new NetdataClient({ ssh: { async execute () { attempts++; throw remote } }, connectionUrl: 'ssh://server.example', actionKey: ACTION_KEY })
+    await assert.rejects(client.runCommand('true'), error => {
+      assert.equal(error.netdataHttpStatus, status)
+      assert.match(error.message, new RegExp(`HTTP ${status}`, 'u'))
+      assert.doesNotMatch(error.message, /fixture-only-secret/u)
+      assert.equal(error.cause, remote)
+      for (const phase of ['cleanup', 'services', 'acquire']) {
+        const item = { id: 'operation', phase }
+        assert.equal(classifyFailure({ item, error }).code, 'COMMAND_FAILED')
+        const diagnostics = executionDiagnostics({ item, error, result: { exitCode: null } })
+        assert.ok(diagnostics.some(value => value.code === 'NETDATA_API_ERROR' && value.scope === 'transport' && value.evidence.httpStatus === status))
+        assert.ok(!diagnostics.some(value => ['EXECUTION_TIMEOUT', 'APP_HTTP_500', 'SERVICE_NOT_READY'].includes(value.code)))
+      }
+      return true
+    })
+    assert.equal(attempts, 1)
+  }
+})
+
+test('expired signed payloads suggest clock inspection without disclosing response data or replaying', async () => {
+  let attempts = 0
+  const remote = Object.assign(new Error('HTTP request failed'), { result: { code: 22, stdout: JSON.stringify({ status: 403, error: 'expired signed payload', password: 'fixture-secret' }) } })
+  const client = new NetdataClient({ ssh: { async execute () { attempts++; throw remote } }, connectionUrl: 'ssh://server.example', actionKey: ACTION_KEY })
+  await assert.rejects(client.runCommand('true'), error => {
+    assert.match(error.message, /check host\/client UTC synchronization/u)
+    assert.doesNotMatch(error.message, /fixture-secret/u)
+    assert.equal(error.netdataHttpStatus, 403)
+    return true
+  })
+  assert.equal(attempts, 1)
+})
+
+test('Netdata HTTP metadata requires bounded valid evidence from a completed curl HTTP failure', async () => {
+  for (const result of [
+    { code: 255, stdout: '{"status":503}' },
+    { code: 22, stdout: '{"status":503}', timedOut: true },
+    { code: 22, stdout: '{"status":503}', signal: 'SIGTERM' },
+    { code: 22, stdout: '{"status":"503"}' },
+    { code: 22, stdout: '{"status":200}' },
+    { code: 22, stdout: '{"status":600}' },
+    { code: 22, stdout: '{"status":503' },
+    { code: 22, stdout: JSON.stringify({ status: 503, padding: 'x'.repeat(16384) }) }
+  ]) {
+    let attempts = 0
+    const remote = Object.assign(new Error('transport failure'), { result })
+    const client = new NetdataClient({ ssh: { async execute () { attempts++; throw remote } }, connectionUrl: 'ssh://server.example', actionKey: ACTION_KEY })
+    await assert.rejects(client.runCommand('true'), error => {
+      assert.equal(error.netdataHttpStatus, undefined)
+      assert.equal(error.cause, remote)
+      return true
+    })
+    assert.equal(attempts, 1)
+  }
 })
 
 test('Netdata request errors identify the failing endpoint and preserve SSH evidence', async () => {

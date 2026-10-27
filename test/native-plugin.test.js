@@ -33,7 +33,7 @@ test('native plugin handles health, signed commands, and replay rejection', asyn
   assert.match(output, /SET active = 1/)
   assert.match(output, /FUNCTION GLOBAL "webminai:health"/)
   assert.match(output, /FUNCTION_RESULT_BEGIN health-tx 200/)
-  assert.match(output, /"version":"0\.7\.2"/)
+  assert.match(output, /"version":"0\.8\.0"/)
   assert.match(output, /"platform":"linux"/)
   assert.match(output, /"effectiveUid":\d+/)
   assert.match(output, /FUNCTION_RESULT_BEGIN command-tx 200/)
@@ -43,12 +43,32 @@ test('native plugin handles health, signed commands, and replay rejection', asyn
   assert.match(output, /replayed signed payload/)
 })
 
+test('native collector keeps idle connections alive without corrupting signed command responses', { timeout: 30000 }, async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'webminai-plugin-heartbeat-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const keyFile = path.join(directory, 'action.key')
+  await writeFile(keyFile, `${ACTION_KEY}\n`, { mode: 0o600 })
+  const session = startPluginSession(fileURLToPath(new URL('../dist/webminai.plugin', import.meta.url)), { WEBMINAI_KEY_FILE: keyFile })
+  t.after(() => session.stop())
+  await session.waitFor(output => output.includes('FUNCTION GLOBAL "webminai:health"'))
+  const samples = output => (output.match(/BEGIN webminai\.status\nSET active = 1\nEND\n/gu) ?? []).length
+  await session.waitFor(output => samples(output) >= 2, 18000)
+  const response = session.request('heartbeat-tx', 'command', createSignedCommand('sleep 2; printf keepalive-ok', ACTION_KEY))
+  const timer = setTimeout(() => session.signal('SIGALRM'), 250)
+  try {
+    const result = await response
+    assert.equal(result.statusCode, 200)
+    assert.equal(Buffer.from(result.body.stdout, 'base64').toString(), 'keepalive-ok')
+    await session.waitFor(output => samples(output) >= 3)
+  } finally { clearTimeout(timer) }
+})
+
 test('native plugin reports its independent release version', async () => {
   const plugin = fileURLToPath(new URL('../dist/webminai.plugin', import.meta.url))
   const version = await new Promise((resolve, reject) => {
     execFile(plugin, ['--version'], { encoding: 'utf8' }, (error, stdout) => error ? reject(error) : resolve(stdout.trim()))
   })
-  assert.equal(version, '0.7.2')
+  assert.equal(version, '0.8.0')
 })
 
 test('native plugin returns when an approved shell detaches a pipe-inheriting child', async t => {
@@ -91,16 +111,22 @@ test('native plugin starts, polls, cancels, and cleans durable command jobs', as
     transaction++
     return session.request(`job-tx-${transaction}`, functionName, createSignedCommand(value, ACTION_KEY))
   }
-  const command = 'printf job-started; sleep 2; printf -- "\\njob-finished\\n"'
-  const startRequest = `timeoutSeconds=10\ncommand=${Buffer.from(command).toString('base64url')}`
+  const completeFile = path.join(directory, 'complete-job')
+  const command = `printf job-started; i=0; while [ ! -f '${completeFile}' ]; do i=$((i+1)); [ "$i" -lt 600 ] || exit 1; sleep 0.05; done; printf -- "\\njob-finished\\n"`
+  const startRequest = `timeoutSeconds=30\ncommand=${Buffer.from(command).toString('base64url')}`
   const started = await request('job_start', startRequest)
   assert.equal(started.statusCode, 202)
   assert.match(started.body.jobId, /^[a-f0-9]{32}$/u)
 
-  await new Promise(resolve => setTimeout(resolve, 700))
-  const running = await request('job_status', started.body.jobId)
+  let running
+  for (let attempt = 0; attempt < 60; attempt++) {
+    running = await request('job_status', started.body.jobId)
+    if (Buffer.from(running.body.stdout, 'base64').toString() === 'job-started') break
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
   assert.equal(running.body.state, 'running')
   assert.equal(Buffer.from(running.body.stdout, 'base64').toString(), 'job-started')
+  await writeFile(completeFile, '')
 
   let completed
   for (let attempt = 0; attempt < 20; attempt++) {
@@ -126,24 +152,42 @@ test('native plugin starts, polls, cancels, and cleans durable command jobs', as
   assert.notEqual(cancelled.body.exitCode, 0)
   assert.equal((await request('job_cleanup', cancelStart.body.jobId)).body.state, 'cleaned')
 
-  const orphanStart = await request('job_start', `timeoutSeconds=60\ncommand=${Buffer.from('sleep 30').toString('base64url')}`)
+  const survivedFile = path.join(directory, 'orphan-survived')
+  const releaseFile = path.join(directory, 'orphan-release')
+  const orphanCommand = `i=0; while [ ! -f '${releaseFile}' ]; do i=$((i+1)); [ "$i" -lt 600 ] || exit 1; sleep 0.1; done; printf survived > '${survivedFile}'`
+  const orphanStart = await request('job_start', `timeoutSeconds=60\ncommand=${Buffer.from(orphanCommand).toString('base64url')}`)
   const controllerFile = path.join(jobDirectory, orphanStart.body.jobId, 'controller.pid')
   let controllerPid
+  let commandPid
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
       controllerPid = Number.parseInt((await readFile(controllerFile, 'utf8')).trim(), 10)
+      commandPid = Number.parseInt((await readFile(path.join(jobDirectory, orphanStart.body.jobId, 'pid'), 'utf8')).trim(), 10)
       break
     } catch {
       await new Promise(resolve => setTimeout(resolve, 25))
     }
   }
   assert.ok(Number.isInteger(controllerPid) && controllerPid > 1)
+  assert.ok(Number.isInteger(commandPid) && commandPid > 1)
   process.kill(controllerPid, 'SIGKILL')
-  const orphaned = await request('job_status', orphanStart.body.jobId)
-  assert.equal(orphaned.body.state, 'failed')
+  await writeFile(releaseFile, '')
+  let orphaned
+  for (let attempt = 0; attempt < 20; attempt++) {
+    orphaned = await request('job_status', orphanStart.body.jobId)
+    if (orphaned.body.state !== 'running') break
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  assert.equal(orphaned.body.state, 'unknown')
   assert.equal(orphaned.body.exitCode, 125)
   assert.match(Buffer.from(orphaned.body.stderr, 'base64').toString(), /controller exited before recording a result/u)
-  assert.equal((await request('job_cleanup', orphanStart.body.jobId)).body.state, 'cleaned')
+  assert.equal((await request('job_cleanup', orphanStart.body.jobId)).statusCode, 409)
+  for (let attempt = 0; attempt < 30; attempt++) {
+    try { if (await readFile(survivedFile, 'utf8') === 'survived') break } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  assert.equal(await readFile(survivedFile, 'utf8'), 'survived')
+  assert.equal((await request('job_status', orphanStart.body.jobId)).body.state, 'unknown')
   await session.stop()
 })
 
@@ -280,6 +324,23 @@ function runPluginFile (plugin, input, environment) {
   })
 }
 
+test('Kubernetes recovery exposes OpenSSL capability and never accepts caller-supplied shell code', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'intent-kubernetes-recovery-protocol-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const keyFile = path.join(directory, 'action.key')
+  await writeFile(keyFile, ACTION_KEY, { mode: 0o600 })
+  const session = startPluginSession(fileURLToPath(new URL('../dist/webminai.plugin-kubernetes-amd64', import.meta.url)), { WEBMINAI_KEY_FILE: keyFile, WEBMINAI_RECOVERY_TARGET: 'SHA256:' + 'a'.repeat(64) })
+  t.after(() => session.stop())
+  await session.waitFor(output => output.includes('FUNCTION GLOBAL "webminai:recovery"'))
+  const health = await session.request('recovery-health', 'health', createSignedCommand('health', ACTION_KEY))
+  assert.equal(typeof health.body.recoveryOpenSslAvailable, 'boolean')
+  assert.equal(health.body.recoveryProtocolVersion, 1)
+  for (const [index, command] of ['printf unsafe', 'v=1\noperation=execute\nargs=', 'v=1\noperation=read\nargs=../escape,1', 'v=1\noperation=list\nargs=$(touch marker)'].entries()) {
+    const result = await session.request('recovery-bad-' + index, 'recovery', createSignedCommand(command, ACTION_KEY))
+    assert.equal(result.statusCode, 500)
+  }
+})
+
 function startPluginSession (plugin, environment) {
   const child = spawn(plugin, ['1'], {
     env: { ...process.env, ...environment },
@@ -304,6 +365,7 @@ function startPluginSession (plugin, environment) {
 
   return {
     waitFor,
+    signal: value => child.kill(value),
     async request (transaction, functionName, envelope) {
       const offset = state.stdout.length
       child.stdin.write([

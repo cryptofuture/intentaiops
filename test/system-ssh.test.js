@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { access, readFile } from 'node:fs/promises'
+import { access, chmod, lstat, mkdtemp, readFile, rm, symlink, unlink } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import { parseSshConnection } from '../src/connection.js'
 import { SystemSsh } from '../src/system-ssh.js'
@@ -136,14 +138,14 @@ test('interactive SSH authenticates once and reuses a ControlMaster', async () =
     assert.equal(master.args.includes('BatchMode=yes'), false)
 
     await session.ssh.execute('ssh://deploy@host.example', 'uname -a')
-    const command = calls[1]
+    const command = calls.find(call => call.args.at(-1) === 'uname -a')
     assert.ok(command.args.includes('BatchMode=yes'))
     assert.ok(command.args.some(argument => argument.startsWith('ControlPath=')))
 
     await session.ssh.interactiveShell('ssh://deploy@host.example')
-    assert.equal(calls[2].kind, 'interactive')
-    assert.ok(calls[2].args.includes('-tt'))
-    assert.ok(calls[2].args.some(argument => argument.startsWith('ControlPath=')))
+    assert.equal(calls.at(-1).kind, 'interactive')
+    assert.ok(calls.at(-1).args.includes('-tt'))
+    assert.ok(calls.at(-1).args.some(argument => argument.startsWith('ControlPath=')))
   } finally {
     await session.close()
   }
@@ -186,6 +188,7 @@ test('saved-credential session restores its ControlMaster without replaying an u
     terminalCheck: () => true,
     runner: async (command, args) => {
       calls.push(args)
+      if (args.includes('-O') && args.includes('check')) return { code: 255, stdout: '', stderr: 'missing socket' }
       if (args.at(-1) === 'hostname') {
         commandAttempts++
         if (commandAttempts === 1) return { code: 255, stdout: '', stderr: 'connection reset' }
@@ -237,4 +240,178 @@ test('host history fingerprints hash stable machine identity and support Windows
     await windows.hostFingerprint('ssh://windows.example'),
     `SHA256:${createHash('sha256').update(windowsIdentity).digest('hex')}`
   )
+})
+
+test('SSH recovery is bounded, reports progress, and never replays the interrupted command', async () => {
+  for (const succeeds of [true, false]) {
+    let commands = 0
+    let reconnects = 0
+    const progress = []
+    const ssh = new SystemSsh({
+      reconnectDelayMs: 0,
+      terminalCheck: () => true,
+      interactiveRunner: async () => ({ code: 0 }),
+      runner: async (_command, args) => {
+        if (args.includes('-O') && args.includes('check')) return { code: commands ? 255 : 0 }
+        if (args.at(-1) === 'hostname') { commands++; return { code: 255, stdout: '', stderr: 'connection reset' } }
+        if (args.includes('-M')) {
+          reconnects++
+          assert.ok(args.includes('StrictHostKeyChecking=yes'))
+          return { code: succeeds && reconnects === 3 ? 0 : 255, stdout: '', stderr: 'connection refused' }
+        }
+        return { code: 0 }
+      }
+    })
+    const session = await ssh.openInteractiveSession('ssh://host.example')
+    try {
+      await assert.rejects(session.ssh.execute('ssh://host.example', 'hostname', { onRecovery: event => progress.push(event) }), error => succeeds ? error.reconnected === true : error.recoveryExhausted === true)
+      assert.equal(reconnects, 3)
+      assert.equal(commands, 1)
+      assert.deepEqual(progress.filter(event => event.state === 'reconnecting').map(event => event.attempt), [1, 2, 3])
+      assert.equal(progress.at(-1).state, succeeds ? 'reconnected' : 'operator_review_required')
+    } finally { await session.close() }
+  }
+})
+
+test('SSH recovery does not retry a changed host key', async () => {
+  let reconnects = 0
+  const ssh = new SystemSsh({
+    reconnectDelayMs: 0,
+    terminalCheck: () => true,
+    interactiveRunner: async () => ({ code: 0 }),
+    runner: async (_command, args) => {
+      if (args.includes('-O') && args.includes('check')) return { code: 255 }
+      if (args.includes('-M')) { reconnects++; return { code: 255, stderr: 'REMOTE HOST IDENTIFICATION HAS CHANGED' } }
+      return { code: args.at(-1) === 'hostname' ? 255 : 0 }
+    }
+  })
+  const session = await ssh.openInteractiveSession('ssh://host.example')
+  try {
+    await assert.rejects(session.ssh.execute('ssh://host.example', 'hostname'), /SSH reconnection failed/u)
+    assert.equal(reconnects, 1)
+  } finally { await session.close() }
+})
+
+test('shared SSH, SCP fallback and interactive channels apply compression consistently', async () => {
+  const calls = []
+  let scpCalls = 0
+  const runner = async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'scp' && ++scpCalls === 1) return { code: 255 }
+    return { code: 0, stdout: 'ok', stderr: '' }
+  }
+  const ssh = new SystemSsh({ runner, interactiveRunner: runner, terminalCheck: () => true, transport: { compression: true } })
+  const session = await ssh.openInteractiveSession('ssh://host')
+  try {
+    await session.ssh.execute('ssh://host', 'true')
+    await session.ssh.copy('ssh://host', '/local/file', '/tmp/webminai.test/file')
+    await session.ssh.interactiveShell('ssh://host')
+    const channels = calls.slice(1).filter(call => !call.args.includes('check'))
+    assert.ok(channels.every(call => call.args.includes('Compression=yes')))
+    assert.ok(channels.every(call => call.args.includes(`ControlPath=${session.controlPath}`)))
+    assert.ok(channels.some(call => call.command === 'scp' && call.args.includes('-O')))
+    await assert.rejects(session.ssh.execute('ssh://other', 'true'), /different connection/u)
+  } finally { await session.close() }
+})
+
+test('concurrent reconnection requests create only one replacement master', async () => {
+  let masters = 0
+  let finish
+  const gate = new Promise(resolve => { finish = resolve })
+  const ssh = new SystemSsh({
+    terminalCheck: () => true,
+    interactiveRunner: async () => ({ code: 0 }),
+    runner: async (_command, args) => {
+      if (args.includes('check')) return { code: 255 }
+      if (args.includes('-M')) { masters++; await gate }
+      return { code: 0 }
+    }
+  })
+  const session = await ssh.openInteractiveSession('ssh://host')
+  try {
+    const requests = [session.reconnect(), session.reconnect()]
+    await new Promise(resolve => setTimeout(resolve, 10))
+    finish()
+    await Promise.all(requests)
+    assert.equal(masters, 1)
+  } finally { await session.close() }
+})
+
+test('control directories are private and unsafe permissions or symlinks are rejected', async () => {
+  const ssh = new SystemSsh({ terminalCheck: () => true, interactiveRunner: async () => ({ code: 0 }), runner: async () => ({ code: 0 }) })
+  const session = await ssh.openInteractiveSession('ssh://host')
+  try {
+    assert.equal((await lstat(session.directory)).mode & 0o777, 0o700)
+    assert.ok(Buffer.byteLength(session.controlPath) <= 100)
+    await chmod(session.directory, 0o777)
+    await assert.rejects(session.ssh.execute('ssh://host', 'true'), /unsafe SSH control directory/u)
+    await chmod(session.directory, 0o700)
+    await symlink('/tmp/not-owned-by-this-session', session.controlPath)
+    await assert.rejects(session.ssh.execute('ssh://host', 'true'), /unsafe SSH control socket/u)
+    await unlink(session.controlPath)
+  } finally { await chmod(session.directory, 0o700); await session.close() }
+  await assert.rejects(access(session.directory), /ENOENT/u)
+})
+
+test('Windows and unsupported ControlMaster clients retain nonmultiplexed operation', async () => {
+  for (const platform of ['win32', 'linux']) {
+    const calls = []
+    const runner = async (_command, args) => {
+      calls.push(args)
+      return args.includes('-M') ? { code: 255, stderr: 'Bad configuration option: ControlMaster' } : { code: 0, stdout: 'ok' }
+    }
+    const ssh = new SystemSsh({ platform, runner, interactiveRunner: runner, terminalCheck: () => true, transport: { compression: true } })
+    const session = await ssh.openInteractiveSession('ssh://host')
+    try {
+      assert.equal(session.multiplexed, false)
+      await session.ssh.execute('ssh://host', 'true')
+      await session.ssh.copy('ssh://host', '/local/file', '/tmp/webminai.test/file')
+      assert.ok(calls.at(-1).includes('Compression=yes'))
+      assert.ok(!calls.at(-1).some(argument => argument.startsWith('ControlPath=')))
+      assert.equal(calls.at(-1).includes('BatchMode=yes'), false)
+      assert.equal(calls.at(-1).includes('BatchMode=no'), true)
+    } finally { await session.close() }
+  }
+})
+
+test('effective proxy/configuration changes separate otherwise identical pool requests', async t => {
+  let proxy = 'first-bastion'
+  let masters = 0
+  const ssh = new SystemSsh({ terminalCheck: () => true, runner: async (_command, args) => args.includes('-G') ? { code: 0, stdout: `hostname real-host\nuser operator\nidentityagent none\nproxyjump ${proxy}\n` } : { code: 0 }, interactiveRunner: async () => { masters++; return { code: 0 } } })
+  t.after(() => ssh.closeSessions())
+  const a = await ssh.acquireSession('ssh://alias')
+  proxy = 'second-bastion'
+  const b = await ssh.acquireSession('ssh://alias')
+  assert.equal(masters, 2)
+  await a.close(); await b.close()
+})
+
+test('socket paths stay bounded with a long temporary directory', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-long-socket-'))
+  const { mkdir } = await import('node:fs/promises')
+  const long = path.join(root, 'a'.repeat(100))
+  await mkdir(long)
+  t.after(() => rm(root, { recursive: true, force: true }))
+  t.mock.method(os, 'tmpdir', () => long)
+  const ssh = new SystemSsh({ terminalCheck: () => true, runner: async () => ({ code: 0 }), interactiveRunner: async () => ({ code: 0 }) })
+  const session = await ssh.openInteractiveSession('ssh://host')
+  try { assert.ok(Buffer.byteLength(session.controlPath) <= 100) } finally { await session.close() }
+})
+test('a missing owned control socket reconnects before dispatching new work', async () => {
+  const order = []
+  const ssh = new SystemSsh({
+    terminalCheck: () => true,
+    interactiveRunner: async () => ({ code: 0 }),
+    runner: async (_binary, args) => {
+      if (args.includes('check')) return { code: 255 }
+      if (args.includes('-M')) order.push('reconnected')
+      if (args.at(-1) === 'true') order.push('command')
+      return { code: 0, stdout: '', stderr: '' }
+    }
+  })
+  const session = await ssh.openInteractiveSession('ssh://host')
+  try {
+    await session.ssh.execute('ssh://host', 'true')
+    assert.deepEqual(order, ['reconnected', 'command'])
+  } finally { await session.close() }
 })

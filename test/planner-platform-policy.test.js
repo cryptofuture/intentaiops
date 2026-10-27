@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { executeApprovedPlan } from '../src/plan-validator.js'
+import { buildWindowsDockerBootstrapTask } from '../src/windows-docker-bootstrap-task.js'
+import { buildWindowsBraveTask } from '../src/windows-brave-task.js'
 import {
   detectPlannerPlatform,
   validateDockerAndSecrets,
@@ -25,6 +28,33 @@ function planWith (command, overrides = {}) {
   }
 }
 
+const macosInventory = { webminaiExecution: { platform: 'macos', runtimeHome: '/Users/mac' }, webminaiDocker: { preferred: true } }
+
+test('Brave continuation reuses only confirmed release acquisition and still requires fresh verification', () => {
+  const original = buildWindowsBraveTask(12, { platform: 'windows' }).plan
+  const remaining = { ...original, commands: original.commands.slice(1) }
+  const prior = status => [{ plan: original, executionEvidence: { commands: [{ commandId: 'start-brave-download', status }] } }]
+  assert.doesNotThrow(() => validateWindowsPlan(remaining, {}, 'install Brave', { previousAttempts: prior('completed') }))
+  for (const status of ['failed', 'pending', 'uncertain']) assert.throws(() => validateWindowsPlan(remaining, {}, 'install Brave', { previousAttempts: prior(status) }), /releases\/latest/u)
+  const unverified = { ...remaining, commands: remaining.commands.map(command => ({ ...command, command: command.command.replaceAll('Get-AuthenticodeSignature', 'Write-Output') })) }
+  assert.throws(() => validateWindowsPlan(unverified, {}, 'install Brave', { previousAttempts: prior('completed') }), /Authenticode/u)
+  const rollbackOnlySource = { ...original, commands: remaining.commands, revertCommands: original.commands }
+  assert.throws(() => validateWindowsPlan(rollbackOnlySource, {}, 'install Brave'), /releases\/latest/u)
+})
+
+test('Windows Docker readiness is not a Linux deployment and service plans require native paths', () => {
+  const inventory = { webminaiExecution: { platform: 'windows' }, webminaiDocker: { preferred: true } }
+  const bootstrap = buildWindowsDockerBootstrapTask(5, inventory.webminaiExecution, inventory.webminaiDocker).plan
+  assert.doesNotThrow(() => validateDockerAndSecrets(bootstrap, inventory))
+  for (const command of ['docker compose version', '& $docker compose version 2>&1|Out-String', '& $dockerCli compose --version']) assert.doesNotThrow(() => validateDockerAndSecrets(planWith(command), inventory))
+  for (const command of ['docker compose up -d', '& $docker compose up -d', '& $dockerCli compose pull', "& 'C:\\Program Files\\Docker\\docker.exe' compose up -d", 'docker compose version; docker compose up -d']) {
+    assert.throws(() => validateDockerAndSecrets(planWith(command), inventory), /Windows Compose service plans/u)
+    assert.throws(() => validateDockerAndSecrets(planWith(command, { modifiedFiles: ['/opt/webminai/services/app/compose.yaml'] }), inventory), /Windows Compose service plans/u)
+    assert.doesNotThrow(() => validateDockerAndSecrets(planWith(command, { modifiedFiles: ['C:\\ProgramData\\WebminAI\\Services\\app\\compose.yaml'] }), inventory))
+    assert.throws(() => validateDockerAndSecrets(planWith(command), { ...inventory, webminaiDocker: { preferred: false } }), /Docker is not enabled/u)
+  }
+})
+
 test('planner platform detection preserves inventory precedence and unknown fallback', () => {
   assert.equal(detectPlannerPlatform({ os: 'linux', platform: { os: 'Windows_NT' } }), 'windows')
   assert.equal(detectPlannerPlatform({ info: { agents: [{ application: { kernel: 'FreeBSD 15.1' } }] } }), 'freebsd')
@@ -47,6 +77,13 @@ test('Windows policy uses execution inventory for LocalSystem package tools', ()
   assert.doesNotThrow(() => validateWindowsPlan(plan, { webminaiExecution: { commands: { chocolatey: true } } }, 'install a package'))
 })
 
+test('Windows rollback planning does not require a new Brave installation', () => {
+  const plan = planWith("Write-Output 'reviewed-cleanup'", { modifiedFiles: ['C:\\ProgramData\\WebminAI\\Tasks\\1-brave'] })
+  assert.throws(() => validateWindowsPlan(plan, {}, 'install Brave'), /official releases\/latest/u)
+  assert.doesNotThrow(() => validateWindowsPlan(plan, {}, 'install Brave', { requireRevert: false }))
+  assert.throws(() => validateWindowsPlan(planWith('& curl.exe', { modifiedFiles: plan.modifiedFiles }), {}, 'install Brave', { requireRevert: false }), /directly invokes a native process/u)
+})
+
 test('Docker credential policy and Netdata function policy remain independent', () => {
   assert.throws(
     () => validateDockerAndSecrets(planWith('docker run example/service'), { webminaiDocker: { preferred: true } }),
@@ -57,3 +94,89 @@ test('Docker credential policy and Netdata function policy remain independent', 
     functions: { functions: [{ name: 'webminai:health' }] }
   }))
 })
+
+test('Docker metadata filenames do not require a Compose deployment route', () => {
+  const command = "test -f '/var/db/webminai/task-state/22-macos-colima/docker-compose.existed'; test ! -e '/var/db/webminai/task-state/22-macos-colima/docker-compose.created'"
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith(command), { webminaiDocker: { preferred: false } }))
+  for (const invocation of ['docker compose version', 'docker-compose version', 'docker-compose.exe version']) {
+    assert.throws(() => validateDockerAndSecrets(planWith(invocation), { webminaiDocker: { preferred: false } }), /Docker is not enabled/u)
+  }
+})
+
+test('macOS Compose routes use only the signed runtime owner service directory', () => {
+  const command = 'docker compose -p app up -d'
+  const valid = planWith(command, { modifiedFiles: ['/Users/mac/.webminai/services/app/compose.yaml'] })
+  assert.doesNotThrow(() => validateDockerAndSecrets(valid, macosInventory))
+  for (const file of ['/opt/webminai/services/app/compose.yaml', '/Users/other/.webminai/services/app/compose.yaml', '/Users/mac/.webminai/services/../compose.yaml']) {
+    assert.throws(() => validateDockerAndSecrets(planWith(command, { modifiedFiles: [file] }), macosInventory), /verified runtime home/u)
+  }
+  assert.throws(() => validateDockerAndSecrets(valid, { ...macosInventory, webminaiExecution: { platform: 'macos' } }), /verified runtime home/u)
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith('uptime'), { webminaiExecution: { platform: 'macos' } }))
+})
+
+test('macOS credential generation requires the observed owner and private storage', () => {
+  const command = "umask 077; openssl rand -hex 24 > '/Users/mac/.webminai/credentials/app/key'"
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith(command), macosInventory))
+  for (const invalid of [command.replace('/Users/mac', '/Users/other'), command.replace('/Users/mac/.webminai/credentials/app', '/root/app_credentials'), command.replace('umask 077;', ''), command.replace('/Users/mac/.webminai/credentials/app', '/tmp')]) {
+    assert.throws(() => validateDockerAndSecrets(planWith(invalid), macosInventory), /credential|umask/u)
+  }
+  assert.throws(() => validateDockerAndSecrets(planWith(command), { webminaiExecution: { platform: 'macos' } }), /verified runtime owner/u)
+})
+
+test('macOS private handoff validation preserves executable commands and redacts execution results', async () => {
+  const command = "set -eu; key=$(cat '/Users/mac/.webminai/credentials/n8n/encryption_key'); umask 077; printf 'N8N_ENCRYPTION_KEY=%s\\n' \"$key\" > '/Users/mac/.webminai/credentials/n8n/service.env'"
+  const plan = planWith(command, { summary: 'Private macOS handoff', changeOverview: 'Write only protected configuration' })
+  assert.doesNotThrow(() => validateDockerAndSecrets(plan, macosInventory))
+  assert.equal(plan.commands[0].command, command)
+  const results = await executeApprovedPlan({ plan, policy: {}, netdata: { async runCommand () { return { exitCode: 0, stdout: 'synthetic-private-key-value', stderr: 'synthetic-private-key-value' } } }, approve: async () => true })
+  assert.equal(results[0].result.stdout, '[redacted sensitive output]')
+  assert.equal(results[0].result.stderr, '[redacted sensitive output]')
+})
+
+test('published Joomla login is not a secret and cannot exempt password or arbitrary login literals', () => {
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith('joomla install --admin-username=webminai_admin --site-name=example'), {}))
+  for (const command of ['username=webminai_admin', 'password=webminai_admin', 'joomla --admin-username=personal_admin', 'joomla --admin-username=webminai_admin_extra', 'joomla --admin-username=webminai_admin --password=fixture-secret', 'password="--admin-username=webminai_admin"']) {
+    assert.throws(() => validateDockerAndSecrets(planWith(command), {}), /literal login or secret/u)
+  }
+})
+
+test('captured credentials can be written to a private file without being classified as console output', async () => {
+  const command = "set -eu; key=$(cat '/root/n8n_credentials/encryption_key'); umask 077; printf 'N8N_ENCRYPTION_KEY=%s\\n' \"$key\" > '/root/n8n_credentials/service.env'; printf 'configured\\n'"
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith(command), {}))
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith("cat /etc/hosts > '/root/n8n_credentials/host-copy'"), {}))
+  assert.doesNotThrow(() => validateDockerAndSecrets(planWith("cat > '/root/n8n_credentials/service.env' <<'EOF'\nN8N_PORT=5678\nEOF"), {}))
+  const plan = planWith(command, { summary: 'Private handoff', changeOverview: 'Write only the protected configuration' })
+  const results = await executeApprovedPlan({
+    plan,
+    policy: {},
+    netdata: { async runCommand () { return { exitCode: 0, stdout: 'synthetic-private-key-value', stderr: 'synthetic-private-key-value' } } },
+    approve: async () => true
+  })
+  assert.equal(results[0].result.stdout, '[redacted sensitive output]')
+  assert.equal(results[0].result.stderr, '[redacted sensitive output]')
+})
+
+for (const command of [
+  "cat '/root/n8n_credentials/encryption_key'",
+  "cat -n '/root/n8n_credentials/encryption_key'",
+  "cat --number '/root/n8n_credentials/encryption_key'",
+  "cat /etc/hosts '/root/n8n_credentials/encryption_key'",
+  "cat < '/root/n8n_credentials/encryption_key'",
+  "echo \"$(cat '/root/n8n_credentials/encryption_key')\"",
+  "printf '%s' \"$(cat '/root/n8n_credentials/encryption_key')\"",
+  "key=$(cat '/root/n8n_credentials/encryption_key'); printf '%s' \"$key\"",
+  "key=$(cat '/root/n8n_credentials/encryption_key'); umask 077; printf '%s' \"$key\" > /tmp/public",
+  "key=$(cat '/root/n8n_credentials/encryption_key'); umask 077; printf '%s' \"$key\" > '/root/n8n_credentials/service.env' >&2",
+  "key=$(cat '/root/n8n_credentials/encryption_key'); umask 077; printf '%s' \"$key\" > '/root/n8n_credentials/service.env'; echo \"$key\"",
+  `key=$(cat '/root/n8n_credentials/encryption_key'); umask 077; printf '%s' "$key" > '/root/n8n_credentials/service.env'; echo "${'$'}{key}"`,
+  `key=$(cat '/root/n8n_credentials/encryption_key'); umask 077; printf '%s' "$key" > '/root/n8n_credentials/service.env'; echo "${'$'}{key@Q}"`,
+  "key=$(cat '/root/n8n_credentials/encryption_key'); umask 077; printf '%s' \"$key\" > '/root/n8n_credentials/service.env'; export key; env",
+  "key=$(cat '/root/n8n_credentials/encryption_key'); umask 077; printf '%s' \"$key\" > '/root/other_credentials/service.env'",
+  "set -x; key=$(cat '/root/n8n_credentials/encryption_key'); umask 077; printf '%s' \"$key\" > '/root/n8n_credentials/service.env'"
+]) {
+  test(`private credential write exemption does not allow disclosure: ${command.slice(0, 35)}`, () => {
+    assert.throws(() => validateDockerAndSecrets(planWith(command), {}), /credential|shell tracing/u)
+    const macos = command.replaceAll('/root/n8n_credentials', '/Users/mac/.webminai/credentials/n8n').replaceAll('/root/other_credentials', '/Users/mac/.webminai/credentials/other')
+    assert.throws(() => validateDockerAndSecrets(planWith(macos), macosInventory), /credential|shell tracing/u)
+  })
+}

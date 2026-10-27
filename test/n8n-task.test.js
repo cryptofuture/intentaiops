@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { buildN8nTask, n8nRelease } from '../src/n8n-task.js'
 import { validateCommandPlan } from '../src/plan-validator.js'
 
@@ -40,7 +43,9 @@ for (const [family, linuxContext] of Object.entries(contexts)) {
     assert.doesNotMatch(commands, /N8N_ENCRYPTION_KEY=[a-f0-9]{32,}/u)
     assert.equal(built.plan.commands.find(item => item.id === 'install-n8n').executionMode, 'job')
     assert.equal(built.plan.commands.find(item => item.id === 'install-n8n').timeoutMs, 3600000)
+    assert.deepEqual(built.plan.commands.find(item => item.id === 'install-n8n').retry, { attempts: 2, intervalMs: 2000, exitCodes: [143], states: ['timed_out'] })
     assert.equal(built.plan.commands.find(item => item.id === 'install-runtime').timeoutMs, 1800000)
+    assert.deepEqual(built.plan.commands.find(item => item.id === 'install-runtime').retry, { attempts: 2, intervalMs: 2000, exitCodes: [143], states: ['timed_out'] })
     const restore = built.plan.revertCommands.find(item => item.id === 'restore-packages').command
     assert.match(restore, /packages\.current/u)
     assert.match(restore, /comm -13/u)
@@ -52,6 +57,42 @@ for (const [family, linuxContext] of Object.entries(contexts)) {
     }
   })
 }
+
+test('Alpine creates nginx runtime state before validation and cleans only its owned directory', () => {
+  const built = buildN8nTask(1, contexts.alpine, { preferred: false })
+  const configure = built.plan.commands.find(item => item.id === 'configure-services').command
+  const restore = built.plan.revertCommands.find(item => item.id === 'restore-packages').command
+  assert.ok(built.plan.modifiedFiles.includes('/run/nginx'))
+  assert.match(configure, /if \[ ! -d \/run\/nginx \]; then install -d[^;]+\/run\/nginx; : > '[^']+created-runtime-directory'; fi/u)
+  assert.ok(configure.indexOf('created-runtime-directory') < configure.indexOf('nginx -t'))
+  assert.match(restore, /if \[ -e '[^']+created-runtime-directory' \] && \[ ! -e '[^']+nginx\.active' \] && \[ -d \/run\/nginx \]; then rmdir \/run\/nginx; fi/u)
+  assert.doesNotMatch(restore, /rm -rf[^;]*\/run\/nginx/u)
+})
+
+test('native baseline creates private parents and preserves the first package and repository snapshot', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'intent-n8n-baseline-'))
+  try {
+    const built = buildN8nTask(91, contexts.debian, { preferred: false })
+    const mappings = new Map(built.plan.modifiedFiles.map((entry, index) => [entry, `${root}/path-${index}`]))
+    const state = mappings.get('/var/lib/webminai/task-state/91-n8n-linux')
+    const repository = mappings.get('/usr/share/keyrings/nodesource.gpg')
+    writeFileSync(repository, 'original repository', { mode: 0o600 })
+    const command = [...mappings].sort((a, b) => b[0].length - a[0].length).reduce((text, [original, replacement]) => text.replaceAll(original, replacement), built.plan.commands[0].command)
+      .replaceAll('install -d -o root -g root', 'install -d').replaceAll('dpkg-query', 'fixture_packages')
+    const run = packages => {
+      const result = spawnSync('/bin/sh', ['-c', `umask 0007; fixture_packages () { printf '${packages}\\n'; }; systemctl () { return 1; }; ` + command], { encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+    }
+    run('nginx')
+    assert.equal(statSync(state).mode & 0o777, 0o700)
+    assert.equal(statSync(state + '/repo-backup').mode & 0o777, 0o700)
+    assert.equal(statSync(state + '/packages.before').mode & 0o777, 0o600)
+    writeFileSync(repository, 'later repository')
+    run('different-package')
+    assert.equal(readFileSync(state + '/packages.before', 'utf8'), 'nginx\n')
+    assert.equal(readFileSync(state + '/repo-backup/0', 'utf8'), 'original repository')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 test('native package routes avoid incompatible Node versions', () => {
   const alpine = buildN8nTask(1, contexts.alpine, { preferred: false }).plan.commands.find(item => item.id === 'install-runtime').command
@@ -114,6 +155,16 @@ test('Compose n8n task uses protected secrets and persistent SQLite data', () =>
     assert.equal(checked.status, 0, `${command.id}: ${checked.stderr}`)
   }
 })
+
+for (const preferred of [false, true]) {
+  test(`n8n ${preferred ? 'Compose' : 'native'} rollback removes recorded additions without global autoremove`, () => {
+    const { plan } = buildN8nTask(123, contexts.debian, { preferred, ready: true })
+    const rollback = plan.revertCommands.find(item => item.id === (preferred ? 'restore-docker' : 'restore-packages')).command
+    assert.match(rollback, /xargs -r apt-get purge -y/u)
+    assert.match(rollback, /packages\.added/u)
+    assert.doesNotMatch(rollback, /\bautoremove\b/u)
+  })
+}
 
 test('n8n release is pinned', () => {
   assert.deepEqual(n8nRelease(), {

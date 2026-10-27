@@ -1,17 +1,21 @@
 import { access, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { buildCandidatePlanningContext, buildCommonTask, listEligibleCommonTasks } from './common-tasks.js'
-import { isSystemUpdateTask, systemUpdateProfile } from './system-update-task.js'
+import { listCommonTasks, listEligibleCommonTasks } from './common-tasks.js'
+import { prepareTask } from './task-preparation.js'
+import { completeTaskReport } from './task-completion-report.js'
+import { withHostMutation, assertHostMutationReady } from './host-mutation-ownership.js'
+import { isSystemUpdateTask } from './system-update-task.js'
 import { parseSshConnection } from './connection.js'
 import { VaultAuthenticationError } from './crypto-vault.js'
 import { resolveDockerPolicy } from './docker-policy.js'
 import { formatDiagnosticError, redactDiagnosticText } from './error-details.js'
 import { HostSessionFactory } from './host-session-factory.js'
-import { CODEX_MODELS, CODEX_REASONING_EFFORTS, normalizeCodexSettings } from './codex-planner.js'
+import { CodexPlanner, normalizeCodexSettings } from './codex-planner.js'
 import { KubernetesClient } from './kubernetes-client.js'
 import { KubernetesNetdataClient } from './kubernetes-netdata-client.js'
 import { KubernetesStage2Service } from './kubernetes-stage2-service.js'
+import { KubernetesTaskService } from './kubernetes-task-service.js'
 import { rootExecutionPolicy } from './execution-policy.js'
 import { parseClaimingInput, validateClaimDetails } from './netdata-claim.js'
 import { MultiHostRunStore } from './multi-host-run-store.js'
@@ -22,13 +26,21 @@ import { parseSshCommand } from './ssh-command.js'
 import { ServerWorkspace } from './server-workspace.js'
 import { validateServerId } from './server-id.js'
 import { SettingsStore } from './settings-store.js'
+import { TaskStore } from './task-store.js'
+import { OperatorController } from './operator-controller.js'
+import { startOperatorConsole } from './operator-console.js'
+import { OperatorWorkspace } from './operator-workspace.js'
+import { OperatorHosts } from './operator-hosts.js'
+import { OperatorMetrics } from './operator-metrics.js'
 import { Stage2Service } from './stage2-service.js'
 import { SystemSsh } from './system-ssh.js'
+import { runInteractiveProcess } from './process-runner.js'
 import { updateIntentAiOps } from './self-update.js'
 import { TerminalUi } from './terminal-ui.js'
 import { FALLBACK_ADMIN_EMAIL, normalizeAdminEmailPreset } from './application-defaults.js'
 import { CLI_NAME, DATA_DIRECTORY_NAME, LEGACY_DATA_DIRECTORY_NAME, PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_URL } from './product.js'
-import { hostHealthProfile, isHostHealthTask } from './host-health-task.js'
+import { isHostHealthTask, redactHealthText, sanitizeHealthResult } from './host-health-task.js'
+import { detectOperationLoop } from './operation-loop-detector.js'
 import { normalizeTerminalControls } from './terminal-controls.js'
 import {
   buildDashboardHostRow,
@@ -57,17 +69,20 @@ import {
 
 const VAULT_PASSPHRASE_GUIDANCE = 'Use at least 12 characters; prefer five or more random words or 20+ password-manager-generated characters.'
 
+export { redactHealthText } from './host-health-task.js'
+
 export async function runCli ({ argv = process.argv.slice(2), input, output, selfUpdate = updateIntentAiOps } = {}) {
   const cliOptions = parseArguments(argv)
   const ui = new TerminalUi({ input, output })
+  let transport
   try {
-    return await runCliSession({ cliOptions, ui, selfUpdate })
+    return await runCliSession({ cliOptions, ui, selfUpdate, onTransport: value => { transport = value } })
   } finally {
-    ui.dispose()
+    try { await transport?.closeSessions() } finally { ui.dispose() }
   }
 }
 
-async function runCliSession ({ cliOptions, ui, selfUpdate }) {
+async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
   if (cliOptions.help) {
     printHelp(ui)
     return
@@ -84,12 +99,20 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
 
   const dataRoot = path.resolve(cliOptions.dataRoot ?? await resolveDefaultDataRoot(os.homedir()))
   const settingsStore = new SettingsStore(dataRoot)
-  const baseSsh = new SystemSsh()
   const unlocked = await unlock(ui, settingsStore)
   const settings = unlocked.settings
+  const baseSsh = new SystemSsh({
+    interactiveRunner: (...args) => ui.withTerminalSuspended(() => runInteractiveProcess(...args)),
+    transport: settings.ssh,
+    onDiagnostic: event => {
+      if (cliOptions.debug && event.type !== 'channel') renderDebugEvent(ui, { phase: 'ssh-transport', message: JSON.stringify(event) })
+    }
+  })
+  onTransport(baseSsh)
   ui.setControls(settings.controls)
   const directoryAliases = new Map(Object.entries(settings.servers).map(([serverId, server]) => [serverId, server.historyId ?? serverId]))
   const workspace = new ServerWorkspace(dataRoot, { directoryAliases })
+  const taskStore = new TaskStore(dataRoot, { directoryAliases })
   let passphrase = unlocked.passphrase
   let applicationDefaults = await settingsStore.decryptApplicationDefaults({ settings, passphrase })
   const hostRuntime = new Map()
@@ -106,11 +129,13 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
     ui,
     settingsStore,
     workspace,
+    taskStore,
     baseSsh,
     settings,
     hostRuntime,
     hostSessions,
     directoryAliases,
+    labTasks: cliOptions.labTasks === true,
     get applicationDefaults () { return applicationDefaults },
     set applicationDefaults (value) { applicationDefaults = value },
     get passphrase () { return passphrase }
@@ -118,11 +143,29 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
   let recentServerId = null
   let selectedHostId = null
 
+  if (cliOptions.console) {
+    const hosts = new OperatorHosts({ factory: hostSessions, settingsStore, workspace, settings, tasks: taskStore, passphrase, credential: capabilities => chooseElevation(ui, capabilities), notify: event => controller?.record(event) })
+    const controller = new OperatorController({
+      dataRoot,
+      settings,
+      passphrase,
+      tasks: taskStore,
+      adminFor: serverId => hosts.lease(serverId)
+    })
+    const runtime = new OperatorWorkspace({ controller, hosts, metrics: new OperatorMetrics(controller) })
+    const consoleServer = await startOperatorConsole({ controller, workspace: runtime, actions: cliOptions.consoleActions, port: cliOptions.webPort ?? 0 })
+    ui.info(`Open ${consoleServer.url}`)
+    ui.info('Press Ctrl+C in this terminal to stop the local console. SSH authentication prompts appear here when needed.')
+    try { await new Promise(resolve => { process.once('SIGINT', resolve); process.once('SIGTERM', resolve) }) } finally { await consoleServer.close() }
+    return
+  }
+
   for (;;) {
     const serverIds = Object.keys(settings.servers).sort()
     const clusterIds = Object.keys(settings.clusters ?? {}).sort()
     const activeHosts = serverIds.filter(serverId => settings.servers[serverId].desiredStage2 === 'active').length
     const hostRows = await buildDashboardHostRows({ context, serverIds, recentServerId })
+    const interrupted = serverIds.flatMap(serverId => taskStore.interruptedTasks(serverId).map(task => `${serverId}/#${task.id}`))
     const menuOptions = mainActionOptions({
       hostCount: serverIds.length,
       clusterCount: clusterIds.length,
@@ -139,6 +182,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
         ]),
         `Kubernetes clusters: ${clusterIds.length}`,
         `Codex: ${settings.codex.model} / ${settings.codex.reasoningEffort} reasoning`,
+        ...(interrupted.length ? [`Unfinished execution (may still be active): ${interrupted.join(', ')}. Inspect task history.`] : []),
         applicationDefaults.adminEmail
           ? `Default administrator email: ${applicationDefaults.adminEmail}`
           : ui.styleToken(`Default administrator email: ${FALLBACK_ADMIN_EMAIL}`, FALLBACK_ADMIN_EMAIL, 'warning')
@@ -221,27 +265,37 @@ async function runCliSession ({ cliOptions, ui, selfUpdate }) {
   }
 }
 
-async function setCodexSettings ({ context }) {
+export async function setCodexSettings ({ context, planner = new CodexPlanner() }) {
   const { ui, settingsStore, settings } = context
   const current = normalizeCodexSettings(settings.codex)
   ui.clear()
   ui.banner('Codex model')
+  ui.info('Loading models and supported reasoning levels from your Codex CLI...')
+  let models
+  try { models = await planner.listModels() } catch (error) {
+    ui.warning(formatDiagnosticError(error))
+    await ui.pause()
+    return
+  }
   const model = await ui.choose('Model', [
-    ...CODEX_MODELS.map(value => ({
-      value,
-      label: `${value}${value === current.model ? ' (current)' : ''}`
+    ...models.map(({ model }) => ({
+      value: model,
+      label: `${model}${model === current.model ? ' (current)' : ''}`
     })),
     { value: null, label: 'Back without changes' }
   ])
   if (!model) return
+  const selected = models.find(item => item.model === model)
+  if (!selected) throw new Error('Selected model is absent from the Codex catalog')
   const reasoningEffort = await ui.choose('Reasoning effort', [
-    ...CODEX_REASONING_EFFORTS.map(value => ({
+    ...selected.reasoningEfforts.map(value => ({
       value,
       label: `${value}${value === current.reasoningEffort ? ' (current)' : ''}`
     })),
     { value: null, label: 'Back without changes' }
   ])
   if (!reasoningEffort) return
+  if (!selected.reasoningEfforts.includes(reasoningEffort)) throw new Error('Selected reasoning effort is unsupported by this model')
   await settingsStore.setCodexSettings({ settings, model, reasoningEffort })
   ui.success(`Codex set to ${model} with ${reasoningEffort} reasoning.`)
   await ui.pause()
@@ -501,7 +555,7 @@ export async function addHost ({ context, temporary = false }) {
   let session
   let hostFingerprint
   try {
-    session = await baseSsh.openInteractiveSession(connectionUrl, { authentication })
+    session = await (baseSsh.acquireSession ?? baseSsh.openInteractiveSession).call(baseSsh, connectionUrl, { authentication })
     const check = await session.ssh.execute(connectionUrl, 'echo WEBMINAI_SSH_OK')
     if (check.stdout.trim() !== 'WEBMINAI_SSH_OK') throw new Error('unexpected SSH test response')
     hostFingerprint = await session.ssh.hostFingerprint(connectionUrl)
@@ -619,13 +673,21 @@ export async function addKubernetesCluster ({ context }) {
     ui.separator()
     const save = await ui.confirm(`Save Kubernetes cluster ${clusterId}?`, false)
     if (!save) return null
+    let actionKey
+    if (typeof kubernetes.request === 'function') {
+      try { actionKey = await new KubernetesStage2Service({ kubernetes }).existingActionKey() } catch (error) {
+        if (error.statusCode !== 403) throw error
+        ui.warn('This kubeconfig cannot read managed gateway credentials. API inspection remains available; no additional permission will be requested.')
+      }
+    }
     await settingsStore.addKubernetesCluster({
       settings,
       passphrase,
       clusterId,
       kubeconfig,
       apiServer,
-      contextName
+      contextName,
+      ...(actionKey ? { actionKey } : {})
     })
     ui.success(`Kubernetes cluster ${clusterId} was saved.`)
     ui.info('Open Browse Kubernetes clusters to activate or update its Stage 2 gateway.')
@@ -669,14 +731,18 @@ async function runConnectedKubernetesCluster ({ context, clusterId }) {
   const kubernetes = createKubernetesClient(context, cluster.kubeconfig)
   const stage2 = new KubernetesStage2Service({
     kubernetes,
+    dataRoot: settingsStore.dataRoot,
     onProgress: event => ui.info(`[${event.phase}] ${event.message}`)
   })
   let status = await readKubernetesStatus({ kubernetes, cluster })
+  const clusterTasks = new KubernetesTaskService({ dataRoot: settingsStore.dataRoot, settings, passphrase, settingsStore, onEvent: event => ui.info(event.type) })
 
   for (;;) {
     const actions = [
       { label: 'Refresh status', value: 'refresh' },
+      { label: 'Common tasks, persisted reviews and history', value: 'tasks' },
       { label: 'Activate/update Stage 2 gateway', value: 'activate' },
+      { label: 'Remote common-task recovery availability', value: 'remote-recovery' },
       { label: 'Deactivate Stage 2 gateway', value: 'deactivate', style: 'warning' }
     ]
     if (status.stage2 === 'inactive') actions.push({ label: 'Remove saved cluster', value: 'remove', style: 'danger' })
@@ -697,6 +763,18 @@ async function runConnectedKubernetesCluster ({ context, clusterId }) {
       footerHints: [['Up/Down', 'select'], ['Enter', 'open'], ['Esc', 'back']]
     })
     if (!action || action === 'back') return
+    if (action === 'tasks') {
+      try { await runKubernetesTaskMenu({ ui, clusterTasks, clusterId }) } catch (error) { ui.error(redactDiagnosticText(error.message)); await ui.pause() }
+      continue
+    }
+    if (action === 'remote-recovery') {
+      const recovery = stage2.remoteRecoveryCapabilities(status.recoveryHealth, await clusterTasks.persistentAvailable(clusterId))
+      if (recovery.available) {
+        try { await runKubernetesTaskMenu({ ui, clusterTasks, clusterId, remote: true }) } catch (error) { ui.error(redactDiagnosticText(error.message)) }
+      } else ui.warn(recovery.reason)
+      await ui.pause()
+      continue
+    }
     if (action === 'refresh') {
       ui.info('Refreshing Kubernetes API and Stage 2 status...')
       status = await readKubernetesStatus({ kubernetes, cluster })
@@ -706,7 +784,9 @@ async function runConnectedKubernetesCluster ({ context, clusterId }) {
       const confirmed = await ui.confirm('Deploy or update the Stage 2 gateway directly through the Kubernetes API?', false)
       if (!confirmed) continue
       try {
-        await stage2.activate({ actionKey: cluster.actionKey })
+        let recoveryStorageClass
+        if (!status.recoveryHealth?.recoveryConfigured && await ui.confirm('Enable persistent signed recovery storage? This preserves a dedicated PVC across gateway deactivation.', false)) recoveryStorageClass = await ui.ask('Existing StorageClass name', { defaultValue: 'standard' })
+        await stage2.activate({ actionKey: cluster.actionKey, recoveryStorageClass })
         await settingsStore.setKubernetesStage2State({ settings, clusterId, desired: 'active' })
         status = await readKubernetesStatus({ kubernetes, cluster })
         ui.success('Kubernetes Stage 2 gateway is active.')
@@ -756,7 +836,52 @@ async function readKubernetesStatus ({ kubernetes, cluster }) {
     version: version.gitVersion ?? 'available',
     nodes: String(nodes.items?.length ?? 0),
     stage2: health?.platform === 'kubernetes' ? 'active' : 'inactive',
-    plugin: health?.version ? `v${health.version}` : 'not installed'
+    plugin: health?.version ? `v${health.version}` : 'not installed',
+    recoveryHealth: health
+  }
+}
+
+async function runKubernetesTaskMenu ({ ui, clusterTasks, clusterId, remote = false }) {
+  for (;;) {
+    if (remote) {
+      const listing = await clusterTasks.remoteHistory(clusterId)
+      const executionId = await ui.searchChoose('Remote signed common-task records (summaries require verification)', [...listing.executions.map(entry => ({ label: `${entry.executionId} · ${entry.sequence} records`, value: entry.executionId })), { label: 'Back', value: null }])
+      if (!executionId) return
+      const view = await clusterTasks.prepareRecovery(clusterId, executionId)
+      if (view.alreadyAbsent) { ui.info(view.message); await ui.pause(); return }
+      await reviewKubernetesTask({ ui, clusterTasks, clusterId, taskId: view.taskId })
+      return
+    }
+    const history = await clusterTasks.history(clusterId)
+    const action = await ui.searchChoose('Kubernetes task workspace', [{ label: 'Prepare a verified common-task plan (no execution)', value: 'prepare' }, { label: 'Discover signed remote recovery records', value: 'remote' }, ...history.map(task => ({ label: `#${task.id} ${task.request} [${task.status}]`, value: task.id })), { label: 'Back', value: null }])
+    if (!action) return
+    if (action === 'remote') { await runKubernetesTaskMenu({ ui, clusterTasks, clusterId, remote: true }); continue }
+    let taskId = action
+    if (action === 'prepare') {
+      const catalogId = await ui.searchChoose('Select a supported Kubernetes application', [...clusterTasks.catalog().map(task => ({ label: task.label, value: task.id })), { label: 'Back', value: null }])
+      if (!catalogId) continue
+      taskId = (await clusterTasks.prepare(clusterId, catalogId)).taskId
+    }
+    await reviewKubernetesTask({ ui, clusterTasks, clusterId, taskId })
+  }
+}
+
+async function reviewKubernetesTask ({ ui, clusterTasks, clusterId, taskId }) {
+  for (;;) {
+    const view = await clusterTasks.inspect(clusterId, taskId)
+    ui.heading(`Kubernetes ${clusterId} / task #${taskId}: ${view.status}`)
+    ui.output.write(view.summary + '\n')
+    if (view.securityReport) { ui.heading('Security recommendations'); writeWrapped(ui, view.securityReport.answer) }
+    for (const command of view.commands) ui.output.write(`[${command.risk}] ${command.id}: ${command.method} ${command.path}\n  ${command.purpose}\n`)
+    for (const warning of view.warnings ?? []) ui.warn(warning)
+    const action = await ui.choose('Reviewed cluster controls', [{ label: view.recovery ? 'Review and execute recovery' : 'Review and continue remaining commands', value: 'execute' }, { label: 'Pause before the next command', value: 'pause' }, { label: 'Abort remaining work (does not kill workloads)', value: 'abort' }, ...(!view.recovery ? [{ label: 'Prepare a separate recovery review', value: 'recover' }] : []), { label: 'Back', value: null }])
+    if (!action) return
+    if (action === 'recover') { await clusterTasks.prepareRecovery(clusterId, view.executionId); ui.info('Recovery plan saved separately. Open it from task history.'); return }
+    if (action === 'execute') {
+      if (!await ui.confirm('Approve exactly this saved plan for this cluster? Destructive recovery removes task-created application data.', false)) continue
+      const takeoverApproved = view.takeoverRequired === true && await ui.confirm('A previous operation still owns this signed execution. Approve the displayed ownership takeover only after inspecting its workload state?', false)
+      await clusterTasks.execute(clusterId, taskId, { approved: true, expectedVersion: view.expectedVersion, fingerprint: view.fingerprint, takeoverApproved, takeoverFingerprint: view.takeoverFingerprint })
+    } else await clusterTasks.control(clusterId, taskId, view.expectedVersion, action)
   }
 }
 
@@ -883,7 +1008,7 @@ async function executeMultiHostConsultation ({
 }
 
 async function updatePluginFleet ({ context, serverIds, debug }) {
-  const { ui, settingsStore, workspace, baseSsh, settings, passphrase } = context
+  const { ui, settingsStore, workspace, taskStore, baseSsh, settings, passphrase } = context
   ui.clear()
   ui.banner(`Plugin v${PLUGIN_VERSION} fleet update`)
   const selectedHosts = await selectConfiguredHosts({ context, serverIds, title: `Plugin v${PLUGIN_VERSION} fleet targets` })
@@ -946,11 +1071,11 @@ async function updatePluginFleet ({ context, serverIds, debug }) {
     const results = await parallelMap(ready, 4, async entry => {
       try {
         ui.info(`[${entry.serverId}] Installing plugin v${PLUGIN_VERSION}...`)
-        const result = await entry.stage2.activate({
+        const result = await withHostMutation({ dataRoot: settingsStore.dataRoot, identity: settings.servers[entry.serverId].historyId ?? entry.serverId, before: () => assertHostMutationReady({ settingsStore, tasks: taskStore, settings, serverId: entry.serverId }) }, () => entry.stage2.activate({
           ...entry.server,
           ...entry.elevation,
           installNetdata: false
-        })
+        }))
         ui.success(`[${entry.serverId}] ${pluginActionLabel(result)}; Netdata preserved.`)
         return { ...entry, result }
       } catch (error) {
@@ -1010,7 +1135,7 @@ async function executeMultiHostRun ({
     let effectiveCatalogId = catalogId
     const planningHints = {}
     if (kind === 'ai' && retryOfRunId === null) {
-      ui.info('Asking Codex whether the request matches or can reuse a verified application task for each host platform...')
+      ui.info('Asking Codex whether the request matches or can reuse a verified common task for each host platform...')
       const routed = await Promise.allSettled(serverIds.map(async serverId => {
         const admin = await adminFor(serverId)
         const inventory = await admin.refreshInventory({ settings, passphrase, serverId })
@@ -1022,7 +1147,7 @@ async function executeMultiHostRun ({
             serverId,
             request,
             inventory,
-            candidates: listEligibleCommonTasks({ ...commonTaskContext({ platform, inventory }), category: 'application' }),
+            candidates: eligibleInteractiveCommonTasks({ platform, inventory }),
             onProgress: event => renderMultiHostEvent(ui, { serverId, message: event.message })
           })
           : ordinaryTaskRouting('No verified candidate catalog is available for this host platform.')
@@ -1051,11 +1176,16 @@ async function executeMultiHostRun ({
         }
       }
     }
-    const service = new MultiHostService({ dataRoot: settingsStore.dataRoot, adminFor })
+    const controller = new OperatorController({ dataRoot: settingsStore.dataRoot, settings, passphrase, adminFor })
+    let rollout
+    if (await ui.confirm('Use a staged canary rollout?', false)) {
+      const canaryHostId = await ui.choose('Select canary host', serverIds.map(value => ({ label: value, value })))
+      rollout = { canaryHostId, batchSize: 2, failureThreshold: 1 }
+    }
     const externalVerify = effectiveCatalogId === 'nginx-static-site'
       ? appliedNginxVerifier({ settingsStore, settings, passphrase })
       : null
-    const run = await service.run({
+    const run = await controller.run({
       settings,
       passphrase,
       serverIds,
@@ -1067,15 +1197,39 @@ async function executeMultiHostRun ({
       planningHints,
       applicationDefaults,
       externalVerify,
+      rollout,
+      verifyStage: ({ stage }) => ui.confirm(`Stage ${stage.id} completed. Have you verified deployment health on ${stage.hosts.map(host => host.serverId).join(', ')} before continuing?`, false),
       onEvent: event => renderMultiHostEvent(ui, event),
       review: ({ run, hosts }) => reviewMultiHostPlans(ui, run, hosts, 'Execute')
     })
     renderMultiHostRun(ui, run)
+    await renderMultiHostReports({ ui, run, adminFor, settings, passphrase })
     if (run.status === 'completed') ui.success(`Multi-host run #${run.id} completed on every selected host.`)
     else if (run.status === 'cancelled') ui.warn(`Multi-host run #${run.id} was cancelled.`)
     else ui.warn(`Multi-host run #${run.id} finished ${run.status}; retry only the affected hosts from Multi-host run history.`)
   })
   await ui.pause()
+}
+
+export async function renderMultiHostReports ({ ui, run, adminFor, settings, passphrase }) {
+  const render = isHostHealthTask(run.catalogId)
+    ? renderAndSaveHostHealthReport
+    : isSystemUpdateTask(run.catalogId) ? renderAndSaveSystemUpdateReport : null
+  if (!render) return
+  const platform = run.catalogId.split('-').at(-1)
+  for (const host of run.hosts.filter(host => host.status === 'completed')) {
+    try {
+      const admin = await adminFor(host.serverId)
+      const task = admin.getTask(host.serverId, host.taskId)
+      const results = completedReportResults(task)
+      if (!results) continue
+      const inventory = await admin.refreshInventory({ settings, passphrase, serverId: host.serverId })
+      ui.heading(`${host.serverId} / task #${host.taskId}`)
+      await render({ ui, admin, settings, passphrase, serverId: host.serverId, task: { ...task, catalogId: run.catalogId }, platform, inventory, results })
+    } catch (error) {
+      ui.warn(`[${host.serverId}] Report unavailable; command outcomes remain recorded: ${redactHealthText(error.message)}`)
+    }
+  }
 }
 
 async function browseMultiHostHistory ({ context, debug }) {
@@ -1270,7 +1424,9 @@ export async function reviewMultiHostPlans (ui, run, hosts, verb) {
 }
 
 export function renderMultiHostEvent (ui, event) {
-  ui.output.write(`\n${ui.paint('info', `[${event.serverId}]`)} ${event.message}\n`)
+  const label = event.serverId ?? `run #${event.runId}`
+  const message = event.message ?? (event.type === 'rollout-stage' ? `Starting rollout stage ${event.stage}; ${event.pendingHosts} hosts pending.` : event.type)
+  ui.output.write(`\n${ui.paint('info', `[${label}]`)} ${message}\n`)
   const result = event.result?.result
   for (const [label, stream] of [['stdout', result?.stdout], ['stderr', result?.stderr]]) {
     if (!stream) continue
@@ -1425,7 +1581,7 @@ async function runConnectedHostSession ({
       }
       if (selected === 'shell') {
         ui.info(`Entering the remote shell. Exit it to return to ${PRODUCT_NAME}.`)
-        await ui.withTerminalSuspended(() => ssh.interactiveShell(server.connectionUrl))
+        await withHostMutation({ dataRoot: settingsStore.dataRoot, identity: settings.servers[serverId].historyId ?? serverId }, () => ui.withTerminalSuspended(() => ssh.interactiveShell(server.connectionUrl)))
       }
       if (selected === 'activate' || selected === 'activate-plugin') {
         await activate({
@@ -1465,9 +1621,9 @@ async function runConnectedHostSession ({
         const taskPlatform = status.capabilities.platform?.os
         ui.info('Refreshing the host inventory before resolving eligible verified tasks...')
         const inventory = await admin.refreshInventory({ settings, passphrase, serverId })
-        const definitions = catalogChoiceRows(eligibleInteractiveCommonTasks({ platform: taskPlatform, inventory, status }))
+        const definitions = catalogChoiceRows(eligibleInteractiveCommonTasks({ platform: taskPlatform, inventory, status, labTasks: context.labTasks }))
         const definition = await ui.searchableDetailChoose({
-          title: `Verified ${taskPlatform} tasks eligible for this host`,
+          title: `Verified ${taskPlatform} tasks eligible for this host${context.labTasks && taskPlatform === 'linux' ? ' (includes disposable lab fixtures)' : ''}`,
           rows: definitions,
           rowSearchText: row => row.searchText,
           renderRow: (row, options) => ui.truncateText(`${row.label}  ${row.description}`, options.width),
@@ -1490,6 +1646,12 @@ async function runConnectedHostSession ({
         }
       }
       if (selected === 'history') await browseTaskHistory({ ui, admin, settings, passphrase, serverId, status, applicationDefaults })
+      if (selected === 'remote-recovery') {
+        try { await browseRemoteCommonTasks({ ui, admin, settings, passphrase, serverId, status, applicationDefaults }) } catch (error) {
+          ui.error(redactDiagnosticText(error.message))
+          await ui.pause()
+        }
+      }
       if (selected === 'forget-host') {
         ui.warn('This removes the local connection and encrypted host secret only. It does not change the remote host, and fingerprint-associated task history is retained.')
         if (await ui.confirm(`Remove ${server.temporary ? 'temporary host' : 'saved host connection'} ${serverId}?`, false)) {
@@ -1844,108 +2006,17 @@ async function runTask ({
     }
     request = parsed.request
   }
-  let inventory = null
-  let routing = catalogId
-    ? { decision: 'verified_task', catalogId, relevantCatalogIds: [catalogId], foundationIds: [], foundationMode: 'executable', confidence: 'high', rationale: 'Selected explicitly from the verified common-task catalog.' }
-    : ordinaryTaskRouting('Candidate routing was not run.')
-  if (!catalogId && previousAttempts.length === 0 && ['freebsd', 'linux', 'macos', 'windows'].includes(status.capabilities.platform?.os)) {
-    const taskPlatform = status.capabilities.platform.os
-    ui.info(`Asking Codex whether this request matches or can reuse a verified ${taskPlatform} common task...`)
-    inventory = await admin.refreshInventory({ settings, passphrase, serverId })
-    try {
-      routing = await admin.routeTask({
-        settings,
-        passphrase,
-        serverId,
-        request,
-        inventory,
-        candidates: eligibleInteractiveCommonTasks({ platform: taskPlatform, inventory, status }),
-        onProgress: event => renderTaskProgress(ui, event)
-      })
-    } catch (error) {
-      ui.warn(`Candidate routing failed; ordinary AI planning will continue: ${error.message}`)
-    }
-  }
-  renderTaskRouting(ui, routing)
-  const effectiveCatalogId = routing.decision === 'verified_task' ? routing.catalogId : null
-  const kind = effectiveCatalogId ? 'catalog' : 'ai'
-  if (routing.decision === 'verified_task' && !catalogId) ui.info(`Codex selected the unchanged verified task ${effectiveCatalogId}; command-plan generation will be skipped.`)
-  if (routing.decision === 'informed_planning') ui.info(`Custom planning will reuse verified knowledge from ${routing.relevantCatalogIds.join(', ')}.`)
-  const retryOfTaskId = previousAttempts.at(-1)?.id ?? null
-  const consultationContext = kind === 'catalog'
-    ? []
-    : retryOfTaskId
-      ? admin.getTaskConsultations(serverId, retryOfTaskId)
-      : admin.listPendingConsultations(serverId)
-  const task = admin.createTask(serverId, request, {
-    kind,
-    catalogId: effectiveCatalogId,
-    retryOfTaskId,
-    retryInstructions,
-    consultationIds: consultationContext.map(item => item.id),
-    consumeConsultations: retryOfTaskId === null
-  })
-  admin.appendTaskProgress(serverId, task.id, {
-    at: new Date().toISOString(),
-    type: 'task_routing',
-    message: `${routing.decision}: ${routing.rationale}`
-  })
-  if (retryOfTaskId) ui.info(`Created retry task #${task.id} from task #${retryOfTaskId}.`)
-  if (consultationContext.length > 0) {
-    ui.info(`Using ${consultationContext.length} compact consultation ${consultationContext.length === 1 ? 'summary' : 'summaries'}; this task request takes precedence.`)
-  }
-  ui.info(kind === 'catalog'
-    ? 'Preparing the verified common task from the current Netdata inventory...'
-    : 'Collecting Netdata inventory and asking Codex for a command plan...')
+  let task
+  let inventory
+  let effectiveCatalogId
   try {
-    let plan
-    if (kind === 'catalog') {
-      const refreshed = inventory ?? ((isHostHealthTask(effectiveCatalogId) || isSystemUpdateTask(effectiveCatalogId))
-        ? await admin.refreshInventory({ settings, passphrase, serverId })
-        : status.linuxContext
-          ? null
-          : await admin.refreshInventory({ settings, passphrase, serverId }))
-      if (isHostHealthTask(effectiveCatalogId) || isSystemUpdateTask(effectiveCatalogId)) inventory = refreshed
-      plan = buildCommonTask(effectiveCatalogId, task.id, {
-        platform: status.capabilities.platform?.os,
-        linuxContext: refreshed?.webminaiLinuxContext ?? status.linuxContext,
-        windowsExecution: refreshed?.webminaiExecution ?? status.windowsExecution,
-        freebsdExecution: refreshed?.webminaiExecution ?? status.freebsdExecution,
-        macosExecution: refreshed?.webminaiExecution ?? status.macosExecution,
-        docker: refreshed?.webminaiDocker ?? status.docker,
-        applicationDefaults
-      }).plan
-    } else {
-      const candidateContext = buildCandidatePlanningContext(routing.relevantCatalogIds, task.id, {
-        platform: status.capabilities.platform?.os,
-        linuxContext: inventory?.webminaiLinuxContext ?? status.linuxContext,
-        windowsExecution: inventory?.webminaiExecution ?? status.windowsExecution,
-        freebsdExecution: inventory?.webminaiExecution ?? status.freebsdExecution,
-        macosExecution: inventory?.webminaiExecution ?? status.macosExecution,
-        docker: inventory?.webminaiDocker ?? status.docker,
-        foundationIds: routing.foundationIds,
-        foundationMode: routing.foundationMode ?? 'context-only',
-        applicationDefaults
-      })
-      plan = await admin.plan({
-        settings,
-        passphrase,
-        serverId,
-        request,
-        inventory,
-        taskId: task.id,
-        previousAttempts,
-        retryInstructions,
-        consultationContext,
-        candidateContext,
-        applicationDefaults,
-        onProgress: event => {
-          admin.appendTaskProgress(serverId, task.id, event)
-          renderTaskProgress(ui, event)
-        }
-      })
-    }
-    admin.saveTaskPlan(serverId, task.id, plan)
+    ui.info('Preparing a persisted plan for review; no commands will execute yet...')
+    const prepared = await prepareTask({ admin, settings, passphrase, serverId, request, catalogId, retryOfTaskId: previousAttempts.at(-1)?.id ?? null, retryInstructions, onProgress: event => renderTaskProgress(ui, event) })
+    task = admin.getTask(serverId, prepared.taskId)
+    inventory = prepared.inventory
+    effectiveCatalogId = task.catalogId
+    renderTaskRouting(ui, prepared.routing)
+    const plan = task.plan
     renderPlan(ui, plan)
     const approvalMode = await chooseApprovalMode(ui, plan.commands)
     if (!approvalMode) {
@@ -1955,11 +2026,27 @@ async function runTask ({
     admin.markTaskRunning(serverId, task.id)
     const healthTask = isHostHealthTask(effectiveCatalogId)
     const updateTask = isSystemUpdateTask(effectiveCatalogId)
+    const interactive = await ui.confirm('Enable intervention at command boundaries?', false)
+    const controller = new OperatorController({ dataRoot: admin.dataRoot, settings, passphrase, tasks: admin.tasks, adminFor: async () => admin })
     const results = await admin.execute({
       settings,
       passphrase,
       serverId,
+      taskId: task.id,
       plan,
+      onProgress: event => renderTaskProgress(ui, event),
+      beforeCommand: interactive
+        ? async item => {
+          const action = await ui.choose(`Next command: ${item.id}`, [
+            { label: 'Continue to normal approval', value: 'run' },
+            { label: 'Inspect execution and pause', value: 'pause' },
+            { label: 'Abort remaining work', value: 'abort' }
+          ])
+          if (action === 'run') return true
+          controller.control(serverId, task.id, action ?? 'pause', admin.tasks.stateVersion(serverId, task.id))
+          return false
+        }
+        : undefined,
       onResult: result => admin.appendTaskResult(serverId, task.id, (healthTask || updateTask) ? sanitizeHealthResult(result) : result),
       approve: approvalMode === 'all'
         ? async () => true
@@ -1969,7 +2056,10 @@ async function runTask ({
     const savedResults = (healthTask || updateTask) ? results.map(sanitizeHealthResult) : results
     admin.saveTaskResults(serverId, task.id, savedResults)
     renderResults(ui, savedResults)
-    if (isHostHealthTask(effectiveCatalogId) && results.every(result => result.status === 'completed')) {
+    if (admin.tasks.control(serverId, task.id).action !== 'run') await manageExecution({ ui, controller, serverId, taskId: task.id })
+    if (controller.inspect(serverId, task.id).securityRemediationAvailable && await ui.confirm('Security issues were detected. Prepare and review updates now?', false)) await manageExecution({ ui, controller, serverId, taskId: task.id, initialAction: 'remediate-security' })
+    const reportResults = completedReportResults(admin.getTask(serverId, task.id))
+    if (healthTask && reportResults) {
       await renderAndSaveHostHealthReport({
         ui,
         admin,
@@ -1979,10 +2069,10 @@ async function runTask ({
         task,
         platform: status.capabilities.platform?.os,
         inventory,
-        results
+        results: reportResults
       })
     }
-    if (updateTask && results.every(result => result.status === 'completed')) {
+    if (updateTask && reportResults) {
       const postInventory = await admin.refreshInventory({ settings, passphrase, serverId })
       await renderAndSaveSystemUpdateReport({
         ui,
@@ -1993,11 +2083,11 @@ async function runTask ({
         task,
         platform: status.capabilities.platform?.os,
         inventory: postInventory,
-        results
+        results: reportResults
       })
     }
   } catch (error) {
-    admin.saveTaskError(serverId, task.id, error)
+    if (task) admin.saveTaskError(serverId, task.id, error)
     ui.error(`Task failed: ${error.message}`)
   }
   await ui.pause()
@@ -2058,14 +2148,34 @@ async function browseTaskHistory ({ ui, admin, settings, passphrase, serverId, s
   const task = admin.getTask(serverId, selected)
   renderTaskRecord(ui, task)
   const actions = taskHistoryActions(task, { catalogTask: Boolean(task.catalogId) })
+  if (task.plan) actions.unshift({ label: 'Operator controls: inspect, pause, revise and resume', value: 'operator' })
+  if (task.plan && ['running', 'partial', 'failed'].includes(task.status)) actions.unshift({ label: 'Inspect durable execution and recovery', value: 'recover' })
   const action = await ui.choose('History action', actions)
-  if (action === 'retry' || action === 'retry-extra') {
+  if (action === 'operator') {
+    const controller = new OperatorController({ dataRoot: admin.dataRoot, settings, passphrase, tasks: admin.tasks, adminFor: async () => admin })
+    await manageExecution({ ui, controller, serverId, taskId: task.id })
+  } else if (action === 'recover') {
+    if (!admin.tasks.executionEvents(serverId, task.id).length) {
+      ui.warn('This task has no execution journal. Its remote outcome cannot be inferred safely.')
+      await ui.pause()
+      return
+    }
+    const controller = new OperatorController({ dataRoot: admin.dataRoot, settings, passphrase, tasks: admin.tasks, adminFor: async () => admin })
+    await controller.reconcile(serverId, task.id, admin.tasks.stateVersion(serverId, task.id), event => renderTaskProgress(ui, event))
+    await manageExecution({ ui, controller, serverId, taskId: task.id })
+  } else if (action === 'retry' || action === 'retry-extra') {
     let retryInstructions = null
     if (action === 'retry-extra') {
       retryInstructions = await ui.editor(`Additional corrections for retry of task #${task.id}`)
       if (!retryInstructions) return
     }
     const previousAttempts = admin.getTaskRetryHistory(serverId, task.id)
+    const loop = detectOperationLoop(previousAttempts, settings.operationLoop)
+    if (loop.detected) {
+      ui.warn(loop.reason)
+      if (!retryInstructions) retryInstructions = await ui.editor('Describe an alternative diagnostic or repair strategy')
+      if (!retryInstructions) return
+    }
     await runTask({
       ui,
       admin,
@@ -2094,6 +2204,98 @@ async function browseTaskHistory ({ ui, admin, settings, passphrase, serverId, s
   }
 }
 
+export async function manageExecution ({ ui, controller, serverId, taskId, initialAction }) {
+  for (;;) {
+    const view = controller.inspect(serverId, taskId)
+    const localTask = controller.tasks.get(serverId, taskId)
+    const localRevisions = controller.tasks.revisions(serverId, taskId)
+    const refreshableCatalog = localTask.kind === 'catalog' && listCommonTasks({ category: 'application' }).find(definition => definition.id === localTask.catalogId && ['linux', 'freebsd', 'windows'].includes(definition.platform) && (!definition.prerequisite || ['podman-freebsd', 'docker-desktop-windows'].includes(definition.id)))
+    const catalogPlatform = { linux: 'native Linux', freebsd: 'native FreeBSD', windows: 'Windows' }[refreshableCatalog?.platform]
+    ui.clear()
+    ui.banner(`Operator / ${serverId} / task #${taskId}`)
+    ui.line('Task status', view.task.status)
+    ui.renderTable([{ key: 'commandId', label: 'COMMAND' }, { key: 'status', label: 'STATE' }], view.commands)
+    const action = initialAction ?? await ui.choose('Execution controls', [
+      { label: 'Inspect recorded commands and results', value: 'inspect' },
+      { label: 'Pause at next command boundary', value: 'pause' },
+      { label: 'Ask Codex a read-only question', value: 'analyze' },
+      { label: 'Revise remaining steps', value: 'propose' },
+      ...(view.securityRemediationAvailable ? [{ label: 'Patch detected security issues: prepare, review and execute', value: 'remediate-security' }] : []),
+      ...(refreshableCatalog ? [{ label: `Refresh remaining ${catalogPlatform} catalog steps`, value: 'refresh-catalog' }] : []),
+      { label: 'Propose rollback of confirmed changes', value: 'propose-rollback' },
+      { label: 'Reconcile durable remote outcomes', value: 'reconcile' },
+      { label: 'Record independently verified uncertain outcome', value: 'resolve' },
+      { label: 'Review and resume', value: 'resume' },
+      { label: 'Abort remaining work', value: 'abort' },
+      { label: 'Review rollback', value: 'rollback' },
+      ...(view.revisions.some(revision => !revision.approved) ? [{ label: 'Review a pending plan revision', value: 'review-revision' }] : []),
+      { label: 'Back', value: null }
+    ])
+    initialAction = null
+    if (!action) return
+    try {
+      if (action === 'inspect') {
+        renderPlan(ui, localTask.plan)
+        renderResults(ui, localTask.results ?? [])
+        ui.output.write(`${JSON.stringify(view.revisions.map(item => ({ id: item.id, parentId: item.parentId, approved: item.approved })), null, 2)}\n`)
+      } else if (action === 'pause') controller.control(serverId, taskId, action, controller.inspect(serverId, taskId).stateVersion)
+      else if (action === 'abort') controller.control(serverId, taskId, action, view.stateVersion)
+      else if (action === 'analyze') {
+        const question = await ui.editor('Read-only question')
+        if (question) ui.output.write(`${(await controller.analyze(serverId, taskId, question)).answer}\n`)
+      } else if (action === 'reconcile') await controller.reconcile(serverId, taskId, view.stateVersion, event => renderTaskProgress(ui, event))
+      else if (action === 'resolve') {
+        const uncertain = [...view.commands, ...view.rollbackCommands].filter(command => command.status === 'uncertain')
+        if (!uncertain.length) throw new Error('No uncertain commands')
+        const command = await ui.choose('Independently verified command', uncertain.map(command => ({ label: `${command.commandId} / ${command.rollbackRevision ? 'rollback' : 'deployment'}`, value: command })))
+        if (!command) continue
+        const status = await ui.choose('Verified remote outcome', [{ label: 'Completed', value: 'completed' }, { label: 'Failed or partially applied', value: 'failed' }])
+        const evidence = await ui.editor('Authoritative remote evidence, without credentials')
+        if (await ui.confirm('Attest this outcome without repeating the command?', false)) controller.resolve(serverId, taskId, view.stateVersion, command.commandId, status, evidence, command.rollbackRevision)
+      } else if (action === 'refresh-catalog') {
+        ui.info('Refreshing inventory and rebuilding trusted catalog steps. No AI call or command execution is performed.')
+        const proposal = await controller.proposeCatalogRefresh(serverId, taskId, view.stateVersion)
+        ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
+        renderPlan(ui, controller.tasks.revisions(serverId, taskId).find(revision => revision.id === proposal.revisionId).plan)
+        if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+      } else if (action === 'remediate-security') {
+        ui.info('Preparing actual updates against fresh host inventory. No new command runs without approval.')
+        const proposal = await controller.proposeSecurityRemediation(serverId, taskId, view.stateVersion)
+        const revision = controller.tasks.revisions(serverId, taskId).find(item => item.id === proposal.revisionId)
+        ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
+        renderPlan(ui, revision.plan)
+        if (await ui.confirm('Approve and execute these exact security updates and verification commands?', false)) {
+          controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+          const current = controller.inspect(serverId, taskId)
+          await controller.resume(serverId, taskId, current.stateVersion, current.fingerprint, event => renderTaskProgress(ui, event))
+        }
+      } else if (action === 'propose' || action === 'propose-rollback') {
+        const instructions = await ui.editor('Changes to remaining work')
+        if (!instructions) continue
+        ui.info('Asking Codex for a replacement plan. No commands execute until separate approval and resume.')
+        const proposal = await controller.propose(serverId, taskId, instructions, view.stateVersion, action === 'propose-rollback')
+        ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
+        renderPlan(ui, controller.tasks.revisions(serverId, taskId).find(revision => revision.id === proposal.revisionId).plan)
+        if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+      } else if (action === 'review-revision') {
+        const revision = await ui.choose('Pending plan revision', view.revisions.filter(revision => !revision.approved).map(revision => ({ label: `#${revision.id} / ${revision.plan.operatorRollback ? 'rollback' : 'remaining work'} / parent #${revision.parentId}`, value: revision })))
+        if (!revision) continue
+        ui.output.write(`${JSON.stringify(revision.differences, null, 2)}\n`)
+        renderPlan(ui, localRevisions.find(item => item.id === revision.id).plan)
+        if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, revision.id, view.stateVersion, revision.fingerprint)
+      } else if (action === 'resume') {
+        renderPlan(ui, localTask.plan)
+        if (await ui.confirm('Execute remaining steps of this reviewed plan?', false)) await controller.resume(serverId, taskId, view.stateVersion, view.fingerprint, event => renderTaskProgress(ui, event))
+      } else if (action === 'rollback') {
+        const revision = [...localRevisions].reverse().find(item => item.approved && item.plan.operatorRollback)
+        renderCommandList(ui, revision?.plan.commands ?? localTask.plan.revertCommands, 'Reviewed rollback')
+        if (await ui.confirm('Execute these reviewed rollback commands?', false)) await controller.rollback(serverId, taskId, view.stateVersion, revision ? view.reviewedRollbackFingerprint : view.rollbackFingerprint, revision?.id)
+      }
+    } catch (error) { ui.error(error.message) }
+    await ui.pause()
+  }
+}
+
 async function runRevertTask ({ ui, admin, settings, passphrase, serverId, task }) {
   ui.clear()
   ui.banner(`Revert task #${task.id} / ${serverId}`)
@@ -2109,6 +2311,7 @@ async function runRevertTask ({ ui, admin, settings, passphrase, serverId, task 
       serverId,
       taskId: task.id,
       onResult: result => admin.appendTaskRevertResult(serverId, task.id, result),
+      onProgress: event => renderTaskProgress(ui, event),
       approve: approvalMode === 'all'
         ? async () => true
         : item => approveCommand(ui, item, 'Revert')
@@ -2129,11 +2332,107 @@ async function approveCommand (ui, item, prefix = 'Approve') {
   renderWrappedField(ui, 'Purpose', item.purpose)
   ui.line('Risk', item.risk)
   ui.line('Timeout', `${item.timeoutMs}ms`)
+  if (item.executionMode === 'job') ui.line('Execution', 'durable signed job')
+  if (item.retry) ui.line('Retry policy', `${item.retry.attempts} attempts, ${item.retry.intervalMs}ms delay, exits ${item.retry.exitCodes.join(', ')}${item.retry.states ? `, states ${item.retry.states.join(', ')}` : ''}; never unknown or cancelled`)
   ui.line('Root required', item.requiresSudo ? 'yes' : 'no')
   ui.separator()
   writeRaw(ui, item.command)
   ui.separator()
   return ui.confirm('Execute this command?', false)
+}
+
+async function browseRemoteCommonTasks ({ ui, admin, settings, passphrase, serverId, status, applicationDefaults }) {
+  const connection = { settings, passphrase, serverId }
+  const action = await ui.choose('Remote common-task recovery', [
+    { label: 'Browse and verify recorded tasks', value: 'browse' },
+    { label: 'Review signing-key rotation', value: 'rotate' },
+    { label: 'Review a published signing-key change', value: 'accept-key' },
+    { label: 'Back', value: null }
+  ])
+  if (!action) return
+  if (action !== 'browse') {
+    const key = await admin.inspectRemoteRecoveryKey(connection)
+    ui.line('Target identity', key.target)
+    ui.line('Trusted key', key.pinnedFingerprint)
+    ui.line('Published key', key.publishedFingerprint)
+    ui.warn('Rotation retains historical public keys. An old-key-signed transition does not prove safety if that key or remote administrator was compromised.')
+    if (action === 'rotate' && key.changed) throw new Error('Investigate the changed signing key before requesting another rotation')
+    if (action === 'accept-key' && !key.changed) {
+      ui.info('The published signing key already matches the trusted pin.')
+      await ui.pause()
+      return
+    }
+    if (!await ui.confirm(action === 'rotate' ? 'Rotate this host recovery key now? Active ledger owners will block rotation.' : 'Accept this published key only if its signed transition matches the trusted key?', false)) return
+    const result = action === 'rotate'
+      ? await admin.rotateRemoteRecoveryKey({ ...connection, expectedFingerprint: key.pinnedFingerprint, approved: true })
+      : await admin.acceptRemoteRecoveryKeyRotation({ ...connection, expectedFingerprint: key.pinnedFingerprint, publishedFingerprint: key.publishedFingerprint, approved: true })
+    ui.line('Trusted replacement key', result.fingerprint)
+    ui.success('Recovery key transition verified and recorded. No task was replayed.')
+    await ui.pause()
+    return
+  }
+  let after = ''
+  while (true) {
+    const listing = await admin.listRemoteCommonTasks({ ...connection, after })
+    if (listing.available === false || !listing.executions?.length) {
+      ui.info('No signed remote common-task records are available on this host.')
+      await ui.pause()
+      return
+    }
+    const selected = await ui.choose('Remote common-task executions (verify before recovery)', [
+      ...listing.executions.map(item => ({ label: `${item.executionId} (${item.sequence} records)`, value: item.executionId })),
+      ...(listing.executions.length === 10 ? [{ label: 'Next page', value: 'next' }] : []),
+      { label: 'Back', value: 'back' }
+    ])
+    if (!selected || selected === 'back') return
+    if (selected === 'next') { after = listing.executions.at(-1).executionId; continue }
+    const verified = await admin.inspectRemoteCommonTask({ ...connection, executionId: selected })
+    const original = verified.records[0]
+    ui.line('Common task', original.catalogId)
+    ui.line('Original task ID', original.taskId)
+    ui.line('Signed records', verified.sequence)
+    ui.line('Last observed event', verified.records.at(-1).event)
+    ui.line('Recorded outcome', verified.records.at(-1).outcome)
+    ui.info('Signature and host identity verified. This is remote evidence, not local execution history or approval.')
+    if (!await ui.confirm('Inspect the baseline and generate a new recovery plan?', false)) continue
+    const inventory = await admin.refreshInventory(connection)
+    const options = {
+      platform: status.capabilities.platform?.os,
+      linuxContext: inventory.webminaiLinuxContext,
+      windowsExecution: inventory.webminaiExecution,
+      freebsdExecution: inventory.webminaiExecution,
+      macosExecution: inventory.webminaiExecution,
+      docker: inventory.webminaiDocker,
+      applicationDefaults
+    }
+    const proposal = await admin.prepareRemoteCommonTaskRecovery({ ...connection, executionId: selected, options })
+    renderPlan(ui, proposal.plan)
+    let takeoverApproved = false
+    if (proposal.ownership?.owned) {
+      ui.warn('This completed source still has a remote owner. Taking ownership will fence that session. Unknown or partial source work cannot use this recovery path.')
+      takeoverApproved = await ui.confirm('Take ownership of this confirmed source for the reviewed recovery?', false)
+      if (!takeoverApproved) { admin.cancelTask(serverId, proposal.taskId); continue }
+    }
+    const approvalMode = await chooseApprovalMode(ui, proposal.plan.commands, 'recovery commands')
+    if (!approvalMode) { admin.cancelTask(serverId, proposal.taskId); continue }
+    try {
+      const results = await admin.executeRemoteCommonTaskRecovery({
+        ...connection,
+        taskId: proposal.taskId,
+        options,
+        ...(takeoverApproved ? { takeoverApproved: true, takeoverFingerprint: proposal.ownership.ownerFingerprint } : {}),
+        approve: approvalMode === 'all' ? async () => true : item => approveCommand(ui, item),
+        onProgress: event => renderTaskProgress(ui, event),
+        onResult: result => admin.appendTaskResult(serverId, proposal.taskId, result)
+      })
+      admin.saveTaskResults(serverId, proposal.taskId, results)
+      renderResults(ui, results)
+    } catch (error) {
+      admin.saveTaskError(serverId, proposal.taskId, error)
+      throw error
+    }
+    await ui.pause()
+  }
 }
 
 export async function chooseApprovalMode (ui, commands, label = 'commands') {
@@ -2180,167 +2479,37 @@ function commonTaskContext ({ platform, inventory = null, status = {} }) {
   }
 }
 
-function eligibleInteractiveCommonTasks (options) {
+export function eligibleInteractiveCommonTasks (options) {
   const context = commonTaskContext(options)
   return [
     ...listEligibleCommonTasks({ ...context, category: 'maintenance' }),
     ...listEligibleCommonTasks({ ...context, category: 'diagnostic' }),
-    ...listEligibleCommonTasks({ ...context, category: 'application' })
+    ...listEligibleCommonTasks({ ...context, category: 'application' }),
+    ...(options.labTasks === true && context.platform === 'linux' ? listEligibleCommonTasks({ ...context, category: 'system' }) : [])
   ]
 }
 
 async function renderAndSaveSystemUpdateReport ({ ui, admin, settings, passphrase, serverId, task, platform, inventory, results }) {
-  ui.info('Asking Codex to summarize the exact update delta, reboot requirement, and newer-release availability...')
-  const reportInventory = {
-    ...inventory,
-    webminaiSystemUpdateEvidence: {
-      format: 'webminai-system-update-evidence',
-      version: 1,
-      platform,
-      collectedAt: new Date().toISOString(),
-      source: 'approved verified common task',
-      profile: systemUpdateProfile(platform),
-      results: results.map(result => ({
-        id: result.id,
-        status: result.status,
-        stdout: redactHealthText(result.result?.stdout).slice(0, 64 * 1024),
-        stderr: redactHealthText(result.result?.stderr).slice(0, 16 * 1024)
-      }))
-    }
-  }
-  const report = await admin.consult({
-    settings,
-    passphrase,
-    serverId,
-    inventory: reportInventory,
-    consultationContext: [],
-    question: systemUpdateQuestion(),
-    onProgress: event => {
-      const safeEvent = { ...event, message: redactHealthText(event.message) }
-      admin.appendTaskProgress(serverId, task.id, safeEvent)
-      renderTaskProgress(ui, safeEvent)
-    }
-  })
-  const safeReport = {
-    answer: redactHealthText(report.answer),
-    contextSummary: redactHealthText(report.contextSummary)
-  }
-  admin.appendTaskProgress(serverId, task.id, {
-    at: new Date().toISOString(),
-    type: 'system_update_report',
-    message: safeReport.answer,
-    contextSummary: safeReport.contextSummary
-  })
-  await admin.saveUpdateContext(serverId, {
-    ...systemUpdateProfile(platform),
-    observedAt: new Date().toISOString(),
-    taskId: task.id,
-    reportSummary: safeReport.contextSummary
-  })
+  const safeReport = await completeTaskReport({ admin, settings, passphrase, serverId, task: { ...task, status: 'completed' }, platform, inventory, results, onProgress: event => renderTaskProgress(ui, event) })
   ui.heading('System update report')
   writeWrapped(ui, safeReport.answer)
   ui.separator()
   renderWrappedField(ui, 'Reusable update context', safeReport.contextSummary)
 }
 
-function systemUpdateQuestion () {
-  return [
-    'Prepare a concise system-update completion report from webminaiSystemUpdateEvidence.',
-    'State whether the update succeeded, then enumerate the software or packages installed, updated, removed, skipped, or failed with before and after versions when present.',
-    'State explicitly that no reboot was performed and whether a reboot is now required.',
-    'State whether a newer operating-system release or Windows feature upgrade is available, naming it when evidence does so; use unknown when the native check could not determine this.',
-    'Do not confuse a package-manager full or dist upgrade inside configured repositories with an operating-system release upgrade.',
-    'Mention the retained full audit path if terminal evidence is bounded. Do not propose or execute commands and do not reproduce credentials or secrets.'
-  ].join(' ')
-}
-
 async function renderAndSaveHostHealthReport ({ ui, admin, settings, passphrase, serverId, task, platform, inventory, results }) {
-  ui.info('Asking Codex to turn the Netdata inventory and bounded platform evidence into a concise health report...')
-  const evidence = healthEvidence(results)
-  const reportInventory = {
-    ...inventory,
-    webminaiHealthEvidence: {
-      format: 'webminai-host-health-evidence',
-      version: 1,
-      platform,
-      collectedAt: new Date().toISOString(),
-      source: 'approved read-only common task',
-      profile: hostHealthProfile(platform, inventory),
-      stdout: evidence.stdout,
-      stderr: evidence.stderr
-    }
-  }
-  const report = await admin.consult({
-    settings,
-    passphrase,
-    serverId,
-    inventory: reportInventory,
-    consultationContext: [],
-    question: hostHealthQuestion(),
-    onProgress: event => {
-      const safeEvent = { ...event, message: redactHealthText(event.message) }
-      admin.appendTaskProgress(serverId, task.id, safeEvent)
-      renderTaskProgress(ui, safeEvent)
-    }
-  })
-  const safeReport = {
-    answer: redactHealthText(report.answer),
-    contextSummary: redactHealthText(report.contextSummary)
-  }
-  admin.appendTaskProgress(serverId, task.id, {
-    at: new Date().toISOString(),
-    type: 'health_report',
-    message: safeReport.answer,
-    contextSummary: safeReport.contextSummary
-  })
-  await admin.saveHealthContext(serverId, {
-    ...hostHealthProfile(platform, inventory),
-    observedAt: new Date().toISOString(),
-    taskId: task.id,
-    reportSummary: safeReport.contextSummary
-  })
+  const safeReport = await completeTaskReport({ admin, settings, passphrase, serverId, task: { ...task, status: 'completed' }, platform, inventory, results, onProgress: event => renderTaskProgress(ui, event) })
   ui.heading('Host health report')
   writeWrapped(ui, safeReport.answer)
   ui.separator()
   renderWrappedField(ui, 'Reusable diagnostic context', safeReport.contextSummary)
 }
 
-function healthEvidence (results) {
-  const sections = results.filter(item => item.id.startsWith('collect-health-'))
-  return {
-    stdout: sections.map(item => `=== ${item.id} ===\n${redactHealthText(item.result?.stdout).slice(0, 48 * 1024)}`).join('\n').slice(0, 128 * 1024),
-    stderr: sections.map(item => item.result?.stderr ? `=== ${item.id} ===\n${redactHealthText(item.result.stderr).slice(0, 16 * 1024)}` : '').filter(Boolean).join('\n').slice(0, 32 * 1024)
-  }
-}
-
-function sanitizeHealthResult (entry) {
-  if (!entry?.result) return entry
-  return {
-    ...entry,
-    result: {
-      ...entry.result,
-      stdout: redactHealthText(entry.result.stdout),
-      stderr: redactHealthText(entry.result.stderr)
-    }
-  }
-}
-
-export function redactHealthText (value) {
-  return redactDiagnosticText(String(value ?? ''))
-    .replace(/\b(password|passwd|token|secret|authorization|api[_-]?key)\s*[:=]\s*[^\s,;]+/giu, '$1=[redacted]')
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=-]+/giu, '$1 [redacted]')
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@[^\s"'<>]+/giu, '[redacted-url]')
-    .replace(/\b(?:postgres(?:ql)?|mysql|mariadb|mongodb|redis):\/\/[^\s"']+/giu, '[redacted-service-url]')
-    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/giu, '[redacted-private-key]')
-}
-
-function hostHealthQuestion () {
-  return [
-    'Prepare a concise, decision-useful health report for this host.',
-    'Netdata inventory is the primary source for metrics, load, storage, containers, contexts, and alerts. webminaiHealthEvidence is a bounded read-only supplement for recent errors, failed services, updates, reboot state, and platform-specific details.',
-    'Report: overall health; immediate issues; load, CPU, memory, storage and swap; service/container reliability; recent errors; pending updates and reboot needs; monitoring gaps; and prioritized next actions.',
-    'Distinguish confirmed observations from unavailable or stale checks. Mention evidence timestamps where useful. Do not propose or execute commands. Do not reproduce secrets, tokens, credentials, raw log dumps, or unnecessary personal data.'
-  ].join(' ')
+export function completedReportResults (task) {
+  if (task.status !== 'completed' || !task.plan?.commands?.length) return null
+  const byId = new Map((task.results ?? []).map(result => [result.id, result]))
+  const results = task.plan.commands.map(command => byId.get(command.id))
+  return results.every(result => result?.status === 'completed') ? results : null
 }
 
 function renderTaskRouting (ui, routing) {
@@ -2404,6 +2573,8 @@ function renderCommandList (ui, commands, heading) {
     renderWrappedField(ui, 'Purpose', item.purpose)
     ui.line('Risk', item.risk)
     ui.line('Timeout', `${item.timeoutMs}ms`)
+    if (item.executionMode === 'job') ui.line('Execution', 'durable signed job')
+    if (item.retry) ui.line('Retry policy', `${item.retry.attempts} attempts, ${item.retry.intervalMs}ms delay, exits ${item.retry.exitCodes.join(', ')}${item.retry.states ? `, states ${item.retry.states.join(', ')}` : ''}; never unknown or cancelled`)
     ui.line('Root required', item.requiresSudo ? 'yes' : 'no')
     if (item.source) ui.line('Source', commandSourceLabel(item.source))
     ui.output.write('Command\n-------\n')
@@ -2423,6 +2594,7 @@ export function renderResults (ui, results, heading = 'Execution results') {
     ui.separator()
     ui.line('Command', result.id)
     ui.line('Status', result.status)
+    if (result.diagnostics?.length) for (const diagnostic of result.diagnostics) ui.line(`${diagnostic.code} (${diagnostic.confidence})`, `${diagnostic.explanation} ${diagnostic.nextAction}`)
     ui.output.write(`\n${ui.paint('info', 'stdout')}\n${ui.paint('separator', '------')}\n`)
     writeRaw(ui, result.result?.stdout || '(empty)')
     ui.output.write(`\n${ui.paint('error', 'stderr')}\n${ui.paint('separator', '------')}\n`)
@@ -2432,7 +2604,8 @@ export function renderResults (ui, results, heading = 'Execution results') {
 }
 
 function renderTaskProgress (ui, event) {
-  const prefix = event.type === 'reasoning' ? 'Codex reasoning' : `Codex ${event.type}`
+  if (event.type === 'security_report') { ui.heading('Security recommendations'); writeWrapped(ui, event.message); return }
+  const prefix = event.phase === 'execution-retry' ? `Retry / ${event.commandId}` : event.phase === 'execution-diagnostics' ? `Evidence / ${event.commandId} / ${event.outcome}` : event.phase === 'execution-recovery' ? `Recovery / ${event.commandId}` : event.type === 'reasoning' ? 'Codex reasoning' : `Codex ${event.type}`
   ui.output.write(`\n${ui.paint('muted', `[${prefix}]`)} ${event.message}\n`)
 }
 
@@ -2459,7 +2632,7 @@ export function renderTaskRecord (ui, task) {
     for (const file of task.modifiedFiles) writeWrapped(ui, file)
   }
   if (task.progress.length > 0) {
-    ui.heading('Codex progress')
+    ui.heading('Task progress')
     for (const event of task.progress) {
       if (event.type === 'health_report') {
         ui.heading('Host health report')
@@ -2470,7 +2643,7 @@ export function renderTaskRecord (ui, task) {
         writeWrapped(ui, event.message)
         if (event.contextSummary) renderWrappedField(ui, 'Reusable update context', event.contextSummary)
       } else {
-        writeWrapped(ui, `[${event.type}] ${event.message}`)
+        writeWrapped(ui, `[${event.type ?? event.phase ?? 'progress'}] ${event.message}`)
       }
     }
   }
@@ -2528,24 +2701,36 @@ function parseArguments (argv) {
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]
     if (argument === '--help' || argument === '-h') options.help = true
+    else if (argument === 'console' || argument === '--web') options.console = true
+    else if (argument === '--web-port') {
+      const value = argv[++index]
+      if (!value || !/^\d{1,5}$/u.test(value) || Number(value) > 65535) throw new TypeError('--web-port requires a port between 0 and 65535')
+      options.webPort = Number(value)
+    } else if (argument === '--console-actions') options.consoleActions = true
     else if (argument === '--update') options.update = true
     else if (argument === '--debug') options.debug = true
     else if (argument === '--no-debug') options.debug = false
+    else if (argument === '--lab-tasks') options.labTasks = true
     else if (argument === '--data-root') {
       options.dataRoot = argv[++index]
       if (!options.dataRoot) throw new TypeError('--data-root requires a directory')
     } else throw new TypeError(`unknown argument: ${argument}`)
   }
+  if (!options.console && (options.consoleActions || options.webPort !== undefined)) throw new TypeError('--console-actions and --web-port require --web or console')
+  if (options.console && (options.update || options.labTasks)) throw new TypeError('--web/console cannot be combined with --update or --lab-tasks')
   return options
 }
 
 function printHelp (ui) {
   ui.output.write(`Usage: ${CLI_NAME} --update\n`)
-  ui.output.write(`       ${CLI_NAME} [--debug|--no-debug] [--data-root DIRECTORY]\n\n`)
+  ui.output.write(`       ${CLI_NAME} console [--console-actions] [--data-root DIRECTORY]\n`)
+  ui.output.write(`       ${CLI_NAME} --web [--console-actions] [--web-port PORT] [--data-root DIRECTORY]\n`)
+  ui.output.write(`       ${CLI_NAME} [--debug|--no-debug] [--lab-tasks] [--data-root DIRECTORY]\n\n`)
   ui.output.write('Interactive AI-assisted administration over system OpenSSH and Netdata.\n')
   ui.output.write(`${PRODUCT_URL}\n`)
   ui.output.write(`\nUse --update to install the latest ${PRODUCT_NAME} package, then exit.\n`)
   ui.output.write('Debug tracing is enabled by default. Use --no-debug to suppress it.\n')
+  ui.output.write('Use --lab-tasks only on disposable Linux labs to include system fixtures in the verified task picker. Normal plan review is still required.\n')
 }
 
 function renderDebugEvent (ui, { phase, message }) {

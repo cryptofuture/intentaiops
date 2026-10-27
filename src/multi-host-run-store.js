@@ -58,6 +58,24 @@ export class MultiHostRunStore {
     return this.withDatabase(database => this.getFromDatabase(database, runId))
   }
 
+  control (runId) {
+    return this.withDatabase(database => {
+      assertRun(database, runId)
+      return database.prepare('SELECT version, action FROM run_controls WHERE run_id = ?').get(runId) ?? { version: 0, action: 'run' }
+    })
+  }
+
+  setControl (runId, action, expectedVersion) {
+    if (!['run', 'pause'].includes(action)) throw new TypeError('invalid rollout control')
+    return this.withDatabase(database => database.transaction(() => {
+      assertRun(database, runId)
+      const version = database.prepare('SELECT version FROM run_controls WHERE run_id = ?').get(runId)?.version ?? 0
+      if (version !== expectedVersion) throw new Error('stale rollout control')
+      database.prepare('INSERT INTO run_controls VALUES (?, ?, ?) ON CONFLICT(run_id) DO UPDATE SET version = excluded.version, action = excluded.action').run(runId, version + 1, action)
+      return { version: version + 1, action }
+    }).immediate())
+  }
+
   updateRun (runId, status) {
     if (!RUN_STATUSES.has(status)) throw new TypeError('invalid multi-host run status')
     return this.withDatabase(database => {
@@ -143,6 +161,7 @@ export class MultiHostRunStore {
         PRIMARY KEY (run_id, server_id)
       );
       CREATE INDEX IF NOT EXISTS runs_updated_at ON runs(updated_at DESC);
+      CREATE TABLE IF NOT EXISTS run_controls (run_id INTEGER PRIMARY KEY REFERENCES runs(id), version INTEGER NOT NULL, action TEXT NOT NULL);
     `))
   }
 

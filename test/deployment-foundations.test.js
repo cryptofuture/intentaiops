@@ -61,6 +61,16 @@ test('container runtime prerequisites declare their readiness foundations', () =
   assert.deepEqual(commonTaskFoundationIds('colima-macos', { platform: 'macos' }), ['macos-colima-compose', 'safe-baseline-rollback'])
 })
 
+test('CLI installation declares native foundations without databases, secrets or container bootstraps', () => {
+  for (const platform of ['linux', 'freebsd', 'macos', 'windows']) {
+    for (const preferred of [false, true]) {
+      const foundationIds = commonTaskFoundationIds(`intent-ai-ops-${platform}`, { platform, docker: { preferred } })
+      assert.deepEqual(foundationIds, [...(platform === 'linux' ? ['linux-baseline'] : []), 'service-verification', 'safe-baseline-rollback'])
+      assert.equal(validateFoundationSelection({ foundationIds, platform, docker: { preference: 'disabled' } }).length, foundationIds.length)
+    }
+  }
+})
+
 test('shared Linux PHP-FPM foundation is idempotent and waits for its Unix socket', async () => {
   const context = await linuxContext()
   context.management.family = 'alpine'
@@ -83,10 +93,12 @@ test('shared Linux PHP-FPM foundation is idempotent and waits for its Unix socke
   assert.match(plan.revertCommands.find(item => item.id === 'remove-application-files').command, /\/etc\/php83\/conf\.d\/webminai-joomla-18103\.ini/u)
 })
 
-test('shared native PHP foundation does not upgrade pre-existing Debian packages', async () => {
+test('native PHP foundations do not upgrade pre-existing Debian packages', async () => {
   const context = await linuxContext()
-  const command = buildCommonTask('joomla-linux', 34, { platform: 'linux', linuxContext: context, docker: { preferred: false } }).plan.commands.find(item => item.id === 'install-packages').command
-  assert.match(command, /apt-get install --no-upgrade -y/u)
+  for (const id of ['wordpress-linux', 'woocommerce-linux', 'joomla-linux', 'drupal-linux', 'prestashop-linux', 'moodle-linux']) {
+    const command = buildCommonTask(id, 34, { platform: 'linux', linuxContext: context, docker: { preferred: false } }).plan.commands.find(item => item.id === 'install-packages').command
+    assert.match(command, /apt-get install --no-upgrade -y/u, id)
+  }
 })
 
 test('shared Compose foundation uses durable jobs for long operations', async () => {
@@ -152,7 +164,7 @@ test('semantic router distinguishes exact, foundation-assisted, context-only, an
     }
   ]
   for (const entry of cases) {
-    const planner = new CodexPlanner({ runner: async () => ({ code: 0, stdout: JSON.stringify(entry.response), stderr: '' }) })
+    const planner = new CodexPlanner({ configurationRunner: async () => ({ code: 0, stdout: '[]' }), runner: async () => ({ code: 0, stdout: JSON.stringify(entry.response), stderr: '' }) })
     const result = await planner.routeTask({ serverDirectory, request: entry.request, inventory: { os: 'linux' }, candidates })
     assert.deepEqual([result.decision, result.foundationMode], entry.expected)
     if (result.foundationMode === 'executable') {
@@ -160,7 +172,7 @@ test('semantic router distinguishes exact, foundation-assisted, context-only, an
       assert.equal(result.foundationIds.includes('safe-baseline-rollback'), true)
     }
   }
-  const planner = new CodexPlanner({ runner: async () => ({ code: 0, stdout: JSON.stringify(route('informed_planning', 'none', ['wordpress-linux'], ['made-up-foundation'], 'context-only')), stderr: '' }) })
+  const planner = new CodexPlanner({ configurationRunner: async () => ({ code: 0, stdout: '[]' }), runner: async () => ({ code: 0, stdout: JSON.stringify(route('informed_planning', 'none', ['wordpress-linux'], ['made-up-foundation'], 'context-only')), stderr: '' }) })
   await assert.rejects(planner.routeTask({ serverDirectory, request: 'A related task', inventory: { os: 'linux' }, candidates }), /unknown foundation id/u)
 })
 

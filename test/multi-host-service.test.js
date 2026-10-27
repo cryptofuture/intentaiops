@@ -17,6 +17,32 @@ test('parallelMap rejects invalid concurrency before invoking the mapper', async
   }
 })
 
+test('multi-host reports redact persisted and streamed results and only updates waive rollback', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-multi-report-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  for (const catalogId of ['host-health-linux', 'system-update-linux']) {
+    const tracker = { active: 0, maximum: 0, executions: {} }
+    const admin = fakeAdmin(root, 'alpha', tracker)
+    let requiredRollback
+    admin.execute = async ({ plan, onResult, requireRevert }) => {
+      requiredRollback = requireRevert
+      const results = plan.commands.map(item => ({ id: item.id, status: 'completed', result: { exitCode: 0, stdout: 'token=fixture-private', stderr: 'password=fixture-password' } }))
+      for (const result of results) onResult(result)
+      return results
+    }
+    const events = []
+    const service = new MultiHostService({ dataRoot: root, adminFor: () => admin })
+    const run = await service.run({ settings: {}, passphrase: 'test', serverIds: ['alpha'], request: catalogId, kind: 'catalog', catalogId, onEvent: event => events.push(event) })
+    assert.equal(run.status, 'completed')
+    assert.equal(requiredRollback, catalogId !== 'system-update-linux')
+    const task = admin.getTask('alpha', run.hosts[0].taskId)
+    for (const text of [JSON.stringify(task.results), JSON.stringify(events.filter(event => event.type === 'command-result'))]) {
+      assert.doesNotMatch(text, /fixture-private|fixture-password/)
+      assert.match(text, /\[redacted\]/)
+    }
+  }
+})
+
 test('parallelMap preserves input order with valid concurrency', async () => {
   const results = await parallelMap([3, 1, 2], 2, async value => {
     await new Promise(resolve => setTimeout(resolve, value))
@@ -201,14 +227,14 @@ function fakeAdmin (root, serverId, tracker) {
       await new Promise(resolve => setTimeout(resolve, 20))
       return [{ id: 'revert', status: 'completed' }]
     },
-    async execute () {
+    async execute ({ plan }) {
       tracker.active++
       tracker.maximum = Math.max(tracker.maximum, tracker.active)
       tracker.executions[serverId] = (tracker.executions[serverId] ?? 0) + 1
       try {
         await new Promise(resolve => setTimeout(resolve, 30))
         if (tracker.failOnce?.delete(serverId)) throw new Error('simulated host failure')
-        return [{ id: 'apply', status: 'completed' }]
+        return plan.commands.map(command => ({ id: command.id, status: 'completed' }))
       } finally {
         tracker.active--
       }

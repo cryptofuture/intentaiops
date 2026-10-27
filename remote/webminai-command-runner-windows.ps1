@@ -40,7 +40,8 @@ try {
                 $writer.WriteLine($rendered)
             }
         }
-        if ($LASTEXITCODE -is [int] -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $nativeStatus = Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
+        if ($nativeStatus -is [int] -and $nativeStatus -ne 0) { exit $nativeStatus }
     } catch {
         $errorWriter.WriteLine(($_ | Out-String))
         exit 1

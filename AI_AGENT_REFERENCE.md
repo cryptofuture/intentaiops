@@ -4,6 +4,196 @@ This is the detailed operational and development reference for AI coding agents 
 
 Agents should treat the implementation, schemas, and tests as authoritative when this document and the code differ. Before changing behavior, trace the relevant service and preserve the project boundaries: system OpenSSH owns transport, secrets stay outside Codex context and task history, commands remain approval-gated, and remote administration runs through the signed Stage 2 plugin. Prefer focused changes backed by the existing cross-platform tests and live validation scripts.
 
+### FreeBSD Podman application qualification
+
+The operator marked FreeBSD support complete for the accepted amd64 14.4/15.1
+catalog scope. Do not turn that status into claims for untested OS versions,
+pristine installs or individual application cold boots. In Automatic, all ten
+existing verified container application routes select Podman when ready. Ghost,
+n8n, Mattermost and Jellyfin now have explicit Enabled candidates in the same
+wrapper, with per-app/per-release live qualification. Jellyfin and n8n passed on
+both 14.4 and 15.1; Ghost and Mattermost passed on 15.1. These select Automatic on
+their qualified releases; the other new app/release pairs remain native in
+Automatic until qualified. Disabled retains native routes. The Intent CLI
+continues to install on the host.
+Explicit Disabled rejects container-only tasks in the shared catalog builder
+and eligibility list, while preserving native routes where implemented.
+
+The lab installation checks use the actual CLI with `VAULT_TEST`, reviewed
+controller operations and signed Stage 2 jobs. CLI installation and rollback
+passed independently on 14.4 and 15.1. Podman checks distinguish preservation of
+an existing runtime from installation with its packages/configuration/storage
+absent; the latter does not imply a pristine OS or fresh-boot kernel test.
+Use `--installation-checks` with one explicit `--host` and either
+`--task=intent-ai-ops-freebsd` or `--task=podman-freebsd` in
+`scripts/validate-freebsd-cli-lab.js`. Add `--absent-runtime` only after separately
+reviewed preparation and with the original runtime safely archived. Separate
+ignored checkpoints preserve older task identities instead of resetting them.
+Never start an absent-runtime test by deleting existing images or configuration.
+See `freebsd-lab-validation-status.md` for live results and mandatory restoration.
+
+Podman baseline capture marks a pre-existing binary. Its package installation
+and rollback must not call the runtime rc start/stop path in that case: the
+FreeBSD rc script controls restart-policy containers, not a daemon with a status
+operation. Existing storage and PF policy remain guarded and operator-reviewed.
+Bootstrap enables `linux_enable` for Linux-image persistence and preserves a
+protected, hashed rc.conf snapshot for exact rollback, including absent defaults.
+Unexpected configuration drift blocks restoration. Existing Linux modules are
+identified by kernel-file name, not an unrelated module identifier. Rollback
+does not unload pre-existing Linux facilities.
+
+Live host reboots passed on both 14.4 and 15.1 with owned native/Linux probes:
+boot identities changed, counters persisted and advanced exactly once, external
+HTTP and signed Stage 2 returned, and a durable job result predating reboot was
+retrievable. No post-boot start command was issued. This validates runtime boot
+persistence, not a full reboot cycle of every application. Pristine-OS testing
+requires a clean VM; rebooting an existing host does not provide that evidence.
+The upstream port is still experimental per https://podman.io/docs/installation.
+
+The four new candidates keep the native task graphs inside owned containers.
+Node source builds select/probe C/C++ headers/linking without borrowing the
+Python/Rust pipeline; build-only caches are removed through guarded paths and
+private logs are retained. Mattermost uses a new SysV shared-memory namespace
+for PostgreSQL, never host IPC. n8n private health/SQLite checks run inside its
+container. Ghost uses the validated public address and health-only loopback
+redirect handling; do not add public Host headers to package downloads.
+n8n Podman cold builds require at least 8 GiB available on Podman's actual
+storage filesystem before reserving application resources. LLVM, npm metadata,
+downloaded archives and unpacked dependencies all contribute to peak use.
+Low capacity and unavailable measurements have separate preflight failure codes.
+Do not use FreeBSD's root reserve as the normal build budget. Review unused
+lab caches or increase disk capacity; never prune unrelated images or volumes.
+n8n uses npm's eight per-origin download sockets, private integrity-checked
+caches and bounded fetch retries. This is not segmented downloading of each
+file. Native dependency builds retain their existing concurrency limits; no
+aria2 dependency or unverified cache-prefetch path is introduced. Node container
+compiler acquisition uses the validator's maximum one-hour job budget. A cold
+LLVM transfer exceeded that limit; this does not authorize automatic replay. A timed-out
+outer job can leave inner package work alive; wait for quiescence and inspect
+installed prerequisites before separately reviewing continuation.
+n8n dependency resolution and installation are separate one-hour jobs. Resolution
+uses `--package-lock-only --ignore-scripts --save-exact`; installation validates
+the exact n8n version and script allowlist, then uses `npm ci --ignore-scripts`.
+Only SQLite is explicitly rebuilt afterward. A failed installation does not
+discard a completed resolution or rewrite its lock. New phases apply to fresh
+plans; completed historical command definitions remain immutable.
+Ghost cold rendering was observed at about five seconds. Its shared native
+readiness probe allows ten seconds per request, with 60 attempts and the
+existing command deadline unchanged; three-second probes caused false failures.
+The existing n8n profile publishes a health marker, not owner onboarding or a
+full workflow UI. Mattermost qualification follows its native API/admin/marker
+profile, not a full web frontend. Jellyfin media/transcoding and hardware access
+remain unverified. See the live checkpoint before claiming candidate completion.
+
+Jellyfin's .NET runtime needs jail memory locking. Only its owned container
+requests `org.freebsd.jail.allow.mlock=true`, with an explicit 64 KiB process
+memlock limit; creation checks the actual jail flag and saved limit. The fixed
+service-user `--version` probe runs before the respawning daemon. Older runtimes
+that ignore the annotation fail closed before package installation. This uses
+the upstream [ocijail annotation contract](https://github.com/dfr/ocijail/blob/main/ocijail/create.cpp),
+not privileged mode, a global sysctl change or a host jail-policy override.
+The observed CLI returns exit 1 with its valid version text. The shared native
+probe accepts 0/1 only with the exact pinned response; mixed errors and crash
+statuses fail. Container-restart verification waits for `/health`, not just
+service PIDs. Live 14.4/15.1 checks include completed onboarding, marker/version,
+the rendered login form, service/container restarts and exact-baseline rollback.
+Authentication, playback, transcoding and device access remain unverified.
+Jellyfin runtime acquisition uses an explicit one-hour durable-job budget after
+the cold 14.4 transfer exceeded the previous 30 minutes. An outer timeout can
+leave inner pkg work alive: wait for process quiescence and inspect packages
+before a newly approved continuation. Never infer completion or replay from
+the timeout alone; retain original baselines and the timeout history.
+
+Odoo, Home Assistant and Magento resolve an explicit candidate container route
+when the saved runtime preference is `enabled`. Automatic now prefers the
+qualified routes only on ready, non-jail amd64 FreeBSD
+14.4 and 15.1 RELEASE hosts.
+Disabled stays native; unqualified targets/applications stay native in Auto.
+`src/freebsd-podman-application-task.js` wraps the trusted
+native command graph with separately identified container commands, preserving
+approval, signed durable jobs, dependencies, source checksums and health checks.
+Only the HTTP port is published. No host configuration, runtime socket or
+devices are mounted. Credentials are mounted from a private task directory;
+application packages, accounts and data remain in the container writable layer.
+Images contain no generated credentials. A fixed entrypoint restores the
+application services after a verified container restart. The wrapper uses and
+validates `restart=always`, matching the FreeBSD rc boot service; manually stopped
+containers can restart after host boot. Full application-specific host-reboot
+startup is not yet claimed. Removal checks ownership labels on every resource before
+mutation and retains records on inspection errors. This does not make native
+FreeBSD dependencies equivalent to upstream Linux Docker support.
+
+Source builds retain separate mode-0600 logs per attempt in the protected
+native task-state directory. Only a bounded tail is returned through normal
+redaction. A failed child stops immediately; logging does not suppress shell
+error handling. Python builds in minimal images need both a compiler and
+FreeBSD development headers. The candidate installs those only inside its
+container, checks C/C++ syntax, and clears downloaded package/source archives
+without removing installed packages or touching the host package cache.
+After successful acquisition, a separate reviewed step removes private
+Rust/Cargo build caches, preserving application files, credentials and build
+logs. Odoo requests a private `sysvshm=new` namespace at container creation for
+PostgreSQL, never inherited host IPC or `allow.sysvipc`.
+Allow extra temporary disk headroom for native source builds: the 14.4 Home
+Assistant build consumed the lab filesystem's normal free space before finished
+dependencies released their temporary files. Its recorded build succeeded, so
+that observation alone must not be classified as an ENOSPC failure.
+Home Assistant's pinned uv build uses a temporary `sys/time.h` compatibility
+include guarded against assembly input, with C/assembly probes before building.
+Do not replace this with a global forced C header or suppress compiler errors.
+Unpackaged source tests are removed only after checksum-verified extraction.
+Python 3.14 extension builds also set `LDSHARED` to the selected compiler with
+the observed FreeBSD shared-link flags; overriding `CC` alone leaves CFFI
+trying to invoke an absent `cc` in minimal images.
+Home Assistant initialization uses its private loopback backend. Public nginx
+onboarding mutation paths are blocked on both proxy aliases, so an external
+client cannot claim the first administrator while initialization is pending.
+
+Host-side HTTP verification checks the published mapping and connects directly
+to the jail using curl `--connect-to`, preserving the public Host header.
+This avoids the lab's unavailable host NAT reflection; it is not proof of
+external reachability. Qualification includes a separate external browser
+check. Odoo, Home Assistant and Magento passed this plus restart and reviewed
+rollback independently on both 14.4 and 15.1. Home Assistant qualification covers
+the core web service, not FFmpeg/media, cloud, hardware or device integrations.
+
+Magento's inner HTTP check connects to loopback with its validated public Host,
+avoiding canonical redirects through unavailable jail-to-host NAT reflection.
+Its nginx configuration loads mime.types; public asset directories grant www
+group access without opening protected configuration or credentials. After a
+container restart, a bounded gate waits for service PIDs and PHP's socket before
+the full native health checks. The same service-readiness gate protects Odoo and
+Home Assistant from racing their asynchronous entrypoints. Browser qualification rejects wrong CSS/JS MIME
+even with HTTP 200 and requires an applied storefront stylesheet. A visible CMS
+marker alone is insufficient; the lab caught an otherwise unstyled false pass.
+
+The 14.4 runtime image needs FreeBSD-utilities inside its owned build, with
+--no-hosts for base-package installation. Its development packages differ from
+15.1: FreeBSD-libbsm-dev, FreeBSD-runtime-dev and FreeBSD-openssl-lib-dev supply
+the observed audit, zlib and TLS files. These prerequisites passed Odoo and Home
+Assistant's 14.4 qualification; Magento's separate package stack also passed. They do
+not alter host repositories or trust settings.
+
+The lab exposed a VFS root with mode 0550 even after build-time normalization.
+The entrypoint and reviewed setup normalize only the owned container's `/` to
+0755, then verify non-root execution before installing the application. Host
+storage and jail isolation are unchanged. Reviewed continuation checks image,
+mounts, port, network and ownership before reusing a partially created container.
+Upstream still labels the [FreeBSD Podman port experimental](https://podman.io/docs/installation#installing-on-freebsd).
+
+Run a separate opt-in matrix with the actual unlocked binary:
+`node scripts/validate-freebsd-cli-lab.js --approve-live-tests --podman-candidates --host=webminai-freebsd-15-1 --task=odoo-freebsd`.
+It stores independent checkpoints and exact baselines in
+`artifacts/freebsd-podman/`, rather than reusing task IDs from a lost vault.
+Select `home-assistant-freebsd` or `magento-freebsd` for the other candidates.
+Candidate cycles also require Playwright Chromium, or set
+`INTENT_BROWSER_EXECUTABLE` to an installed Chrome executable. They verify the
+actual external frontend and same-origin assets after container restart before
+reviewed rollback. Screenshots stay in ignored `artifacts/browser-screenshots/`.
+Existing remote identities are skipped without dispatch. Do not switch a
+partially applied native installation to Podman as a substitute for reviewed
+cleanup of its host changes.
+
 Use this document to locate setup examples, security invariants, platform notes, lab scripts, common-task validation, and release checks. Do not copy test credentials, connection strings, claim tokens, generated service credentials, or vault material into prompts, logs, fixtures, or documentation.
 
 Intent AI Ops is an early application core for AI-assisted administration over system SSH. It does not install an AI agent on controlled hosts. The local application asks Codex to prepare a structured command plan, validates that plan, requests approval, then sends approved commands through a signed native Netdata function.
@@ -65,6 +255,8 @@ pkg-config --modversion openssl
 
 The cross-platform bootstrap installs a private Node.js 24 runtime only when Node is absent, then installs the committed package tarball:
 
+On repeat POSIX bootstrap installs, a compatible private runtime under the same install root is reused when no system Node exists. That standalone installer still refuses incompatible system Node. The verified non-Alpine Linux common task instead provisions checksum-verified private Node24.16.0 beneath its owned install root when system Node is incompatible, leaving system Node unchanged. Linux task jobs set umask022, remove bootstrap downloads after verification, and retain the 30-minute signed-job limit without command replay. An Arch lab run confirmed private24.16.0 alongside system22.23.3 and removal of only the private runtime during reviewed cleanup. Public Node downloads have three bounded retries and retain SHA-256 verification.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/cryptofuture/intentaiops/main/scripts/install.sh | sh
 ```
@@ -106,6 +298,8 @@ Confirm vault passphrase: ••••••••••••••••••
 Use at least 12 characters, preferably five or more random words or at least 20 password-manager-generated characters. This passphrase encrypts the SSH connection details and per-host action keys. It is not saved.
 
 After unlocking, choose `Change vault passphrase` at any time. Intent AI Ops decrypts all host entries with the current in-memory passphrase, generates fresh KDF parameters and a salt, atomically re-encrypts the complete vault with the new passphrase, and keeps the vault unlocked with the new value. The old passphrase no longer decrypts the file.
+
+Settings writes use a private SQLite coordination file and compare the loaded JSON snapshot before replacing it. A stale session cannot overwrite newer settings or restore older vault encryption. If another session saved changes, restart the stale CLI or console before saving again. Restart all running instances after upgrading to this protection; older binaries do not participate. The encrypted JSON format is unchanged, and the coordination file contains no credentials. SQLite releases ownership after a crash.
 
 ### 3. Add a host using an SSH key
 
@@ -408,7 +602,11 @@ INFO: Enter submits • Shift+Enter or Ctrl+J adds a line • ↑/↓ recalls ta
 [Codex turn.started] Codex is analyzing the task
 ```
 
-Codex defaults to `gpt-5.6-luna` with medium reasoning. The dashboard can persist a different supported pairing in `settings.json`: `gpt-5.6-luna`, `gpt-5.6-terra`, or `gpt-5.6-sol`, with low or medium reasoning. Its JSONL progress and reasoning summaries are shown as they arrive and saved with the task. Codex receives the sanitized Netdata inventory, including Agent information, contexts, functions, container visibility, and alerts, plus optional `context.md`, the policy extracted from `rules.json`, and your request. On Linux, this also includes Intent AI Ops's cached host profile: the exact `/etc/os-release` identity, architecture, kernel, init/service and package-manager conventions, detected stack commands and versions, distro-specific package-name candidates, and checked official documentation/package/release links. It does not receive the SSH URL, vault, password, or action key.
+Codex defaults to `gpt-6.1-sol` with low reasoning. The dashboard reads models and model-specific reasoning levels from the installed Codex CLI, including hidden catalog entries, and persists the selected pair in `settings.json`. Existing saved selections are preserved. Selecting `mimo-v2.6-pro` with low, medium or high reasoning runs Codex through the local `mimo` profile and validates schema-directed JSON because that provider does not support native JSON-schema responses. Its JSONL progress and reasoning summaries are shown as they arrive and saved with the task. Codex receives the sanitized Netdata inventory, including Agent information, contexts, functions, container visibility, and alerts, plus optional `context.md`, the policy extracted from `rules.json`, and your request. On Linux, this also includes Intent AI Ops's cached host profile: the exact `/etc/os-release` identity, architecture, kernel, init/service and package-manager conventions, detected stack commands and versions, distro-specific package-name candidates, and checked official documentation/package/release links. It does not receive the SSH URL, vault, password, or action key.
+
+Planner calls use a filtered child environment, not the application's vault or SSH environment. Codex authentication still uses its normal home and provider API keys whose variable names end in `_API_KEY`; custom authentication variables with other names are not forwarded. Routing, consultation and planning all receive embedded sanitized references, bounded to 2 MiB. They disable shell, browser, connector, plugin, hook and delegation features and run without the Codex daemon. Before each request, a bounded local configuration read identifies MCP servers; each is disabled using a transport-compatible placeholder. Failed inspection blocks planning rather than accepting an unchecked tool configuration. Local Codex profiles and configuration are trusted operator-owned inputs and must not change during a request.
+
+Run `INTENT_CODEX_BOUNDARY_TEST=1 node --test test/codex-planner.test.js` to check the installed CLI against a local mock provider using synthetic authentication. It checks inherited stdio/HTTP MCP profiles and actual advertised tools without contacting a real model or host. Some profiles retain a non-executing `request_user_input` tool; the planner requests a final schema response instead. New or unsupported CLI configurations fail closed and require review. Do not put secrets in `context.md`, even though labeled credentials are redacted before embedding.
 
 The Linux profile refresh is part of an active Stage 2 health/status read. Intent AI Ops derives the host facts through the token-authenticated loopback plugin, checks only a curated official distro release URL from the controller, and never sends the host inventory or SSH details to that site. It stores no raw web page content. Only bounded reachability/version facts and official URLs are retained, with a 24-hour online cache. An unavailable site does not make the host unhealthy: the last profile is retained with a refresh warning, and local facts continue to work.
 
@@ -489,6 +687,8 @@ Execute this command? [y/N]: y
 ```
 
 Rejected commands are not executed. Commands depending on a rejected or failed command are marked as blocked. Output is returned through the signed Netdata function and displayed in the terminal.
+
+FreeBSD n8n runtime acquisition, dependency resolution and locked installation each have a one-hour budget and no automatic retry. A confirmed failure requires inspection and separately reviewed continuation; uncertain work requires reconciliation first. The owned npm cache and completed dependency lock are preserved during continuation. Mattermost archive acquisition declares at most two attempts, visible during review: a second attempt requires an authoritative `timed_out` result with exit 143, never cancellation, transport loss or an unknown outcome. Its one-hour attempts use a two-second delay and a resumable checksum-verified archive. Each attempt has its own journal identifier. These policies do not authorize replay of uncertain work or bypass approval.
 
 Tasks and consultations are saved immediately in the selected server's `tasks.sqlite3`. A consultation record includes its question, live Codex progress, answer, compact summary, and the task or later consultation that consumed it. A task record includes the request, linked consultation summary, live Codex progress, plan, change overview, expected modified paths, every forward result as it arrives, errors, saved revert plan, every revert result, and final status. An interrupted execution therefore retains the results completed before interruption. On the next run, use Up/Down in the editor to recall request text, or open `Task history and reverts` to search task metadata, preview a selected record, ask a saved consultation again, retry a task, edit its request as a separate task, or approve its displayed revert plan in bulk or one command at a time. Result stdout and stderr remain separate and complete. This database stays local and is mode `0600`.
 
@@ -646,7 +846,7 @@ controlled host: loopback Netdata API → webminai.plugin → root command backe
                                       HMAC + timestamp + nonce gate
                                                         ├─ Linux: systemd-run or /bin/bash
                                                         ├─ FreeBSD: /bin/sh + rc.d tools
-                                                        └─ macOS: /bin/sh + sudo/bootstrap tools
+                                                        └─ macOS: root /bin/sh (sudo only during bootstrap)
 
 Windows host: loopback Netdata API → webminai.plugin-windows-amd64.exe
                                    └─ LocalSystem Windows PowerShell backend
@@ -663,6 +863,35 @@ Stage 2 installs the native plugin as `root:netdata` mode `4750`. Netdata can ex
 For each authenticated command, the plugin clears supplementary groups, establishes root UID/GID, and uses a fixed environment. On Linux it enters the host mount namespace and calls `systemd-run --wait --pipe --collect` when available, otherwise it executes through `/bin/bash`. FreeBSD and macOS builds have no Linux namespace or systemd dependency and execute through `/bin/sh` in separately timed process groups. There is no sudoers rule or permanent Intent AI Ops root helper. Bootstrap elevation accepts root, sudo, or passwordless doas; command execution after activation does not depend on any of them.
 
 This is intentionally a root administration boundary, not a restricted monitoring collector: a valid approved command can make arbitrary host changes. A native-plugin vulnerability would therefore have root impact. Loopback-only API access, system SSH transport, per-host keys, short-lived signed requests, deterministic plan validation, and interactive approval are all part of the required trust model.
+
+## Local browser workspace
+
+`intentaiops --web` and `intentaiops console` start the same authenticated,
+loopback-only foreground workspace. Add `--console-actions` for reviewed host
+and task controls, and `--web-port` for a fixed port. Credentials stay in the
+launch terminal. See [workspace usage and limitations](docs/web-workspace.md).
+
+CLI and browser preparation share `src/task-preparation.js`; completion reports
+share `src/task-completion-report.js`. `OperatorWorkspace` persists asynchronous
+operation IDs while `OperatorController` owns review/recovery transitions.
+Host mutation ownership is cross-process and keyed to verified history identity.
+It complements task leases, never replaces approval or uncertain-job checks.
+Initial host connections do not require active Stage 2; signed execution does.
+Metrics use bounded, node-scoped Netdata reads, not inventory-derived gauges.
+Frontend source is under `web/`; packaged assets are built explicitly into
+`src/operator-web/` before packing. Do not hand-edit generated bundles.
+
+## SSH connection reuse
+
+Intent AI Ops shares an authenticated OpenSSH connection across compatible host operations, including SSH, SCP, inventory, and Stage 2. Each operation gets its own channel. Closing one workflow does not disconnect another; unused connections close after 10 minutes, and owned connections close when the CLI exits.
+
+Optional `ssh` settings in your existing `settings.json`:
+
+```json
+"ssh": { "multiplexing": true, "idleTimeoutSeconds": 600, "compression": false }
+```
+
+Existing settings work unchanged. Compression is independent and off by default. Unsupported clients, including Windows clients, use ordinary SSH. A dropped connection never automatically repeats a command. Use `--debug` for transport counters. See [transport details and opt-in benchmarks](docs/ssh-connection-reuse.md).
 
 ## Data layout
 
@@ -692,7 +921,7 @@ Host authentication is delegated to OpenSSH. The initial interactive connection 
 
 ## Codex planner
 
-The planner defaults to `gpt-5.6-luna` with `medium` reasoning. The dashboard stores one validated model/reasoning pair in `settings.json`; supported models are `gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.6-sol`, and supported reasoning levels are `low` and `medium`. Codex runs in a newly created temporary directory containing only:
+The planner defaults to `gpt-6.1-sol` with `low` reasoning. The dashboard reads `codex debug models` through the existing bounded process runner and filtered environment, extracts only model identifiers and supported reasoning levels, and adds the configured MiMo choice. Catalog prompts and provider stderr are not displayed or passed to AI. Invalid, truncated or unavailable discovery blocks changes without overwriting saved settings. Models are not restricted to a fixed name allowlist; identifiers remain syntax-validated and the picker rejects reasoning levels absent from the selected model. Catalog presence is not proof of account entitlement. Selecting `mimo-v2.6-pro` loads the local `mimo` Codex profile and supports low/medium/high; a live high-reasoning structured-routing check passed on 2026-10-19 without host execution. Codex runs in a newly created temporary directory containing only:
 
 - sanitized Netdata inventory;
 - non-secret server context;
@@ -708,6 +937,11 @@ It runs read-only, non-interactively, ephemerally, with user config and reposito
 - plugin-only `activate`: require an existing Netdata installation, update only the Intent AI Ops artifacts/configuration, and preserve pre-existing ownership.
 - `deactivate`: remove the plugin, remote key, and managed configuration. Legacy Intent AI Ops helper and sudoers files are also removed. Pre-existing Netdata is preserved.
 - `deactivate` with managed removal: uninstall Netdata only if Intent AI Ops originally installed it.
+
+POSIX deactivation refuses job directories without a durable result and never
+signals PIDs from retained job history. Reconcile unfinished work first.
+Choose **Install/update plugin only (keep existing Netdata)** to refresh an
+existing host's lifecycle runner, even when the native plugin version is unchanged.
 - `reactivate`: repeat activation at any time using system SSH.
 
 While Stage 2 is active, its managed Netdata configuration block binds the Agent API to loopback, including for a pre-existing Netdata installation. Removing Stage 2 removes that block and restores the pre-existing configuration. Intent AI Ops reaches the API only through system SSH and remote `127.0.0.1`; it does not create a local tunnel or expose port 19999.
@@ -755,13 +989,20 @@ Copy the resulting artifact into `dist/` on the Intent AI Ops machine. Activatio
 
 ### macOS support
 
-macOS Stage 2 detects `Darwin` over SSH and uses the signed native plugin with a root-only action key under `/var/db/webminai`. It supports both Intel Homebrew under `/usr/local` and Apple Silicon Homebrew under `/opt/homebrew`, and uses sudo/bootstrap tools instead of systemd or Linux namespace features. Build the artifact on a matching macOS architecture:
+macOS Stage 2 detects `Darwin` over SSH and uses the signed native plugin with a root-only action key under `/var/db/webminai`. It supports both Intel Homebrew under `/usr/local` and Apple Silicon Homebrew under `/opt/homebrew`. Bootstrap can require sudo; activated commands run as root through `/bin/sh`, without systemd or Linux namespaces. Build the artifact on a matching macOS architecture:
 
 ```sh
 npm run build:plugin:macos
 ```
 
 Copy `dist/webminai.plugin-macos-arm64` or `dist/webminai.plugin-macos-amd64` to the Intent AI Ops machine. A normal Ubuntu toolchain cannot create this Mach-O/CommonCrypto artifact; release automation should use a matching macOS runner, although Ubuntu may coordinate a build on a trusted Mac and copy the result into `dist/`. If Netdata is absent, activation installs the stable Homebrew formula as the non-root Homebrew owner and records it as Intent AI Ops-managed; managed removal stops and uninstalls that formula. Existing Homebrew Netdata can use plugin-only activation. Stage 2 restarts the LaunchAgent as the Homebrew owner, waits for the API and asynchronous plugin-spawn supervisor, and then installs the plugin for live discovery. This ordering avoids Netdata permanently disabling the plugin when its first launch races the supervisor socket. The SSH account must be able to bootstrap through sudo; its password is transient and is never passed to Codex.
+
+The reviewed Colima prerequisite installs missing Docker, Compose and Buildx tools
+as the Homebrew owner. Intel hosts can require source builds, including Go for
+Buildx. Existing formula versions and Colima profiles are preserved; rollback
+disables Homebrew autoremove and removes only recorded additions. Moodle checks
+Buildx before creating application files. See the [macOS lab checkpoint](docs/macos-lab-validation-status.md)
+for measured coverage and remaining platform limits.
 
 ### Windows command plugin
 
@@ -872,6 +1113,12 @@ sudo scripts/lxd-test-lab-remove-all.sh
 ```
 
 The setup is idempotent: running `up` again starts stopped lab instances, reapplies the SSH/user configuration, and verifies connectivity and passwordless sudo. Image downloads and package installation can take several minutes on the first run.
+
+### Review Linux system fixtures through the CLI
+
+Run `intentaiops --lab-tasks` (or `./bin/intentaiops.js --lab-tasks` from this checkout), unlock the existing vault, connect to a disposable Linux lab host, and choose **Run a verified common task**. This opt-in adds the existing package, user, nginx, service, timer, cron, logrotate and tmpfiles fixtures to that picker. The normal catalog stays unchanged without the flag. Host eligibility still excludes container swap and systemd fixtures on OpenRC hosts.
+
+Each fixture still uses the same displayed plan, explicit approval, validator, journal, signed Stage 2 execution and separately reviewed rollback. The flag neither runs a test automatically nor adds these fixtures to ordinary AI-routing candidates. Fixtures use fixed test names and paths; do not enable them for production testing. Keep results in [the Linux checkpoint](docs/linux-lab-validation-status.md) and reconcile uncertain jobs before continuing.
 
 ## Local FreeBSD VM test lab
 
@@ -1008,21 +1255,25 @@ Ordinary Netdata monitoring, when installed, retains its normal Kubernetes topol
 Run the end-to-end Stage 2 and nginx test from the Intent AI Ops container after mounting or copying the routed kubeconfig:
 
 ```sh
-npm run test:kubernetes-stage2
+npm run test:kubernetes-stage2 -- --approve-live-tests
 ```
 
-The runner creates a lab-only per-cluster action key in the ignored mode-`0600` file `scripts/.kubernetes-stage2-action-key`, activates the gateway, deploys a custom nginx page in `webminai-tasks`, starts one unprivileged HTTP validation Job pinned to each ready node, checks every result, and reverts the nginx resources. It intentionally leaves Stage 2 active for inspection. Use `node scripts/validate-kubernetes-stage2.js deactivate` to remove both managed namespaces and the cluster-scoped node-reader RBAC. The production CLI integration must store the per-cluster key in the encrypted vault instead of this lab file.
+Set `WEBMINAI_K8S_VAULT_CLUSTER` and provide `VAULT_TEST` to reuse the CLI-saved cluster and its encrypted action key. Otherwise the runner uses a lab-only key in ignored mode-`0600` `scripts/.kubernetes-stage2-action-key`; do not mix this legacy key with a vault-managed gateway. The explicitly approved `kind-webminai-k8s` runner activates the gateway, deploys a custom nginx page in `webminai-tasks`, starts one unprivileged HTTP validation Job pinned to each ready node, checks every result, and reverts the nginx resources. It intentionally leaves Stage 2 active. Use `node scripts/validate-kubernetes-stage2.js deactivate --approve-live-tests` only to remove both managed namespaces and node-reader RBAC after inspecting existing task resources.
 
 The Kubernetes common-task catalog mirrors every reviewed ismet Compose application while adapting it to namespace-scoped Deployments, Services, persistent claims, and per-node validation Jobs. It does not install Docker in cluster nodes and it never grants the gateway access to Kubernetes Secrets. Application credentials are generated inside task-owned persistent state and are removed with that task. Validate and revert every catalog entry sequentially with:
 
 ```sh
-npm run test:kubernetes-common-tasks
+npm run test:kubernetes-common-tasks -- --approve-live-tests
 node scripts/validate-kubernetes-common-tasks.js list
-node scripts/validate-kubernetes-common-tasks.js run wordpress-kubernetes
-node scripts/validate-kubernetes-common-tasks.js revert wordpress-kubernetes
+node scripts/validate-kubernetes-common-tasks.js run wordpress-kubernetes --approve-live-tests
+node scripts/validate-kubernetes-common-tasks.js revert wordpress-kubernetes --approve-live-tests
 ```
 
-The `all` runner reverts each application before moving to the next one. Each successful application is reached through its ClusterIP Service by an unprivileged Job pinned to every ready node. This is an integration test against the configured cluster, not part of the offline unit suite.
+The disposable `kind-webminai-k8s` runner requires explicit live approval and an empty task namespace. It saves cluster-bound checkpoints and creation UIDs, verifies ownership before rollback, and stops for inspection instead of automatically cleaning up failed or uncertain work. `all` skips recorded successful cycles only after confirming the namespace is empty. Each successful application is reached through its ClusterIP Service by an unprivileged Job pinned to every ready node. This is integration validation, not the shared task-history/controller workflow. Set `WEBMINAI_K8S_VAULT_CLUSTER` and provide `VAULT_TEST` to reuse a CLI-saved encrypted cluster instead of the legacy lab action-key file. Progress is saved in `docs/kubernetes-lab-validation-status.md` and private receipts in ignored `artifacts/kubernetes-common/`.
+
+For opt-in, read-only signed gateway and SQLite journal checks, set `INTENT_KUBERNETES_LIVE=1`, `INTENT_WEB_DATA_ROOT`, `INTENT_WEB_CLUSTER` and `VAULT_TEST`, then run `node --test test/kubernetes-reliability.integration.test.js`. This checks authorization, approval, leases, pause, persisted history and continuation without replay. It uses the existing vault and an isolated temporary task database, and never mutates cluster resources. It does not prove production CLI/controller cluster task integration or durable remote recovery.
+
+Cluster task preparation/review/execution now uses `KubernetesTaskService` in both the CLI and browser. A dedicated explicitly enabled recovery PVC persists across gateway updates/deactivation, without extending RBAC. The signed fixed `webminai:recovery` function reuses the embedded OpenSSL storage backend; health exposes `recoveryOpenSslAvailable`, `recoveryProtocolVersion` and `recoveryConfigured`. Version2 records bind catalog command definitions to original Kubernetes resource UIDs. Fresh recovery rebuilds local catalog definitions and reviews new UID-preconditioned deletions, never remote command text. Unknown creations, changed resources/catalogs/node identities and stale record heads fail closed. Arbitrary AI cluster replanning is not implemented. `browser-checks/kubernetes-tasks.spec.js` is an explicitly enabled disposable kind test (`INTENT_KUBERNETES_TASK_LIVE=1`) of actual CLI/browser review, reload, gateway restart and fresh-profile reviewed recovery. Failed test resources/profiles are preserved for inspection, never automatically replayed or cleaned up.
 
 The lab demonstrates that node-control boundary with a fixed, harmless write/read/remove probe on every kind node:
 
@@ -1058,6 +1309,28 @@ scripts/kubernetes-helm-lab.sh destroy
 The script never uses the current kubectl context implicitly; every kubectl and Helm operation names `kind-webminai-k8s`. Netdata is installed from its [official Helm repository](https://learn.netdata.cloud/docs/netdata-agent/installation/kubernetes), which deploys a parent plus per-node child collectors for Kubernetes monitoring.
 
 ## Development
+
+### Signed remote common-task recovery
+
+See [remote recovery implementation and limits](docs/remote-common-task-recovery.md)
+before changing its contracts. The host CLI records new unchanged catalog runs
+through the existing signed Stage2 path. Recovery regenerates trusted code;
+remote records never supply executable rollback. Linux systemd service/timer,
+logrotate and tmpfiles fixtures and native non-Alpine CLI installation have
+registered baseline profiles with reviewed Debian live recovery. Native n8n
+adds guarded package/repository/ownership checks and one dependency-ordered
+cleanup job; fixture tests and current-profile Debian60/recovery63 pass.
+Its old baselines do not inherit approval or compatibility after template changes.
+Key rotation is explicitly
+reviewed, archives public verification keys and never silently changes a pin.
+Shared-controller browser actions require separate proposal and execution approval.
+Reviewed owner takeover is limited to confirmed untouched sources; partial or
+unknown execution and already-started recovery remain blocked.
+The macOS lab verified automatic signed recording and fresh public-key
+trust/discovery. Destructive regeneration remains blocked because macOS baseline
+profiles are not registered. Windows CNG storage and other live-platform coverage
+require their own recorded evidence. Do not broaden these claims or silently
+accept a changed signing key.
 
 The promoted Linux application catalog is exposed through the host menu and structured Codex routing. It contains 13 reviewed builders; candidates without a promoted builder remain on the research/AI path. Run the staged Linux-lab and separate Docker-host promotion checks with:
 

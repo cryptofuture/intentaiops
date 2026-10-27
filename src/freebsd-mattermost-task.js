@@ -1,5 +1,5 @@
-const VERSION = '11.7.3'
-const PACKAGE_VERSION = '11.7.3_1'
+const VERSION = '11.7.10'
+const PACKAGE_VERSION = '11.7.10_2'
 const SERVICE_ROOT = '/var/db/webminai-mattermost-18111'
 const CREDENTIALS = '/root/mattermost_credentials'
 const MATTERMOST_RC = '/usr/local/etc/rc.d/webminai_mattermost'
@@ -17,8 +17,8 @@ export function buildFreebsdMattermostTask (taskId, freebsdExecution) {
       summary: 'Deploy a learned reversible native FreeBSD Mattermost server',
       changeOverview: `Install FreeBSD-port Mattermost ${VERSION}, PostgreSQL 17, and nginx with protected bootstrap credentials on port 18111.`,
       modifiedFiles: [state, SERVICE_ROOT, CREDENTIALS, MATTERMOST_RC, POSTGRES_RC, NGINX_CONFIG],
-      assumptions: ['FreeBSD 15.1 amd64 with pkg and rc.d', `FreeBSD package ${PACKAGE_VERSION} is the newest native Mattermost port currently available`],
-      warnings: ['The FreeBSD port trails the ismet container release 11.7.8; this route is promoted independently as the current native FreeBSD version.', 'The controlled deployment does not configure SMTP, Calls, TLS, plugins, or public DNS.'],
+      assumptions: ['FreeBSD 15.1 amd64 with pkg and rc.d', `Reviewed FreeBSD Mattermost package ${PACKAGE_VERSION}`],
+      warnings: ['This native FreeBSD package route is validated independently of the container route.', 'The controlled deployment does not configure SMTP, Calls, TLS, plugins, or public DNS.'],
       commands: [
         item('prepare-mattermost', prepare(state), 'Capture the package baseline and generate protected database and administrator credentials'),
         item('install-mattermost-runtime', installRuntime(state), 'Install exact Mattermost, PostgreSQL 17, nginx, and client packages', ['prepare-mattermost'], 1800000, 'job'),
@@ -48,7 +48,7 @@ function installRuntime (state) {
 }
 
 function initializeDatabase () {
-  return `set -eu; root=${quote(SERVICE_ROOT)}; install -d -o postgres -g postgres -m 0700 "$root/db"; install -d -o postgres -g postgres -m 0750 "$root/pg-run"; cat > ${quote(POSTGRES_RC)} <<'CONF'
+  return `set -eu; root=${quote(SERVICE_ROOT)}; install -d -o postgres -g postgres -m 0700 "$root/db"; install -d -o postgres -g postgres -m 0750 "$root/pg-run"; install -d -m 0755 /etc/rc.conf.d; cat > ${quote(POSTGRES_RC)} <<'CONF'
 postgresql_enable="YES"
 postgresql_data="${SERVICE_ROOT}/db"
 CONF

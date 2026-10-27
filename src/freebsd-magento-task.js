@@ -1,3 +1,6 @@
+import { freebsdNginxSecurityCommand, FREEBSD_NGINX_MINIMUM_VERSION } from './freebsd-nginx-security.js'
+import { freebsdInstallMissingPackages } from './freebsd-runtime-packages.js'
+
 const VERSION = '2.4.8-p5'
 const ARCHIVE_SHA256 = 'c3da9206254d8c7bc383f7a0187b07671d0fc7c1a5e6a11307fe6c2b57d8c8b9'
 const APP_ROOT = '/usr/local/lib/webminai-magento-18108'
@@ -23,7 +26,7 @@ export function buildFreebsdMagentoTask (taskId, freebsdExecution) {
       summary: 'Deploy a learned reversible native FreeBSD Magento Open Source store',
       changeOverview: `Build checksum-pinned Magento Open Source ${VERSION} with PHP 8.4-FPM, MariaDB 11.4, OpenSearch 2.19, Valkey 8.1, cron, and nginx on port 18108.`,
       modifiedFiles: [state, APP_ROOT, DATA_ROOT, CREDENTIALS, MYSQL_RC, NGINX_CONFIG, PHP_FPM_CONFIG, PHP_CONFIG, OPENSEARCH_CONFIG, OPENSEARCH_JVM, VALKEY_CONFIG, CRON_CONFIG],
-      assumptions: ['FreeBSD 15.1 amd64 with pkg and rc.d', 'The controlled lab has at least two CPU threads, 2 GB RAM, 1 GB swap, and sufficient disk for the resolved native stack.'],
+      assumptions: ['FreeBSD 14.4 or 15.1 amd64 with pkg and rc.d', 'The controlled lab has at least two CPU threads, 2 GB RAM, 1 GB swap, and sufficient disk for the resolved native stack.'],
       warnings: ['Adobe Commerce supports Linux rather than FreeBSD. This is an Intent AI Ops-tested source adaptation of Magento Open Source.', 'OpenSearch is restricted to loopback and tuned to a 384 MB heap for this controlled test; production sizing requires a separate capacity review.'],
       commands: [
         item('prepare-magento', prepare(state), 'Capture package and identity baselines and generate administrator and database credentials on-host'),
@@ -36,6 +39,7 @@ export function buildFreebsdMagentoTask (taskId, freebsdExecution) {
       ],
       revertCommands: [item('remove-magento', remove(state), 'Remove only task-owned Magento services, credentials, identities, and packages', [], 1800000, 'job', 'destructive')]
     },
+    verifyRuntime: verifyRuntime(state),
     verifyApplied: `set -eu; ${primaryAddress()}; curl --fail --location --silent --show-error --max-time 30 http://$address:18108/ | grep -F ${quote(MARKER)} >/dev/null`,
     verifyReverted: `test ! -e ${quote(APP_ROOT)} && test ! -e ${quote(DATA_ROOT)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && ! pkg info -e php84 >/dev/null 2>&1 && ! pkg info -e mariadb114-server >/dev/null 2>&1 && ! pkg info -e opensearch219 >/dev/null 2>&1`,
     stateProbe: `test -e ${quote(state)} && printf applied || printf absent`
@@ -51,8 +55,24 @@ function prepareFresh (state) {
 }
 
 function installRuntime (state) {
-  const extensions = ['bcmath', 'ctype', 'curl', 'dom', 'fileinfo', 'filter', 'ftp', 'gd', 'iconv', 'intl', 'mbstring', 'mysqli', 'opcache', 'pdo', 'pdo_mysql', 'phar', 'posix', 'session', 'simplexml', 'soap', 'sockets', 'sodium', 'tokenizer', 'xml', 'xmlreader', 'xmlwriter', 'xsl', 'zip', 'zlib'].map(name => `php84-${name}-8.4.24`).join(' ')
-  return `set -eu; env ASSUME_ALWAYS_YES=yes pkg install -y php84-8.4.24 php84-composer-2.10.2 ${extensions} mariadb114-server-11.4.12 opensearch219-2.19.5 valkey8-8.1.8 nginx; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}; php -r 'exit(PHP_VERSION_ID >= 80400 && PHP_VERSION_ID < 80500 ? 0 : 1);'; COMPOSER_ALLOW_SUPERUSER=1 composer --version | grep -F '2.10.2'; /usr/local/libexec/mariadbd --version | grep -F '11.4.12'; /usr/local/lib/opensearch/bin/opensearch --version | grep -F '2.19.5'; valkey-server --version | grep -F '8.1.8'`
+  return installRuntimePackages(state) + `; ${freebsdNginxSecurityCommand(state)}`
+}
+
+function runtimePackages () {
+  const extensions = ['bcmath', 'ctype', 'curl', 'dom', 'fileinfo', 'filter', 'ftp', 'gd', 'iconv', 'intl', 'mbstring', 'mysqli', 'opcache', 'pdo', 'pdo_mysql', 'phar', 'posix', 'session', 'simplexml', 'soap', 'sockets', 'sodium', 'tokenizer', 'xml', 'xmlreader', 'xmlwriter', 'xsl', 'zip', 'zlib'].map(name => `php84-${name}`)
+  return ['php84', 'php84-composer', ...extensions, 'mariadb114-server', 'opensearch219', 'valkey8', 'nginx']
+}
+
+function runtimeVersionChecks () {
+  return 'php -r \'exit(PHP_VERSION_ID >= 80400 && PHP_VERSION_ID < 80500 ? 0 : 1);\'; COMPOSER_ALLOW_SUPERUSER=1 composer --version | grep -E \'(^|[^0-9])2[.]10[.]\'; /usr/local/libexec/mariadbd --version | grep -E \'(^|[^0-9])11[.]4[.]\'; /usr/local/lib/opensearch/bin/opensearch --version | grep -E \'(^|[^0-9])2[.]19[.]\'; valkey-server --version | grep -E \'(^|[^0-9])8[.]1[.]\''
+}
+
+function installRuntimePackages (state) {
+  return `set -eu; ${freebsdInstallMissingPackages(runtimePackages())}; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}; ${runtimeVersionChecks()}`
+}
+
+function verifyRuntime (state) {
+  return `set -eu; test ! -L ${quote(state)}; test "$(stat -f '%u:%Lp' ${quote(state)})" = 0:700; for path in ${['packages.before', 'packages.after', 'packages.added'].map(name => quote(`${state}/${name}`)).join(' ')}; do test ! -L "$path"; test -f "$path"; test "$(stat -f '%u' "$path")" = 0; test -z "$(find "$path" -prune -perm -0020 -print -o -perm -0002 -print)"; done; test -s ${quote(`${state}/packages.before`)}; test -s ${quote(`${state}/packages.after`)}; for package in ${runtimePackages().map(quote).join(' ')}; do pkg info -e "$package" >/dev/null; done; pkg check -d -n ${runtimePackages().map(quote).join(' ')}; ${runtimeVersionChecks()}; case "$(pkg version -t "$(pkg query '%v' nginx)" ${quote(FREEBSD_NGINX_MINIMUM_VERSION)})" in '='|'>') ;; *) printf 'NGINX_SECURITY_VERSION_UNVERIFIED\n' >&2; exit 78;; esac`
 }
 
 function installSource (state) {
@@ -62,7 +82,7 @@ function installSource (state) {
 
 function installSourceFresh (state) {
   const archive = `${state}/magento-${VERSION}.tar.gz`
-  return `set -eu; rm -rf -- ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(APP_ROOT)}; curl --fail --location --silent --show-error https://github.com/magento/magento2/archive/refs/tags/${VERSION}.tar.gz --output ${quote(archive)}; [ "$(sha256 -q ${quote(archive)})" = ${quote(ARCHIVE_SHA256)} ]; tar -xzf ${quote(archive)} -C ${quote(APP_ROOT)} --strip-components 1; cd ${quote(APP_ROOT)}; export COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_CACHE_DIR=${quote(`${state}/composer-cache`)}; composer install --no-dev --prefer-dist --no-interaction --no-progress --no-ansi --optimize-autoloader; rm -rf -- ${quote(`${state}/composer-cache`)}; php bin/magento --version | grep -F ${quote(VERSION)}; chmod -R a+rX ${quote(APP_ROOT)}`
+  return `set -eu; rm -rf -- ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(APP_ROOT)}; curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 30 --silent --show-error https://github.com/magento/magento2/archive/refs/tags/${VERSION}.tar.gz --output ${quote(archive)}; [ "$(sha256 -q ${quote(archive)})" = ${quote(ARCHIVE_SHA256)} ]; tar -xzf ${quote(archive)} -C ${quote(APP_ROOT)} --strip-components 1; cd ${quote(APP_ROOT)}; export COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_CACHE_DIR=${quote(`${state}/composer-cache`)}; composer install --no-dev --prefer-dist --no-interaction --no-progress --no-ansi --optimize-autoloader; rm -rf -- ${quote(`${state}/composer-cache`)}; php bin/magento --version | grep -F ${quote(VERSION)}; chmod -R a+rX ${quote(APP_ROOT)}`
 }
 
 function initializeServices () {
@@ -157,7 +177,7 @@ cat > ${quote(NGINX_CONFIG)} <<'CONF'
 user www www;
 worker_processes 1;
 events { worker_connections 256; }
-http { upstream fastcgi_backend { server unix:${DATA_ROOT}/php-run/php-fpm.sock; } server { listen 18108; server_name _; set $MAGE_ROOT ${APP_ROOT}; set $MAGE_DEBUG_SHOW_ARGS 0; include ${APP_ROOT}/nginx.conf.sample; } }
+http { include /usr/local/etc/nginx/mime.types; upstream fastcgi_backend { server unix:${DATA_ROOT}/php-run/php-fpm.sock; } server { listen 18108; server_name _; set $MAGE_ROOT ${APP_ROOT}; set $MAGE_DEBUG_SHOW_ARGS 0; include ${APP_ROOT}/nginx.conf.sample; } }
 CONF
 cat > ${quote(CRON_CONFIG)} <<'CONF'
 * * * * * webminai_magento /usr/local/bin/php ${APP_ROOT}/bin/magento cron:run --no-ansi --quiet >/dev/null 2>&1
@@ -179,7 +199,7 @@ $files = ['db-password' => '${DATA_ROOT}/database_password', 'admin-user' => '${
 foreach ($files as $option => $path) { $argv[] = '--' . $option . '=' . trim((string) file_get_contents($path)); }
 $argc = count($argv); $_SERVER['argv'] = $argv; $_SERVER['argc'] = $argc; $GLOBALS['argv'] = $argv; $GLOBALS['argc'] = $argc;
 PHP
-chown webminai_magento:webminai_magento ${quote(installer)}; chmod 0400 ${quote(installer)}; cd ${quote(APP_ROOT)}; if [ ! -s app/etc/env.php ]; then su -m webminai_magento -c "WEBMINAI_MAGENTO_URL=http://$address:18108/ php -d memory_limit=2G -d auto_prepend_file=${installer} bin/magento setup:install --no-interaction --no-ansi --quiet --cleanup-database --base-url=\"http://$address:18108/\" --db-host=127.0.0.1:53308 --db-name=${DATABASE} --db-user=${DATABASE_USER} --backend-frontname=webminai_admin --admin-firstname=Intent AI Ops --admin-lastname=Administrator --admin-email=intentaiops@example.invalid --language=en_US --currency=USD --timezone=UTC --use-rewrites=1 --search-engine=opensearch --opensearch-host=127.0.0.1 --opensearch-port=19208 --opensearch-enable-auth=0 --session-save=redis --session-save-redis-host=127.0.0.1 --session-save-redis-port=16379 --session-save-redis-db=2 --cache-backend=redis --cache-backend-redis-server=127.0.0.1 --cache-backend-redis-port=16379 --cache-backend-redis-db=0 --page-cache=redis --page-cache-redis-server=127.0.0.1 --page-cache-redis-port=16379 --page-cache-redis-db=1" >/dev/null; fi; rm -f -- ${quote(`${DATA_ROOT}/database_password`)} ${quote(`${DATA_ROOT}/admin_username`)} ${quote(`${DATA_ROOT}/admin_password`)} ${quote(installer)}; su -m webminai_magento -c 'cd ${APP_ROOT} && php -d memory_limit=2G bin/magento setup:di:compile --no-ansi --quiet' >/dev/null; su -m webminai_magento -c 'cd ${APP_ROOT} && php -d memory_limit=2G bin/magento setup:static-content:deploy -f en_US --no-ansi --quiet' >/dev/null; cat > ${quote(marker)} <<'PHP'
+chown webminai_magento:webminai_magento ${quote(installer)}; chmod 0400 ${quote(installer)}; cd ${quote(APP_ROOT)}; if [ ! -s app/etc/env.php ]; then su -m webminai_magento -c "WEBMINAI_MAGENTO_URL=http://$address:18108/ php -d memory_limit=2G -d auto_prepend_file=${installer} bin/magento setup:install --no-interaction --no-ansi --quiet --cleanup-database --base-url=\"http://$address:18108/\" --db-host=127.0.0.1:53308 --db-name=${DATABASE} --db-user=${DATABASE_USER} --backend-frontname=webminai_admin --admin-firstname=Intent --admin-lastname=Administrator --admin-email=intentaiops@example.invalid --language=en_US --currency=USD --timezone=UTC --use-rewrites=1 --search-engine=opensearch --opensearch-host=127.0.0.1 --opensearch-port=19208 --opensearch-enable-auth=0 --session-save=redis --session-save-redis-host=127.0.0.1 --session-save-redis-port=16379 --session-save-redis-db=2 --cache-backend=redis --cache-backend-redis-server=127.0.0.1 --cache-backend-redis-port=16379 --cache-backend-redis-db=0 --page-cache=redis --page-cache-redis-server=127.0.0.1 --page-cache-redis-port=16379 --page-cache-redis-db=1" >/dev/null; fi; rm -f -- ${quote(`${DATA_ROOT}/database_password`)} ${quote(`${DATA_ROOT}/admin_username`)} ${quote(`${DATA_ROOT}/admin_password`)} ${quote(installer)}; su -m webminai_magento -c 'cd ${APP_ROOT} && php -d memory_limit=2G bin/magento setup:di:compile --no-ansi --quiet' >/dev/null; su -m webminai_magento -c 'cd ${APP_ROOT} && php -d memory_limit=2G bin/magento setup:static-content:deploy -f en_US --no-ansi --quiet' >/dev/null; cat > ${quote(marker)} <<'PHP'
 <?php
 use Magento\Framework\App\Bootstrap;
 require '${APP_ROOT}/app/bootstrap.php';
@@ -190,7 +210,7 @@ $page = $objectManager->create(Magento\Cms\Model\Page::class)->getCollection()->
 if (!$page->getId()) { throw new RuntimeException('home page missing'); }
 $page->setTitle('${MARKER}')->setContent('<main><h1>${MARKER}</h1></main>')->setIsActive(true)->save();
 PHP
-chown webminai_magento:webminai_magento ${quote(marker)}; su -m webminai_magento -c 'cd ${APP_ROOT} && php ${marker}' >/dev/null; rm -f -- ${quote(marker)}; su -m webminai_magento -c 'cd ${APP_ROOT} && php bin/magento indexer:reindex --no-ansi --quiet' >/dev/null; su -m webminai_magento -c 'cd ${APP_ROOT} && php bin/magento cache:flush --no-ansi --quiet' >/dev/null; ${waitMagento()}`
+chown webminai_magento:webminai_magento ${quote(marker)}; su -m webminai_magento -c 'cd ${APP_ROOT} && php ${marker}' >/dev/null; rm -f -- ${quote(marker)}; su -m webminai_magento -c 'cd ${APP_ROOT} && php bin/magento indexer:reindex --no-ansi --quiet' >/dev/null; su -m webminai_magento -c 'cd ${APP_ROOT} && php bin/magento cache:flush --no-ansi --quiet' >/dev/null; for public_path in ${quote(`${APP_ROOT}/pub/static`)} ${quote(`${APP_ROOT}/pub/media`)}; do test ! -L "$public_path"; chgrp www "$public_path"; chmod g+rx "$public_path"; done; ${waitMagento()}`
 }
 
 function verify () {
@@ -210,11 +230,11 @@ function waitOpenSearch () {
 }
 
 function waitMagento () {
-  return `ready=; for attempt in $(jot 180); do response=$(mktemp); if curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:18108/ --output "$response" 2>/dev/null && grep -F ${quote(MARKER)} "$response" >/dev/null; then rm -f -- "$response"; ready=yes; break; fi; rm -f -- "$response"; sleep 3; done; [ "$ready" = yes ]`
+  return `${primaryAddress()}; ready=; for attempt in $(jot 180); do response=$(mktemp); if curl --fail --location --silent --show-error --max-time 10 --header "Host: $address:18108" http://127.0.0.1:18108/ --output "$response" 2>/dev/null && grep -F ${quote(MARKER)} "$response" >/dev/null; then rm -f -- "$response"; ready=yes; break; fi; rm -f -- "$response"; sleep 3; done; [ "$ready" = yes ]`
 }
 
 function primaryAddress () {
-  return 'interface=$(route -n get default | awk \'/interface:/{print $2; exit}\'); address=$(ifconfig "$interface" inet | awk \'/inet /{print $2; exit}\'); [ -n "$address" ]'
+  return 'address=$(printenv WEBMINAI_PUBLIC_ADDRESS || true); if [ -z "$address" ]; then interface=$(route -n get default | awk \'/interface:/{print $2; exit}\'); address=$(ifconfig "$interface" inet | awk \'/inet /{print $2; exit}\'); fi; printf "%s\\n" "$address" | awk -F. \'NF != 4 {exit 1} {for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || length($i)>3 || $i+0>255) exit 1}\''
 }
 
 function item (id, command, purpose, dependsOn = [], timeoutMs = 300000, executionMode = null, risk = 'change') {

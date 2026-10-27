@@ -1,5 +1,4 @@
-const WORDPRESS_IMAGE = 'localhost/webminai-freebsd-wordpress:7.0.2-php84'
-const DATABASE_IMAGE = 'localhost/webminai-freebsd-mariadb:11.8'
+import { freebsdContainerImages } from './freebsd-php-runtime.js'
 const WORDPRESS = Object.freeze({
   id: 'wordpress',
   label: 'WordPress',
@@ -23,14 +22,15 @@ export function buildFreebsdWordpressApplication (taskId, freebsdExecution, appl
     throw new Error('FreeBSD WordPress requires the reviewed Podman Suite and podman-compose substrate')
   }
   validateApplication(application)
+  const images = freebsdContainerImages(freebsdExecution)
   const state = `/var/lib/webminai/task-state/${taskId}-${application.id}-freebsd`
   const deployId = extensions.deployId ?? 'deploy-wordpress'
   const verifyId = extensions.verifyId ?? 'verify-wordpress'
   const commands = [
     item('capture-and-prepare', prepare(state, application), 'Capture ownership and prepare protected credentials and build directories'),
-    item('build-mariadb-image', buildFreebsdMariaDbImageCommand(application.buildRoot), 'Build the minimal native FreeBSD MariaDB 11.8 image', ['capture-and-prepare'], 1200000, 'job'),
-    item('build-wordpress-image', buildWordPress(application), 'Download verified WordPress 7.0.2 and build the minimal native FreeBSD PHP 8.4/nginx image', ['capture-and-prepare'], 1200000, 'job'),
-    item(deployId, deploy(application), `Deploy and initialize the structured WordPress phase for ${application.label} without exposing generated credentials`, ['build-mariadb-image', 'build-wordpress-image'], 600000, 'job')
+    item('build-mariadb-image', buildFreebsdMariaDbImageCommand(application.buildRoot, images), 'Build the minimal native FreeBSD MariaDB 11.8 image', ['capture-and-prepare'], 1200000, 'job'),
+    item('build-wordpress-image', buildWordPress(application, images), 'Download verified WordPress 7.0.2 and build the minimal native FreeBSD PHP 8.4/nginx image', ['capture-and-prepare'], 1200000, 'job'),
+    item(deployId, deploy(application, images), `Deploy and initialize the structured WordPress phase for ${application.label} without exposing generated credentials`, ['build-mariadb-image', 'build-wordpress-image'], 600000, 'job')
   ]
   if (extensions.afterDeploy) commands.push(...extensions.afterDeploy({ state, application, deployId }))
   const verifyDependencies = extensions.verifyDependsOn ?? [commands.at(-1).id]
@@ -40,7 +40,7 @@ export function buildFreebsdWordpressApplication (taskId, freebsdExecution, appl
       summary: `Deploy a learned reversible native FreeBSD ${application.label} site`,
       changeOverview: `Build minimal native FreeBSD MariaDB and PHP/nginx OCI images, then deploy ${application.label} with host-generated credentials and a static Podman network.`,
       modifiedFiles: [state, application.buildRoot, application.serviceRoot, application.credentials, ...(extensions.modifiedFiles ?? [])],
-      assumptions: ['FreeBSD 15.1 amd64 with Podman Suite, podman-compose, PF and fdescfs configured by Stage 2 inventory'],
+      assumptions: ['FreeBSD 14.4 or 15.1+ amd64 with Podman Suite, podman-compose, PF and fdescfs configured by Stage 2 inventory'],
       warnings: ['FreeBSD Podman uses jails and VFS storage. The reviewed images run service processes as container root because non-root processes cannot reliably traverse image layers on this substrate. Only the WordPress HTTP port is published.', 'The native MariaDB and PHP/nginx images are shared FreeBSD runtime assets and remain available after application rollback.'],
       commands,
       revertCommands: [
@@ -54,11 +54,16 @@ export function buildFreebsdWordpressApplication (taskId, freebsdExecution, appl
 }
 
 function prepare (state, application) {
-  return `set -eu; test "$(uname -s)" = FreeBSD; test "$(freebsd-version -u | sed -E 's/^([0-9]+).*/\\1/')" -ge 15; command -v podman >/dev/null; command -v podman-compose >/dev/null; podman info >/dev/null; install -d -m 0700 ${quote(state)} ${quote(application.buildRoot)} ${quote(application.serviceRoot)}; if [ -e ${quote(application.credentials)} ]; then : > ${quote(`${state}/credentials-preexisting`)}; else install -d -m 0700 ${quote(application.credentials)}; fi; for name in db_root_password db_password admin_password; do if [ ! -s ${quote(application.credentials)}/$name ]; then umask 077; openssl rand -base64 30 | tr -d '\\n' > ${quote(application.credentials)}/$name; fi; done; chmod 0600 ${quote(application.credentials)}/*`
+  return `set -eu; test "$(uname -s)" = FreeBSD; case "$(freebsd-version -r)" in 14.4-*|15.[1-9]*-*) ;; *) exit 78;; esac; command -v podman >/dev/null; command -v podman-compose >/dev/null; podman info >/dev/null; install -d -m 0700 ${quote(state)} ${quote(application.buildRoot)} ${quote(application.serviceRoot)}; if [ -e ${quote(application.credentials)} ]; then : > ${quote(`${state}/credentials-preexisting`)}; else install -d -m 0700 ${quote(application.credentials)}; fi; for name in db_root_password db_password admin_password; do if [ ! -s ${quote(application.credentials)}/$name ]; then umask 077; openssl rand -base64 30 | tr -d '\\n' > ${quote(application.credentials)}/$name; fi; done; chmod 0600 ${quote(application.credentials)}/*`
 }
 
 /** @param {string} [buildRoot] */
-export function buildFreebsdMariaDbImageCommand (buildRoot = WORDPRESS.buildRoot) {
+export function freebsdMariaDbReadyCommand (project, database, address) {
+  if (!/^[a-zA-Z0-9_-]+$/u.test(project) || !/^[a-zA-Z0-9_]+$/u.test(database) || !/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/u.test(address)) throw new TypeError('Invalid catalog database readiness identity')
+  return `database=; for attempt in $(jot 120); do podman exec ${project}_db_1 sh -c 'MYSQL_PWD=$(cat /run/secrets/db_password) mariadb --protocol=TCP -h${address} -u${database} ${database} -e "SELECT 1"' >/dev/null 2>&1 && { database=yes; break; }; sleep 2; done; [ "$database" = yes ]`
+}
+
+export function buildFreebsdMariaDbImageCommand (buildRoot = WORDPRESS.buildRoot, images = freebsdContainerImages()) {
   return `set -eu; root=${quote(`${buildRoot}/mariadb`)}; rm -rf -- "$root"; install -d -m 0755 "$root/rootfs/usr/local/sbin"; cat > "$root/rootfs/usr/local/sbin/webminai-entrypoint" <<'SH'
 #!/bin/sh
 set -eu
@@ -94,16 +99,16 @@ mariadb-admin --socket="$socket" -uroot --password="$root_password" shutdown >/d
 exec /usr/local/libexec/mariadbd --no-defaults --user=root --datadir="$datadir" --socket="$socket" --bind-address=0.0.0.0 --pid-file=/var/run/mysql/mariadb.pid
 SH
 chmod 0755 "$root/rootfs/usr/local/sbin/webminai-entrypoint"; cat > "$root/Containerfile" <<'CF'
-FROM ghcr.io/freebsd/freebsd-notoolchain:15.1
+FROM ${images.base}
 RUN env ASSUME_ALWAYS_YES=yes IGNORE_OS_VERSION=yes pkg bootstrap -r FreeBSD && pkg install -y mariadb118-server mariadb118-client && pkg clean -y
 COPY rootfs /
 EXPOSE 3306
 ENTRYPOINT ["/usr/local/sbin/webminai-entrypoint"]
 CF
-cd "$root"; TMPDIR=/var/db/containers/tmp podman build -t ${DATABASE_IMAGE} .`
+cd "$root"; TMPDIR=/var/db/containers/tmp podman build -t ${images.database} .`
 }
 
-function buildWordPress (application) {
+function buildWordPress (application, images) {
   return `set -eu; root=${quote(`${application.buildRoot}/app`)}; rm -rf -- "$root"; install -d -m 0755 "$root/rootfs/usr/local/sbin" "$root/rootfs/usr/local/etc/nginx" "$root/rootfs/opt"; fetch -qo "$root/wordpress.tgz" https://wordpress.org/wordpress-7.0.2.tar.gz; fetch -qo "$root/wordpress.sha1" https://wordpress.org/wordpress-7.0.2.tar.gz.sha1; expected=$(tr -d '[:space:]' < "$root/wordpress.sha1"); case "$expected" in ???????*) ;; *) exit 1;; esac; [ "$(sha1 -q "$root/wordpress.tgz")" = "$expected" ]; tar -xzf "$root/wordpress.tgz" -C "$root/rootfs/opt"; cat > "$root/rootfs/usr/local/etc/php-fpm.conf" <<'CONF'
 [global]
 daemonize = yes
@@ -132,31 +137,31 @@ cat > "$root/rootfs/usr/local/sbin/webminai-entrypoint" <<'SH'
 set -eu
 install -d -m 0755 /srv/wordpress /var/run/webminai
 if [ ! -f /srv/wordpress/wp-settings.php ]; then cp -a /opt/wordpress/. /srv/wordpress/; fi
-chown -R root:wheel /srv/wordpress
+php -r '$root="/srv/wordpress"; $paths=new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST); if (!chown($root, 0) || !chgrp($root, 0)) exit(1); foreach ($paths as $path) { if ($path->isLink() || !chown($path->getPathname(), 0) || !chgrp($path->getPathname(), 0)) exit(1); }'
 /usr/local/sbin/php-fpm -D -R
 exec /usr/local/sbin/nginx -g 'daemon off;'
 SH
 chmod 0755 "$root/rootfs/usr/local/sbin/webminai-entrypoint"; find "$root/rootfs/opt/wordpress" -type d -exec chmod 0755 {} +; find "$root/rootfs/opt/wordpress" -type f -exec chmod 0644 {} +; cat > "$root/Containerfile" <<'CF'
-FROM ghcr.io/freebsd/freebsd-notoolchain:15.1
+FROM ${images.base}
 RUN env ASSUME_ALWAYS_YES=yes IGNORE_OS_VERSION=yes pkg bootstrap -r FreeBSD && pkg install -y nginx php84 php84-curl php84-filter php84-gd php84-intl php84-mbstring php84-mysqli php84-opcache php84-session php84-xml php84-zip ca_root_nss && pkg clean -y
 COPY rootfs /
 EXPOSE 80
 ENTRYPOINT ["/usr/local/sbin/webminai-entrypoint"]
 CF
-cd "$root"; TMPDIR=/var/db/containers/tmp podman build -t ${WORDPRESS_IMAGE} .`
+cd "$root"; TMPDIR=/var/db/containers/tmp podman build -t ${images.wordpress} .`
 }
 
-function deploy (application) {
+function deploy (application, images) {
   return `set -eu; root=${quote(application.serviceRoot)}; install -d -m 0755 "$root/db" "$root/www"; podman network exists ${application.project} || podman network create --subnet ${application.subnet}.0/24 --gateway ${application.subnet}.1 ${application.project} >/dev/null; cat > "$root/compose.yml" <<'YAML'
 services:
   db:
-    image: ${DATABASE_IMAGE}
+    image: ${images.database}
     restart: always
     environment: { WEBMINAI_DB_NAME: ${application.database}, WEBMINAI_DB_USER: ${application.database} }
     networks: { default: { ipv4_address: ${application.subnet}.2 } }
     volumes: [ '${application.serviceRoot}/db:/var/db/mysql', '${application.credentials}:/run/secrets:ro' ]
   wordpress:
-    image: ${WORDPRESS_IMAGE}
+    image: ${images.wordpress}
     restart: always
     depends_on: [ db ]
     networks: { default: { ipv4_address: ${application.subnet}.3 } }

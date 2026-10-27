@@ -5,6 +5,29 @@ import { executeApprovedPlan, validateCommandPlan } from '../src/plan-validator.
 
 const ROOT_POLICY = rootExecutionPolicy({})
 
+test('sensitive Docker output retains its failure category without disclosing evidence', async () => {
+  const candidate = plan()
+  candidate.commands = [{ ...candidate.commands[0], command: 'docker compose version' }]
+  const results = await executeApprovedPlan({
+    plan: candidate,
+    policy: ROOT_POLICY,
+    approve: async () => true,
+    netdata: { async runCommand () { return { exitCode: 78, stderr: 'DOCKER_LAB_RUNTIME_UNAVAILABLE: private-test-value' } } }
+  })
+  assert.equal(results[0].failure.code, 'DOCKER_SERVICE_NOT_READY')
+  assert.doesNotMatch(JSON.stringify(results), /private-test-value/u)
+})
+
+test('redaction markers cannot become executable command inputs', () => {
+  for (const marker of ['[redacted-ssh-url]', '[redacted-64-hex]', '[redacted-private-key]']) {
+    for (const key of ['commands', 'revertCommands']) {
+      const candidate = plan()
+      candidate[key][0].command = `printf '%s' '${marker}' | sha256sum -c -`
+      assert.throws(() => validateCommandPlan(candidate, ROOT_POLICY), /redaction placeholder/u)
+    }
+  }
+})
+
 function plan () {
   return {
     summary: 'Inspect and then change',
@@ -153,6 +176,78 @@ test('controller retries only declared transient exit codes with short remote pr
   assert.throws(() => validateCommandPlan(retryPlan, ROOT_POLICY), /invalid retry attempts/)
 })
 
+test('declared timeout retry is bounded and never retries cancellation or uncertain work', async () => {
+  for (const state of ['timed_out', 'cancelled', 'failed', 'unknown', 'transport']) {
+    const candidate = plan()
+    candidate.commands = [candidate.commands[0]]
+    candidate.commands[0].retry = { attempts: 2, intervalMs: 0, exitCodes: [143], states: ['timed_out'] }
+    const events = []
+    const progress = []
+    let calls = 0
+    const results = await executeApprovedPlan({
+      plan: candidate,
+      policy: ROOT_POLICY,
+      approve: async () => true,
+      onExecutionEvent: event => events.push(event),
+      onProgress: event => progress.push(event),
+      netdata: {
+        async runCommand () {
+          calls++
+          if (state === 'transport') throw new Error('SSH connection lost')
+          return { exitCode: 143, state }
+        }
+      }
+    })
+    assert.equal(calls, state === 'timed_out' ? 2 : 1, state)
+    assert.notEqual(results[0].status, 'completed', state)
+    const prepared = events.filter(event => event.type === 'command_prepared')
+    assert.equal(new Set(prepared.map(event => event.attemptId)).size, calls)
+    assert.equal(progress.filter(event => event.phase === 'execution-retry').length, calls - 1)
+    if (state === 'unknown') assert.equal(progress.find(event => event.phase === 'execution-diagnostics').outcome, 'unknown')
+  }
+  const candidate = plan()
+  candidate.commands[0].retry = { attempts: 2, intervalMs: 0, exitCodes: [143] }
+  for (const states of [[], ['unknown'], ['cancelled'], ['failed', 'failed']]) {
+    candidate.commands[0].retry.states = states
+    assert.throws(() => validateCommandPlan(candidate, ROOT_POLICY), /invalid retry states/u)
+  }
+})
+
+test('a confirmed timeout can complete on its declared second attempt without repeating prior commands', async () => {
+  const candidate = plan()
+  candidate.commands[1].retry = { attempts: 2, intervalMs: 0, exitCodes: [143], states: ['timed_out'] }
+  const calls = []
+  const results = await executeApprovedPlan({
+    plan: candidate,
+    policy: ROOT_POLICY,
+    approve: async () => true,
+    netdata: {
+      async runCommand (command) {
+        calls.push(command)
+        return calls.length === 2 ? { exitCode: 143, state: 'timed_out', timedOut: true } : { exitCode: 0, state: 'succeeded' }
+      }
+    }
+  })
+  assert.deepEqual(results.map(result => result.status), ['completed', 'completed'])
+  assert.deepEqual(calls, [candidate.commands[0].command, candidate.commands[1].command, candidate.commands[1].command])
+  assert.equal(results[1].attempts, 2)
+})
+
+test('legacy exit-code-only retry policies never retry operator cancellation', async () => {
+  const candidate = plan()
+  candidate.commands = [candidate.commands[0]]
+  candidate.commands[0].retry = { attempts: 2, intervalMs: 0, exitCodes: [143] }
+  let calls = 0
+  const results = await executeApprovedPlan({
+    plan: candidate,
+    policy: ROOT_POLICY,
+    approve: async () => true,
+    netdata: { async runCommand () { calls++; return { exitCode: 143, state: 'cancelled' } } }
+  })
+  assert.equal(calls, 1)
+  assert.equal(results[0].status, 'failed')
+})
+
 test('only explicitly opted-in commands use durable jobs and their longer timeout policy', async () => {
   const jobPlan = plan()
   jobPlan.commands = [{
@@ -179,7 +274,11 @@ test('only explicitly opted-in commands use durable jobs and their longer timeou
       }
     }
   })
-  assert.deepEqual(calls, [{ command: 'perform-long-install', options: { timeoutSeconds: 1800 } }])
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, 'perform-long-install')
+  assert.equal(calls[0].options.timeoutSeconds, 1800)
+  assert.equal(typeof calls[0].options.onRecovery, 'function')
+  assert.equal(typeof calls[0].options.onStatus, 'function')
   assert.equal(results[0].status, 'completed')
   assert.equal(results[0].result.jobId, 'ef'.repeat(16))
 

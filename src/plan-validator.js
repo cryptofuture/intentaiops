@@ -1,5 +1,8 @@
 import { buildSafeDiagnosticCommand, isDeploymentPhase, validateDiagnostic } from './deployment-phases.js'
 import { classifyFailure } from './failure-signature.js'
+import { randomUUID } from 'node:crypto'
+import { executionDiagnostics, diagnosticSummary } from './execution-diagnostics.js'
+import { captureExecutionEvidence } from './host-execution-evidence.js'
 
 const RISK = new Set(['read', 'change', 'destructive'])
 
@@ -57,6 +60,7 @@ function validateCommandItems (commands, { policy, maxTimeoutMs, maxJobTimeoutMs
       throw new TypeError(`command ${item.id} is empty or too long`)
     }
     if (item.command.includes('\0')) throw new TypeError(`command ${item.id} contains a NUL byte`)
+    if (/\[redacted-(?:64-hex|private-key|ssh-url)\]/iu.test(item.command)) throw new Error(`command ${item.id} contains an unresolved redaction placeholder`)
     const invokesSudo = /(^|[^A-Za-z0-9_])sudo([^A-Za-z0-9_]|$)/u.test(item.command)
     if (invokesSudo) throw new Error(`command ${item.id} includes sudo but Stage 2 already executes as root`)
     if (/webminai(?::|%3a)command/iu.test(item.command)) {
@@ -146,13 +150,19 @@ export async function executeApprovedPlan ({
   netdata,
   approve,
   onResult = _entry => {},
+  onExecutionEvent,
+  onProgress,
+  completedCommandIds = [],
+  beforeCommand = async _item => true,
   requireRevert = true
 }) {
   validateCommandPlan(plan, policy, { requireRevert })
   const results = []
-  const statuses = new Map()
+  const statuses = new Map(completedCommandIds.map(id => [id, 'completed']))
 
   for (const item of plan.commands) {
+    if (statuses.get(item.id) === 'completed') continue
+    if (!await beforeCommand(item)) break
     if ((item.dependsOn ?? []).some(id => statuses.get(id) !== 'completed')) {
       const entry = { id: item.id, status: 'blocked' }
       results.push(entry)
@@ -171,19 +181,24 @@ export async function executeApprovedPlan ({
     }
 
     const startedAt = Date.now()
-    const execution = await runCommandWithRetry(item, netdata)
-    const { rawResult, executionError, attempts } = execution
+    await onExecutionEvent?.({ type: 'plan_approved', commandId: item.id })
+    const execution = await runCommandWithRetry(item, netdata, onExecutionEvent, onProgress, beforeCommand)
+    if (execution.paused) break
+    const { rawResult, executionError, attempts, recoveryRequired, diagnostics } = execution
     const result = redactSensitiveResult(item.command, rawResult)
-    const status = rawResult.exitCode === 0 ? 'completed' : 'failed'
-    const entry = /** @type {any} */ ({ id: item.id, phase: item.phase ?? null, status, durationMs: Date.now() - startedAt, result, ...(attempts > 1 ? { attempts } : {}) })
+    const status = rawResult.exitCode === 0 && !rawResult.timedOut && !['failed', 'timed_out', 'cancelled', 'unknown'].includes(rawResult.state) ? 'completed' : 'failed'
+    const entry = /** @type {any} */ ({ id: item.id, phase: item.phase ?? null, status, durationMs: Date.now() - startedAt, result, ...(attempts > 1 ? { attempts } : {}), ...(recoveryRequired ? { recoveryRequired: true } : {}) })
+    if (diagnostics?.length) entry.diagnostics = diagnostics
+    if (diagnostics?.length && (status === 'failed' || recoveryRequired)) await onProgress?.({ phase: 'execution-diagnostics', commandId: item.id, outcome: rawResult.exitCode === null || rawResult.state === 'unknown' ? 'unknown' : status, message: diagnosticSummary(diagnostics), diagnostics })
     if (status === 'failed') {
-      entry.failure = classifyFailure({ item, result, error: executionError })
-      if (item.diagnostic) entry.diagnostic = await runSafeDiagnostic(netdata, item.diagnostic)
+      entry.failure = classifyFailure({ item, result: rawResult, error: executionError })
+      if (isSensitiveCommand(item.command)) entry.failure.evidence = 'Sensitive command output withheld; inspect structured execution diagnostics.'
+      if (item.diagnostic && !recoveryRequired) entry.diagnostic = await runSafeDiagnostic(netdata, item.diagnostic)
     }
     results.push(entry)
     await onResult(entry)
     statuses.set(item.id, status)
-    if (rawResult.exitCode !== 0) break
+    if (status !== 'completed' || recoveryRequired) break
   }
 
   return results
@@ -198,26 +213,77 @@ function validateRetry (item) {
     throw new TypeError(`command ${item.id} has invalid retry exit codes`)
   }
   if ((attempts - 1) * intervalMs > 15 * 60 * 1000) throw new TypeError(`command ${item.id} has an excessive retry window`)
+  const states = item.retry.states
+  if (states !== undefined && (!Array.isArray(states) || states.length < 1 || states.length > 2 || states.some(state => !['failed', 'timed_out'].includes(state)) || new Set(states).size !== states.length)) throw new TypeError(`command ${item.id} has invalid retry states`)
 }
 
-async function runCommandWithRetry (item, netdata) {
+async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress, beforeCommand) {
   const retry = item.retry ?? { attempts: 1, intervalMs: 0, exitCodes: [] }
   let rawResult
   let executionError
+  let diagnostics
+  let recoveryRequired = false
+  let lastRecoveryState
   for (let attempt = 1; attempt <= retry.attempts; attempt++) {
+    const attemptId = randomUUID()
+    const event = (type, metadata = {}) => onExecutionEvent?.({ type, commandId: item.id, attemptId, metadata })
+    const recovery = async progress => {
+      if (!['reconnecting', 'reconnected', 'temporarily_unavailable', 'operator_review_required'].includes(progress.state) && !recoveryRequired) return
+      recoveryRequired = true
+      const state = progress.state === 'running' ? 'job_running' : progress.state
+      if (state === lastRecoveryState && state !== 'reconnecting') return
+      lastRecoveryState = state
+      const message = state === 'reconnecting'
+        ? `Reconnecting SSH (${progress.attempt}/${progress.attempts})...`
+        : state === 'reconnected'
+          ? 'SSH reconnected. Checking the recorded outcome.'
+          : state === 'job_running'
+            ? 'Job still running. Waiting for its recorded result.'
+            : state === 'temporarily_unavailable'
+              ? 'Connection unavailable. Retrying the existing job status.'
+              : 'Operator review needed before continuing. No command will be replayed.'
+      const metadata = { state, message, ...(progress.jobId ? { jobId: progress.jobId } : {}), ...(progress.attempt ? { attempt: progress.attempt } : {}) }
+      await event('execution_recovery', metadata)
+      await onProgress?.({ phase: 'execution-recovery', commandId: item.id, ...metadata })
+    }
+    const before = await captureExecutionEvidence(netdata, { item })
+    if (!await beforeCommand(item, { recheck: attempt === 1 })) return attempt === 1 ? { paused: true } : { rawResult, executionError, attempts: attempt - 1, recoveryRequired, diagnostics }
+    await event('command_prepared', before ? { evidenceBefore: before } : {})
+    await event('command_dispatched')
     executionError = undefined
     try {
       const execute = item.executionMode === 'job' ? netdata.runJob?.bind(netdata) : netdata.runCommand?.bind(netdata)
       if (!execute) throw new Error(`Netdata client does not support ${item.executionMode === 'job' ? 'job' : 'command'} execution`)
       rawResult = await execute(item.command, {
-        timeoutSeconds: Math.ceil(item.timeoutMs / 1000)
+        timeoutSeconds: Math.ceil(item.timeoutMs / 1000),
+        onRecovery: recovery,
+        ...(item.executionMode === 'job' ? { onStatus: recovery } : {}),
+        ...(onExecutionEvent && item.executionMode === 'job'
+          ? {
+              retainResult: true,
+              onStarted: status => event('command_acknowledged', { jobId: status.jobId, state: status.state })
+            }
+          : {})
       })
     } catch (error) {
       executionError = error
       rawResult = { exitCode: null, stdout: '', stderr: String(error?.message ?? error) }
     }
-    const retryable = retry.exitCodes.includes(rawResult.exitCode)
-    if (!retryable || attempt === retry.attempts) return { rawResult, executionError, attempts: attempt }
+    recoveryRequired ||= rawResult.recoveryRequired === true || Boolean(executionError) || rawResult.exitCode === null || rawResult.state === 'unknown'
+    const after = executionError && !executionError.reconnected && !executionError.cause?.reconnected
+      ? { version: 1, availability: 'unavailable', observedAt: new Date().toISOString() }
+      : await captureExecutionEvidence(netdata, { item, before })
+    diagnostics = executionDiagnostics({ item, result: rawResult, error: executionError, before, after })
+    const completed = rawResult.exitCode === 0 && !rawResult.timedOut && !['failed', 'timed_out', 'cancelled', 'unknown'].includes(rawResult.state)
+    await event(executionError || rawResult.exitCode === null || rawResult.state === 'unknown' ? 'command_outcome_unknown' : completed ? 'command_completed' : 'command_failed', { exitCode: rawResult.exitCode, ...(after ? { evidenceAfter: after } : {}), ...(diagnostics.length ? { diagnostics } : {}) })
+    if (recoveryRequired) {
+      await recovery({ state: 'operator_review_required' })
+      await onExecutionEvent?.({ type: 'execution_paused', metadata: { reason: 'recovery_requires_approval' } })
+      return { rawResult, executionError, attempts: attempt, recoveryRequired, diagnostics }
+    }
+    const retryable = rawResult.state !== 'cancelled' && retry.exitCodes.includes(rawResult.exitCode) && (!retry.states || retry.states.includes(rawResult.state))
+    if (!retryable || attempt === retry.attempts) return { rawResult, executionError, attempts: attempt, recoveryRequired, diagnostics }
+    await onProgress?.({ phase: 'execution-retry', commandId: item.id, attempt: attempt + 1, attempts: retry.attempts, message: `Recorded ${rawResult.state ?? 'failure'} (exit ${rawResult.exitCode}). Starting declared attempt ${attempt + 1}/${retry.attempts}; uncertain work is never retried.` })
     if (retry.intervalMs > 0) await new Promise(resolve => setTimeout(resolve, retry.intervalMs))
   }
 }
@@ -250,5 +316,5 @@ function redactSensitiveResult (command, result) {
 }
 
 function isSensitiveCommand (command) {
-  return /\/root\/[A-Za-z0-9_.-]+_credentials(?:\/|\b)|C:\\ProgramData\\WebminAI\\credentials(?:\\|\b)|RandomNumberGenerator|openssl\s+rand|\/dev\/(?:u?random)\b|\b(?:docker\s+compose|docker-compose)\b/iu.test(command)
+  return /\/root\/[A-Za-z0-9_.-]+_credentials(?:\/|\b)|\/\.webminai\/credentials(?:\/|\b)|C:\\ProgramData\\WebminAI\\credentials(?:\\|\b)|RandomNumberGenerator|openssl\s+rand|\/dev\/(?:u?random)\b|\b(?:docker\s+compose|docker-compose)\b/iu.test(command)
 }

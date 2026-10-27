@@ -1,15 +1,353 @@
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { CodexPlanner } from '../src/codex-planner.js'
+import { CodexPlanner as ProductionCodexPlanner } from '../src/codex-planner.js'
 import { listCommonTasks } from '../src/common-tasks.js'
+import { runProcess } from '../src/process-runner.js'
 
-test('Codex planner rejects unsupported model settings', () => {
-  assert.throws(() => new CodexPlanner({ model: 'gpt-5.5' }), /unsupported Codex model/u)
-  assert.throws(() => new CodexPlanner({ model: 'gpt-6-astra' }), /unsupported Codex model/u)
-  assert.throws(() => new CodexPlanner({ reasoningEffort: 'high' }), /unsupported Codex reasoning effort/u)
+class CodexPlanner extends ProductionCodexPlanner {
+  constructor (options = {}) {
+    super({ configurationRunner: async () => ({ code: 0, stdout: '[]' }), ...options })
+  }
+}
+
+for (const home of ['/Users/mac', null]) {
+  test(`macOS planning uses root Stage 2 and verified Colima context: home=${home}`, async () => {
+    const planner = new CodexPlanner()
+    let prompt
+    const command = home ? 'docker compose -p app ps' : 'uptime'
+    planner.runStructured = async options => {
+      prompt = options.prompt
+      return JSON.stringify({ summary: 'Inspect macOS', changeOverview: 'Read current state', modifiedFiles: home ? [`${home}/.webminai/services/app/compose.yaml`] : [], commands: [{ id: 'inspect', command, purpose: 'Inspect', risk: 'read', timeoutMs: 5000, requiresSudo: false, dependsOn: [] }], revertCommands: [] })
+    }
+    const inventory = { webminaiExecution: { platform: 'macos', runtimeHome: home }, webminaiDocker: { preferred: Boolean(home), ready: Boolean(home) } }
+    const result = await planner.plan({ request: 'Inspect the current macOS state without changes', inventory, policy: {} })
+    assert.equal(result.commands[0].command, command)
+    assert.match(prompt, /Signed Stage 2 commands execute as root through \/bin\/sh/u)
+    assert.doesNotMatch(prompt, /administrative changes use sudo|sudo -S|sudo -n/u)
+    assert.doesNotMatch(prompt, /Store service credentials in a dedicated root-only directory named \/root/u)
+    if (home) {
+      assert.ok(prompt.includes(`${home}/.webminai/credentials/<service>`))
+      assert.ok(prompt.includes(`${home}/.webminai/services/<service>/compose.yaml`))
+      assert.ok(prompt.includes(`DOCKER_HOST=unix://${home}/.colima/default/docker.sock`))
+      assert.match(prompt, /unset DOCKER_CONTEXT/u)
+    } else {
+      assert.match(prompt, /verified Colima owner is unavailable/u)
+      assert.match(prompt, /Native macOS work remains/u)
+      assert.doesNotMatch(prompt, /\/Users\/(?:undefined|null)/u)
+    }
+  })
+}
+
+test('AI plans cannot set controller-owned rollback mode', async () => {
+  const planner = new CodexPlanner()
+  let attempts = 0
+  planner.runStructured = async () => {
+    attempts++
+    return JSON.stringify({
+      summary: 'Inspect',
+      changeOverview: 'Read-only observation',
+      modifiedFiles: [],
+      operatorRollback: true,
+      commands: [{ id: 'inspect', command: 'true', purpose: 'Inspect', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [] }],
+      revertCommands: []
+    })
+  }
+  await assert.rejects(planner.plan({ request: 'Inspect', inventory: { os: 'linux' }, policy: {} }), /operator rollback mode/u)
+  assert.equal(attempts, 3)
+})
+
+test('catalog revision references preserve public checksums without unredacting history', async () => {
+  let prompt
+  const planner = new CodexPlanner()
+  planner.runStructured = async options => {
+    prompt = options.prompt
+    return JSON.stringify({ summary: 'Inspect', changeOverview: 'Inspect pending work', modifiedFiles: [], commands: [{ id: 'inspect', command: 'true', purpose: 'Inspect', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [] }], revertCommands: [] })
+  }
+  await planner.plan({
+    request: 'Inspect pending work',
+    taskId: 44,
+    catalogId: 'mattermost-linux',
+    inventory: { os: 'linux', webminaiLinuxContext: { identity: { id: 'ubuntu', versionId: '24.04', architecture: 'x86_64' }, management: { family: 'debian', packageManager: 'apt', serviceManager: 'systemd' } }, webminaiDocker: { preferred: false } },
+    previousAttempts: [{ id: 44, plan: { commands: [{ id: 'old', command: `echo password=KNOWN_SECRET ${'a'.repeat(64)}` }], revertCommands: [] }, executionEvidence: { commands: [], rollbackCommands: [] } }],
+    retryInstructions: 'Review current verified acquisition, not redacted historical payloads'
+  })
+  assert.match(prompt, /Current verified catalog templates/u)
+  assert.match(prompt, /0fc1637ca6cec0a53fc7112a22f67651dba50fe3667e5ed957acf0d3bbb9da93/u)
+  assert.ok(prompt.includes("password=$(sed -n 1p '/root/mattermost_credentials/database_password')"))
+  assert.ok(!prompt.includes('KNOWN_SECRET'))
+  assert.ok(!prompt.includes('a'.repeat(64)))
+})
+
+test('shared planner boundary isolates credentials and embeds references without execution tools', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-boundary-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  for (const [name, value] of Object.entries({ VAULT_TEST: 'synthetic-vault-only-value', SSH_AUTH_SOCK: '/synthetic/private-agent', OPENAI_API_KEY: 'synthetic-provider-auth' })) {
+    const previous = process.env[name]
+    t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous })
+    process.env[name] = value
+  }
+  await writeFile(path.join(serverDirectory, 'context.md'), 'Role: boundary fixture\npassword=fixture-context-password\n')
+  for (const model of ['gpt-5.6-luna', 'mimo-v2.6-pro']) {
+    const planner = new CodexPlanner({
+      model,
+      runner: async (_, args, options) => {
+        const environment = options.env ?? process.env
+        assert.equal(environment.VAULT_TEST, undefined)
+        assert.equal(environment.SSH_AUTH_SOCK, undefined)
+        assert.equal(options.env?.OPENAI_API_KEY, 'synthetic-provider-auth')
+        assert.equal(options.env?.PATH, process.env.PATH)
+        assert.ok(options.env)
+        for (const feature of ['shell_tool', 'unified_exec', 'apps', 'plugins', 'multi_agent', 'browser_use', 'computer_use', 'view_image', 'image_generation', 'hooks', 'workspace_dependencies', 'code_mode']) {
+          assert.ok(args.includes(`features.${feature}=false`), feature)
+        }
+        assert.ok(args.includes('mcp_servers={}'))
+        assert.ok(args.includes('web_search="disabled"'))
+        assert.ok(args.includes('shell_environment_policy.inherit="none"'))
+        assert.match(options.input, /Role: boundary fixture/)
+        assert.match(options.input, /inventory-marker/)
+        assert.match(options.input, /policy-marker/)
+        const effectivePolicy = JSON.parse(await readFile(path.join(options.cwd, 'policy.json'), 'utf8'))
+        assert.equal(effectivePolicy.maxTimeoutMs, model === 'mimo-v2.6-pro' ? 10000 : 300000)
+        assert.equal(effectivePolicy.maxJobTimeoutMs, model === 'mimo-v2.6-pro' ? 20000 : 3600000)
+        assert.match(options.input, /No execution or connector tools are available/)
+        assert.doesNotMatch(options.input, /fixture-context-password/)
+        assert.doesNotMatch(await readFile(path.join(options.cwd, 'context.md'), 'utf8'), /fixture-context-password/)
+        return { code: 0, stdout: '{}', stderr: '' }
+      }
+    })
+    await planner.runStructured({ serverDirectory, inventory: { note: 'inventory-marker' }, policy: { note: 'policy-marker', ...(model === 'mimo-v2.6-pro' ? { maxTimeoutMs: 10000, maxJobTimeoutMs: 20000 } : {}) }, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' })
+  }
+  assert.equal(process.env.VAULT_TEST, 'synthetic-vault-only-value')
+  assert.equal(process.env.SSH_AUTH_SOCK, '/synthetic/private-agent')
+})
+
+test('installed Codex exposes no execution or connector tools to a local fixture provider', { skip: process.env.INTENT_CODEX_BOUNDARY_TEST !== '1' }, async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'intent-codex-tools-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  let observed
+  const server = createServer(async (request, response) => {
+    const chunks = []
+    for await (const chunk of request) chunks.push(chunk)
+    if (request.url.endsWith('/responses')) observed = JSON.parse(Buffer.concat(chunks).toString())
+    response.writeHead(400, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ error: { message: 'Fixture stops after inspecting the request', type: 'invalid_request_error' } }))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  const base = `http://127.0.0.1:${server.address().port}`
+  await writeFile(path.join(directory, 'mimo.config.toml'), `[features]\nshell_tool=true\nunified_exec=true\ngoals=true\n[mcp_servers.intent_fixture]\ncommand="false"\n[mcp_servers.intent_http]\nurl="${base}/mcp"\n`)
+  for (const model of ['gpt-5.6-luna', 'mimo-v2.6-pro']) {
+    observed = null
+    const progress = []
+    const planner = new CodexPlanner({
+      model,
+      configurationRunner: (binary, args, options) => runProcess(binary, args, { ...options, env: { ...options.env, CODEX_HOME: directory } }),
+      runner: (binary, args, options) => runProcess(binary, [
+        ...args.slice(0, -1), '--config', 'model_provider="intent_fixture"',
+        '--config', `model_providers.intent_fixture={name="Intent fixture",base_url="${base}",wire_api="responses",env_key="OPENAI_API_KEY",request_max_retries=0,stream_max_retries=0}`,
+        '-'
+      ], { ...options, timeoutMs: 15000, env: { ...options.env, CODEX_HOME: directory, OPENAI_API_KEY: 'synthetic-fixture-auth', OPENAI_BASE_URL: base } })
+    })
+    let failure
+    await assert.rejects(planner.runStructured({ serverDirectory: directory, inventory: {}, policy: {}, prompt: 'Return an empty JSON object.', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture', onProgress: event => progress.push(event) }), error => { failure = error.message; return true })
+    assert.ok(observed, `the installed CLI did not reach the local provider: ${failure}`)
+    assert.deepEqual((observed.tools ?? []).map(tool => tool.name ?? tool.type).filter(name => name !== 'request_user_input'), [], model)
+    assert.doesNotMatch(JSON.stringify(progress), /Code Mode is unavailable because code-mode host is disabled/u)
+  }
+})
+
+test('planner rejects oversized embedded references before invoking Codex', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-limit-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  const planner = new CodexPlanner({ runner: async () => assert.fail('oversized references reached Codex') })
+  await assert.rejects(planner.runStructured({ serverDirectory, inventory: { note: 'x'.repeat(2 * 1024 * 1024) }, policy: {}, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' }), /2 MiB planning limit/u)
+})
+
+test('planner disables discovered MCP transports without forwarding their credentials', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-mcp-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  const servers = [{ name: 'stdio.fixture', transport: { type: 'stdio', command: 'fixture-secret-command' } }, { name: 'http.fixture', transport: { type: 'streamable_http', url: 'http://fixture-secret-url', http_headers: { Authorization: 'fixture-secret-header' } } }]
+  const planner = new CodexPlanner({
+    configurationRunner: async () => ({ code: 0, stdout: JSON.stringify(servers) }),
+    runner: async (_, args) => {
+      assert.ok(args.includes('mcp_servers={"stdio.fixture"={command="false",enabled=false},"http.fixture"={url="http://127.0.0.1:9/disabled",enabled=false}}'))
+      assert.doesNotMatch(args.join(' '), /fixture-secret/u)
+      return { code: 0, stdout: '{}', stderr: '' }
+    }
+  })
+  await planner.runStructured({ serverDirectory, inventory: {}, policy: {}, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' })
+})
+
+test('planner fails closed when MCP configuration cannot be verified', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-config-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  for (const configuration of [{ code: 1 }, { code: 0, timedOut: true }, { code: 0, signal: 'SIGTERM' }, { code: 0, stdout: 'not JSON' }, { code: 0, stdout: '{}' }, { code: 0, stdout: '[null]' }, { code: 0, stdout: '[{"name":"fixture","transport":{"type":"unknown"}}]' }]) {
+    const planner = new CodexPlanner({ configurationRunner: async () => configuration, runner: async () => assert.fail('unverified configuration reached Codex') })
+    await assert.rejects(planner.runStructured({ serverDirectory, inventory: {}, policy: {}, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'fixture' }), /planning is blocked/u)
+  }
+})
+
+test('AI plans expose durable jobs while normal commands keep their timeout limit', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-ai-jobs-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  const schema = JSON.parse(await readFile(new URL('../schemas/command-plan.schema.json', import.meta.url), 'utf8'))
+  for (const graph of ['commands', 'revertCommands']) {
+    assert.ok(schema.properties[graph].items.required.includes('executionMode'))
+    assert.deepEqual(schema.properties[graph].items.properties.executionMode.enum, ['job', null])
+    assert.equal(schema.properties[graph].items.properties.timeoutMs.maximum, 3600000)
+  }
+  for (const [mode, timeout, accepted] of [['job', 1800000, true], [null, 300000, true], [null, 1800000, false], ['job', 3600001, false]]) {
+    const output = {
+      summary: 'Install htop',
+      changeOverview: 'Install a reviewed package',
+      modifiedFiles: ['/usr/bin/htop'],
+      assumptions: [],
+      warnings: [],
+      requiresConfirmation: true,
+      commands: [{ id: 'install', command: 'DEBIAN_FRONTEND=noninteractive apt-get install -y htop', purpose: 'Install htop', risk: 'change', timeoutMs: timeout, executionMode: mode, requiresSudo: true, phase: 'packages', diagnostic: null, dependsOn: [] }],
+      revertCommands: [{ id: 'remove', command: 'apt-get remove -y htop', purpose: 'Remove htop', risk: 'change', timeoutMs: 300000, executionMode: null, requiresSudo: true, phase: 'cleanup', diagnostic: null, dependsOn: [] }]
+    }
+    const planner = new CodexPlanner({
+      runner: async (_, __, options) => {
+        assert.match(options.input, /Intent AI Ops starts and observes signed durable jobs itself/)
+        return { code: 0, stdout: JSON.stringify(output), stderr: '' }
+      }
+    })
+    const pending = planner.plan({ serverDirectory, request: 'Install htop', inventory: { os: 'linux' }, policy: { executionIdentity: 'root' } })
+    if (accepted) {
+      const result = await pending
+      assert.equal(result.commands[0].executionMode, mode ?? undefined)
+      assert.equal(Object.hasOwn(result.revertCommands[0], 'executionMode'), false)
+    } else await assert.rejects(pending, /invalid timeout/)
+  }
+})
+
+test('AI schema preserves reviewed bounded retries and normalizes nullable policies', async () => {
+  const schema = JSON.parse(await readFile(new URL('../schemas/command-plan.schema.json', import.meta.url), 'utf8'))
+  for (const graph of ['commands', 'revertCommands']) {
+    assert.ok(schema.properties[graph].items.required.includes('retry'))
+    assert.deepEqual(schema.properties[graph].items.properties.retry, { $ref: '#/$defs/retry' })
+  }
+  const make = retry => ({ summary: 'Observe bounded readiness', changeOverview: 'Read-only readiness observation', modifiedFiles: [], assumptions: [], warnings: [], requiresConfirmation: true, commands: [{ id: 'observe', command: 'true', purpose: 'Observe readiness', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [], retry }], revertCommands: [] })
+  const planner = new CodexPlanner()
+  for (const retry of [null, { attempts: 73, intervalMs: 10000, exitCodes: [75], states: null }, { attempts: 3, intervalMs: 0, exitCodes: [75], states: ['failed'] }]) {
+    planner.runStructured = async () => JSON.stringify(make(retry))
+    const result = await planner.plan({ request: 'Observe readiness', inventory: {}, policy: {}, serverDirectory: '/unused' })
+    assert.deepEqual(result.commands[0].retry, retry === null ? undefined : Object.fromEntries(Object.entries(retry).filter(([, value]) => value !== null)))
+  }
+  for (const retry of [{ attempts: 121, intervalMs: 0, exitCodes: [75] }, { attempts: 2, intervalMs: 0, exitCodes: [0] }, { attempts: 120, intervalMs: 10000, exitCodes: [75] }]) {
+    planner.runStructured = async () => JSON.stringify(make(retry))
+    await assert.rejects(planner.plan({ request: 'Observe readiness', inventory: {}, policy: {}, serverDirectory: '/unused' }), /retry/u)
+  }
+})
+
+test('Codex planner accepts catalog model identifiers and validates setting syntax', () => {
+  assert.equal(new CodexPlanner().model, 'gpt-6.1-sol')
+  assert.equal(new CodexPlanner().reasoningEffort, 'low')
+  assert.throws(() => new CodexPlanner({ model: '--config=malicious' }), /invalid Codex model/u)
+  assert.throws(() => new CodexPlanner({ model: 'model\ncontrol' }), /invalid Codex model/u)
+  assert.doesNotThrow(() => new CodexPlanner({ model: 'gpt-6-astra', reasoningEffort: 'ultra' }))
+  assert.doesNotThrow(() => new CodexPlanner({ model: 'gpt-future', reasoningEffort: 'max' }))
+  assert.doesNotThrow(() => new CodexPlanner({ model: 'mimo-v2.6-pro', reasoningEffort: 'high' }))
+  assert.throws(() => new CodexPlanner({ reasoningEffort: 'invalid' }), /unsupported Codex reasoning effort/u)
+})
+
+test('Codex model discovery uses native capabilities, includes hidden models and retains MiMo high', async () => {
+  let call
+  const planner = new CodexPlanner({
+    configurationRunner: async (binary, args, options) => {
+      call = { binary, args, options }
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          models: [
+            { slug: 'gpt-6.1-sol', supported_reasoning_levels: [{ effort: 'low' }, { effort: 'max' }], model_messages: { instructions_template: 'never expose catalog prompts' } },
+            { slug: 'gpt-hidden', visibility: 'hide', supported_reasoning_levels: [{ effort: 'none' }, { effort: 'ultra' }] }
+          ]
+        })
+      }
+    }
+  })
+  assert.deepEqual(await planner.listModels(), [
+    { model: 'gpt-6.1-sol', reasoningEfforts: ['low', 'max'] },
+    { model: 'gpt-hidden', reasoningEfforts: ['none', 'ultra'] },
+    { model: 'mimo-v2.6-pro', reasoningEfforts: ['low', 'medium', 'high'] }
+  ])
+  assert.deepEqual(call.args.slice(-2), ['debug', 'models'])
+  assert.equal(call.options.env.VAULT_TEST, undefined)
+  assert.equal(call.options.timeoutMs, 15000)
+})
+
+test('Codex model discovery rejects failed, truncated and malformed catalogs without using stderr', async () => {
+  const model = { slug: 'gpt-test', supported_reasoning_levels: [{ effort: 'low' }] }
+  for (const result of [
+    { code: 1, stderr: 'private provider detail' },
+    { code: 0, timedOut: true },
+    { code: 0, stdoutTruncated: true },
+    { code: 0, stdout: 'not json' },
+    { code: 0, stdout: JSON.stringify({ models: [] }) },
+    { code: 0, stdout: JSON.stringify({ models: [model, model] }) },
+    { code: 0, stdout: JSON.stringify({ models: [{ supported_reasoning_levels: [{ effort: 'low' }] }] }) },
+    { code: 0, stdout: JSON.stringify({ models: [{ ...model, supported_reasoning_levels: [{}] }] }) },
+    { code: 0, stdout: JSON.stringify({ models: [{ ...model, slug: '--bad' }] }) },
+    { code: 0, stdout: JSON.stringify({ models: [{ ...model, supported_reasoning_levels: [{ effort: 'invalid' }] }] }) }
+  ]) {
+    const planner = new CodexPlanner({ configurationRunner: async () => result })
+    await assert.rejects(planner.listModels(), error => !error.message.includes('private provider detail'))
+  }
+})
+
+test('Codex planner uses the MiMo profile without ignoring user config', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'webminai-mimo-profile-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  let call
+  const planner = new CodexPlanner({
+    model: 'mimo-v2.6-pro',
+    reasoningEffort: 'high',
+    runner: async (binary, args, options) => {
+      call = {
+        binary,
+        args,
+        options,
+        schema: JSON.parse(await readFile(path.join(options.cwd, 'schema.json'), 'utf8'))
+      }
+      return {
+        code: 0,
+        stdout: String.fromCharCode(96).repeat(3) + 'json\n' + JSON.stringify({
+          decision: 'verified_task',
+          catalogId: 'host-health-linux',
+          relevantCatalogIds: ['host-health-linux'],
+          confidence: 'high',
+          rationale: 'The request exactly asks for the reviewed read-only health report.'
+        }) + '\n' + String.fromCharCode(96).repeat(3),
+        stderr: ''
+      }
+    }
+  })
+
+  await planner.routeTask({
+    serverDirectory,
+    request: 'Give me a full health report.',
+    inventory: { os: 'linux' },
+    candidates: [{ id: 'host-health-linux', label: 'Host health', description: 'Read-only health report' }]
+  })
+
+  assert.equal(call.binary, 'codex')
+  assert.deepEqual(call.args.slice(0, 4), ['--no-daemon', '--profile', 'mimo', 'exec'])
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'mimo-v2.6-pro')
+  assert.equal(call.args[call.args.indexOf('--config') + 1], 'model_reasoning_effort="high"')
+  assert.ok(call.args.includes('approval_policy="never"'))
+  assert.ok(call.args.includes('--strict-config'))
+  assert.ok(call.args.includes('--sandbox') && call.args.includes('read-only'))
+  assert.equal(call.args.includes('--ignore-user-config'), false)
+  assert.equal(call.args.includes('--output-schema'), false)
+  assert.ok(call.args.includes('--ignore-rules'))
+  assert.match(call.options.input, /Return only JSON matching schema\.json/u)
+  assert.deepEqual(call.schema.required, ['decision', 'catalogId', 'relevantCatalogIds', 'foundationIds', 'foundationMode', 'confidence', 'rationale'])
 })
 
 test('Codex semantically routes requests against the verified Linux catalog', async t => {
@@ -152,7 +490,7 @@ test('Codex planner reads bounded verified candidate intelligence for custom tas
   assert.deepEqual(planned.commands[0].source, { type: 'ai-planned' })
 })
 
-test('Codex planner uses luna medium in an isolated sanitized job directory', async t => {
+test('Codex planner uses GPT-6.1 Sol low in an isolated sanitized job directory', async t => {
   const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'webminai-server-test-'))
   t.after(() => rm(serverDirectory, { recursive: true, force: true }))
   await writeFile(path.join(serverDirectory, 'context.md'), 'Role: web server\n')
@@ -204,9 +542,9 @@ test('Codex planner uses luna medium in an isolated sanitized job directory', as
   })
   assert.equal(result.commands[0].command, 'uptime')
   assert.equal(call.binary, 'codex')
-  assert.deepEqual(call.args.slice(0, 2), ['exec', '--cd'])
-  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-5.6-luna')
-  assert.equal(call.args[call.args.indexOf('--config') + 1], 'model_reasoning_effort="medium"')
+  assert.deepEqual(call.args.slice(0, 3), ['--no-daemon', 'exec', '--cd'])
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6.1-sol')
+  assert.equal(call.args[call.args.indexOf('--config') + 1], 'model_reasoning_effort="low"')
   assert.ok(call.args.includes('approval_policy="never"'))
   assert.ok(call.args.includes('--strict-config'))
   assert.ok(call.args.includes('--ignore-user-config'))
@@ -301,6 +639,10 @@ test('Codex planner prefers Compose and keeps generated service credentials out 
   })
   assert.equal(plan.commands[1].command.startsWith('docker compose'), true)
   assert.match(prompt, /Prefer Docker Compose/)
+  assert.match(prompt, /including error handlers/u)
+  assert.match(prompt, /A read command must never stop services/u)
+  assert.match(prompt, /falls back to \/bin\/sh/u)
+  assert.match(prompt, /portable octal mode arithmetic uses a leading 0/u)
   assert.match(prompt, /Never place a generated or literal password/)
   assert.match(prompt, /\/root\/<service>_credentials/)
 })
@@ -414,7 +756,7 @@ test('Codex planner supplies Linux WordPress checksum and external listener fact
   assert.match(prompt, /Alpine 3\.23 uses nginx, mariadb, mariadb-client/)
   assert.match(prompt, /--no-recommends is accepted by the install subcommand/)
   assert.match(prompt, /Commands execute independently and do not share shell variables/)
-  assert.match(prompt, /Give package installation commands timeoutMs 300000/)
+  assert.match(prompt, /Give synchronous package installation commands timeoutMs 300000/)
   assert.match(prompt, /Use a stable site identity webminai-wordpress-18101/)
   assert.match(prompt, /exact task-state directory for this plan is \/var\/lib\/webminai\/task-state\/42/)
   assert.doesNotMatch(prompt, /<taskId>/)
@@ -1437,7 +1779,16 @@ test('Codex planner supplies sanitized retry history and correction instructions
       id: 8,
       request: 'inspect alerts',
       status: 'failed',
-      plan: { commands: [{ command: "curl 'http://127.0.0.1:19999/api/v3/alarms'" }] },
+      plan: {
+        commands: [{ id: 'baseline', command: 'printf completed-only-marker' }, { id: 'install', command: "curl 'http://127.0.0.1:19999/api/v3/alarms'" }],
+        revertCommands: [{ id: 'cleanup', command: 'printf rollback-evidence' }]
+      },
+      executionEvidence: {
+        commands: [{ commandId: 'baseline', status: 'completed' }, { commandId: 'install', status: 'failed', evidence: 'token=journal-secret' }],
+        rollbackCommands: [],
+        stateVersion: 'recorded-version',
+        revisions: [{ unnecessary: 'do-not-copy-revisions' }]
+      },
       results: [{ id: 'install', status: 'failed', result: { stderr: 'WinGet is not available to LocalSystem. token=visible-secret ssh://admin@example.test' } }],
       progress: [
         { type: 'reasoning', message: 'used obsolete endpoint' },
@@ -1455,6 +1806,14 @@ test('Codex planner supplies sanitized retry history and correction instructions
   assert.match(prompt, /WinGet is not available to LocalSystem/)
   assert.match(prompt, /Publisher was localized in the registry/)
   assert.match(prompt, /Use the current alerts endpoint/)
+  assert.equal(retryHistory[0].executionEvidence.commands[0].status, 'completed')
+  assert.equal(retryHistory[0].executionEvidence.stateVersion, 'recorded-version')
+  assert.equal(retryHistory[0].executionEvidence.revisions, undefined)
+  assert.match(prompt, /recorded-version/)
+  assert.match(prompt, /api\/v3\/alarms/)
+  assert.match(prompt, /rollback-evidence/)
+  assert.doesNotMatch(prompt, /completed-only-marker/)
+  assert.doesNotMatch(JSON.stringify(retryHistory) + prompt, /journal-secret|do-not-copy-revisions/)
 })
 
 test('Codex planner streams JSONL progress while reading the final schema response from file', async t => {
@@ -1499,6 +1858,44 @@ test('Codex planner streams JSONL progress while reading the final schema respon
   })
   assert.equal(result.summary, 'Read uptime')
   assert.deepEqual(events.map(event => event.type), ['thread.started', 'reasoning'])
+})
+
+test('Codex JSONL errors explain failed planning without exposing credentials or retrying', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-error-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  for (const message of ['Selected model is at capacity. Please try a different model. token=private-fixture-token', null]) {
+    let calls = 0
+    const planner = new CodexPlanner({
+      runner: async (binary, args, options) => {
+        calls++
+        if (message) options.onStdout(JSON.stringify({ type: 'error', message }) + '\n')
+        return { code: 1, stdout: '', stderr: '' }
+      }
+    })
+    await assert.rejects(planner.plan({ serverDirectory, request: 'Inspect uptime', inventory: {}, taskId: 7, onProgress: () => {} }), error => {
+      assert.match(error.message, message ? /Selected model is at capacity/u : /exit code 1/u)
+      assert.doesNotMatch(error.message, /private-fixture-token/u)
+      return true
+    })
+    assert.equal(calls, 1)
+  }
+})
+
+test('Codex interruptions and missing final responses fail without accepting partial output or retrying', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-interruption-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  for (const progress of [false, true]) {
+    for (const [result, pattern] of [
+      [{ code: 0, timedOut: true, stdout: '{}', stderr: '' }, /timed out after 300 seconds/u],
+      [{ code: 0, signal: 'SIGTERM', stdout: '{}', stderr: '' }, /was interrupted \(SIGTERM\)/u],
+      [{ code: 0, stdout: '', stderr: '' }, progress ? /produced no final response/u : /empty final response/u]
+    ]) {
+      let calls = 0
+      const planner = new CodexPlanner({ runner: async () => { calls++; return result } })
+      await assert.rejects(planner.plan({ serverDirectory, request: 'Inspect uptime', inventory: {}, taskId: 7, ...(progress ? { onProgress: () => {} } : {}) }), pattern)
+      assert.equal(calls, 1)
+    }
+  }
 })
 
 test('Codex consultation returns advice and only compact summaries flow into the authoritative task', async t => {
@@ -1555,7 +1952,11 @@ test('Codex consultation returns advice and only compact summaries flow into the
   const advice = await planner.consult({
     serverDirectory,
     question: 'How should nginx be installed?',
-    inventory: { os: 'freebsd' },
+    inventory: {
+      os: 'freebsd',
+      webminaiHealthEvidence: { stdout: 'FAILED_SERVICE_EVIDENCE', secret: 'hidden-health-value' },
+      webminaiSystemUpdateEvidence: { stdout: 'UPDATE_DELTA_EVIDENCE', password: 'hidden-update-value' }
+    },
     policy: { executionIdentity: 'root' },
     consultationContext: prior
   })
@@ -1564,6 +1965,11 @@ test('Codex consultation returns advice and only compact summaries flow into the
   assert.deepEqual(calls[0].context, [{ id: 4, summary: 'Keep the existing firewall policy.' }])
   assert.doesNotMatch(JSON.stringify(calls[0].context), /full answer/)
   assert.match(calls[0].prompt, /nothing in this response will be executed/)
+  assert.match(calls[0].prompt, /Read inventory\.json before declaring evidence unavailable/)
+  assert.match(calls[0].prompt, /webminaiHealthEvidence and webminaiSystemUpdateEvidence/)
+  assert.match(calls[0].prompt, /FAILED_SERVICE_EVIDENCE/)
+  assert.match(calls[0].prompt, /UPDATE_DELTA_EVIDENCE/)
+  assert.doesNotMatch(calls[0].prompt, /hidden-health-value|hidden-update-value/)
 
   await planner.plan({
     serverDirectory,

@@ -17,16 +17,21 @@ export function buildFreebsdJellyfinTask (taskId, freebsdExecution) {
       warnings: ['The controlled route uses empty media and does not enable discovery, hardware acceleration, transcoding tests, TLS, or public remote access.'],
       commands: [
         item('prepare-jellyfin', prepare(state), 'Capture the package baseline and prepare isolated directories and protected onboarding credentials'),
-        item('install-jellyfin-runtime', installRuntime(state), `Install the native FreeBSD Jellyfin ${VERSION} and nginx packages`, ['prepare-jellyfin'], 1800000, 'job'),
+        item('install-jellyfin-runtime', installRuntime(state), `Install the native FreeBSD Jellyfin ${VERSION} and nginx packages`, ['prepare-jellyfin'], 3600000, 'job'),
         item('deploy-jellyfin', deploy(), 'Configure rc.d, start Jellyfin and nginx, and initialize from protected credentials', ['install-jellyfin-runtime'], 900000, 'job'),
         item('verify-jellyfin', verify(), 'Verify version, marker, web UI, database, ownership, and restart recovery', ['deploy-jellyfin'], 600000, 'job')
       ],
       revertCommands: [item('remove-jellyfin', remove(state), 'Remove only task-owned Jellyfin containers, storage, state, and credentials', [], 600000, 'job', 'destructive')]
     },
     verifyApplied: `${primaryAddress()}; response=$(mktemp); trap 'rm -f -- "$response"' EXIT; curl --fail --silent --show-error --max-time 20 --output "$response" http://$address:18113/; grep -Fxq ${MARKER} "$response"; curl --fail --silent --show-error --max-time 20 --output "$response" http://$address:18113/jellyfin/System/Info/Public; grep -Fq '"Version":"${VERSION}"' "$response"`,
+    verifyRuntime: runtimeProbe(),
     verifyReverted: `test ! -e ${quote(SERVICE_ROOT)} && test ! -e ${quote(state)} && ! pkg info -e jellyfin >/dev/null 2>&1 && ! pkg info -e nginx >/dev/null 2>&1`,
     stateProbe: `test -e ${quote(state)} && printf applied || printf absent`
   }
+}
+
+function runtimeProbe () {
+  return `set -eu; if version=$(su -m jellyfin -c 'env CLR_OPENSSL_VERSION_OVERRIDE=30 /usr/local/jellyfin/jellyfin --version' 2>&1); then status=0; else status=$?; fi; case "$status" in 0|1) ;; *) printf 'JELLYFIN_RUNTIME_PROBE_FAILED: exit %s\\n' "$status" >&2; printf '%s\\n' "$version" >&2; exit "$status";; esac; test "$version" = ${quote(`Jellyfin.Server ${VERSION}.0`)}; printf '%s\\n' "$version"`
 }
 
 function prepare (state) {
@@ -38,7 +43,7 @@ function prepareFresh (state) {
 }
 
 function installRuntime (state) {
-  return `set -eu; env ASSUME_ALWAYS_YES=yes pkg install -y jellyfin-${VERSION} nginx curl ca_root_nss; [ "$(pkg query '%v' jellyfin)" = ${VERSION} ]; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}`
+  return `set -eu; env ASSUME_ALWAYS_YES=yes pkg update; package_version=$(pkg -o REPO_AUTOUPDATE=false rquery '%v' jellyfin | LC_ALL=C sort -u); case "$package_version" in ''|*[!0-9._,]*) printf 'PACKAGE_VERSION_MISMATCH: ambiguous Jellyfin package version\\n' >&2; exit 78;; esac; printf '%s\\n' "$package_version" | LC_ALL=C grep -Eq '^${VERSION.replaceAll('.', '[.]')}(_[0-9]+)?(,[0-9]+)?$' || { printf 'PACKAGE_VERSION_MISMATCH: unsupported Jellyfin upstream version\\n' >&2; exit 78; }; env ASSUME_ALWAYS_YES=yes pkg install -y "jellyfin-$package_version" nginx curl ca_root_nss; [ "$(pkg query '%v' jellyfin)" = "$package_version" ]; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}`
 }
 
 function deploy () {

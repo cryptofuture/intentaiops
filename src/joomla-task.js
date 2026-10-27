@@ -1,5 +1,6 @@
+import { mariadbComposeBootstrap } from './mariadb-compose-bootstrap.js'
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
-import { buildLinuxPhpApplicationFoundation, linuxPhpApplicationProfile } from './linux-php-foundation.js'
+import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile } from './linux-php-foundation.js'
 
 const VERSION = '5.4.7'
 const ARCHIVE_URL = `https://update.joomla.org/releases/${VERSION}/Joomla_${VERSION}-Stable-Full_Package.tar.gz`
@@ -77,7 +78,7 @@ function configureNativePlan (built, taskId, linuxContext) {
   renameCommand(built.plan, 'verify-application', 'verify-joomla', nativeVerifyCommand(profile), 'Verify Joomla configuration, database state, and the external marker')
   enhanceNativeModuleRestore(built.plan, state, linuxContext)
   built.plan.modifiedFiles.push(`${ARTIFACTS}/joomla.tar.gz`, `${state}/installer-argv.php`)
-  built.verifyApplied = `${quote(profile.phpBinary)} -r ${quote(`require '${WEB_ROOT}/includes/defines.php';`)} >/dev/null 2>&1 && test -f ${quote(`${WEB_ROOT}/configuration.php`)} && curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  built.verifyApplied = `${quote(profile.phpBinary)} -r ${quote(`require '${WEB_ROOT}/includes/defines.php';`)} >/dev/null 2>&1 && test -f ${quote(`${WEB_ROOT}/configuration.php`)} && ${httpMarkerCheck(`curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(WEB_ROOT)} && test ! -e ${quote(ARTIFACTS)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)}`
 }
 
@@ -89,7 +90,7 @@ function configureComposePlan (built, taskId, linuxContext) {
   renameCommand(built.plan, 'initialize-application', 'initialize-joomla', composeInitializeCommand(linuxContext), 'Install Joomla inside the container using protected credential-file indirection')
   replaceCommand(built.plan, 'verify-compose', composeVerifyCommand(linuxContext), 'Verify Compose health and the Joomla marker')
   built.plan.modifiedFiles.push(`${SERVICE_ROOT}/compose.yaml`, `${SERVICE_ROOT}/php-fpm.conf`, `${SERVICE_ROOT}/nginx.conf`)
-  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq joomla && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T joomla test -S /run/php-fpm/webminai.sock && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq joomla && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T joomla test -S /run/php-fpm/webminai.sock && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(SERVICE_ROOT)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && { ! command -v docker >/dev/null 2>&1 || ! docker ps -aq --filter label=com.docker.compose.project=${quote(PROJECT)} | grep -q .; }`
 }
 
@@ -139,7 +140,7 @@ function artifactCommand () {
     'set -eu',
     `install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}`,
     `if [ -s ${quote(archive)} ] && printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(archive)} | sha256sum -c - >/dev/null 2>&1; then printf '%s\\n' artifact-already-verified; exit 0; fi`,
-    `curl --fail --location --silent --show-error --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)}`,
+    `curl --fail --location --silent --show-error --retry 2 --retry-all-errors --retry-delay 2 --connect-timeout 15 --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)}`,
     `printf '%s  %s\\n' ${quote(ARCHIVE_SHA1)} ${quote(`${archive}.tmp`)} | sha1sum -c - >/dev/null`,
     `printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(`${archive}.tmp`)} | sha256sum -c - >/dev/null`,
     `mv -f -- ${quote(`${archive}.tmp`)} ${quote(archive)}`,
@@ -194,7 +195,7 @@ function nativeVerifyCommand (profile) {
     `mariadb --protocol=socket -uroot -Nse ${quote(`SELECT COUNT(*) FROM ${DATABASE}.wmai_users WHERE username='webminai_admin';`)} | grep -Fxq 1`,
     `address=$(${profile.primaryAddressCommand})`,
     '[ -n "$address" ]',
-    `curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 "http://$address:${PORT}/" | grep -Fq ${MARKER}`,
+    `${httpMarkerCheck(`curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 "http://$address:${PORT}/"`, MARKER)}`,
     "printf '%s\\n' verification-passed"
   ].join('; ')
 }
@@ -205,6 +206,7 @@ function composeCommand () {
     '  db:',
     `    image: ${DATABASE_IMAGE}`,
     '    restart: unless-stopped',
+    ...mariadbComposeBootstrap(),
     '    environment:',
     '      MARIADB_DATABASE: webminai_joomla',
     '      MARIADB_USER: webminai_joomla',
@@ -279,12 +281,12 @@ function startCommand () {
 function composeInitializeCommand (linuxContext) {
   const addressCommand = linuxContext?.applications?.wordpress?.primaryAddressCommand ?? "ip -4 -o route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i == \"src\") {print $(i+1); exit}}'"
   const install = `WEBMINAI_DB_PASS_FILE=/run/secrets/db_password WEBMINAI_ADMIN_PASSWORD_FILE=/run/secrets/admin_password php -d auto_prepend_file=/run/webminai/installer-argv.php /var/www/html/installation/joomla.php install --no-interaction --site-name=${MARKER} --admin-user=${quote('Intent AI Ops Administrator')} --admin-username=webminai_admin --admin-email=intentaiops@example.invalid --db-type=mysqli --db-host=db --db-user=webminai_joomla --db-name=webminai_joomla --db-prefix=wmai_ --db-encryption=0`
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; if ! docker compose -p ${quote(PROJECT)} exec -T joomla test -f /var/www/html/configuration.php; then docker compose -p ${quote(PROJECT)} exec -T joomla /bin/sh -c ${quote(`${install} >/dev/null 2>&1`)}; fi; docker compose -p ${quote(PROJECT)} exec -T joomla test -f /var/www/html/configuration.php; address=$(${addressCommand}); [ -n "$address" ]; ready=; for attempt in $(seq 1 30); do if curl --fail --location --silent --show-error --max-time 3 "http://$address:${PORT}/" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done; [ "$ready" = yes ]; printf '%s\\n' joomla-installed`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; if ! docker compose -p ${quote(PROJECT)} exec -T joomla test -f /var/www/html/configuration.php; then docker compose -p ${quote(PROJECT)} exec -T joomla /bin/sh -c ${quote(`${install} >/dev/null 2>&1`)}; fi; docker compose -p ${quote(PROJECT)} exec -T joomla test -f /var/www/html/configuration.php; address=$(${addressCommand}); [ -n "$address" ]; ready=; for attempt in $(seq 1 30); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 3 "http://$address:${PORT}/" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done; [ "$ready" = yes ]; printf '%s\\n' joomla-installed`
 }
 
 function composeVerifyCommand (linuxContext) {
   const addressCommand = linuxContext?.applications?.wordpress?.primaryAddressCommand ?? "ip -4 -o route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i == \"src\") {print $(i+1); exit}}'"
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq joomla; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx; docker compose -p ${quote(PROJECT)} exec -T joomla test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T joomla test -f /var/www/html/configuration.php; address=$(${addressCommand}); [ -n "$address" ]; curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/" | grep -Fq ${MARKER}; printf '%s\\n' verification-passed`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq joomla; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx; docker compose -p ${quote(PROJECT)} exec -T joomla test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T joomla test -f /var/www/html/configuration.php; address=$(${addressCommand}); [ -n "$address" ]; ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/"`, MARKER)}; printf '%s\\n' verification-passed`
 }
 
 function fpmSocketConfig () {

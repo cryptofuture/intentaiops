@@ -1,5 +1,7 @@
 import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { parseLinuxExecutionInventory } from './linux-host-context.js'
+import { collectHostEvidence } from './host-execution-evidence.js'
+import { collectComposeEvidence, collectContainerEvidence } from './container-execution-evidence.js'
 
 const API_PATH = /^\/api\/v3\/[A-Za-z0-9_./?&=%:,*|~-]+$/
 
@@ -20,6 +22,23 @@ export class NetdataClient {
 
   async info () {
     return this.getJson('/api/v3/info?options=full')
+  }
+
+  async collectExecutionEvidence ({ item, before } = {}) {
+    const evidence = await collectHostEvidence(this, item?.diagnostic?.kind === 'filesystem' ? { filesystemTarget: item.diagnostic.target } : {})
+    if (before && item?.diagnostic?.kind === 'compose') {
+      let runtimeHome
+      const platform = before.platform === 'macos' ? 'macos' : evidence.platform
+      if (platform === 'macos') {
+        try { runtimeHome = (await this.macosExecutionInventory()).runtimeHome } catch {}
+      }
+      evidence.workloadDiagnostics = await collectComposeEvidence(this, item.diagnostic, before.observedAt, { platform: platform ?? 'unknown', runtimeHome })
+    }
+    return evidence
+  }
+
+  async collectContainerEvidence (reference) {
+    return collectContainerEvidence(this, reference)
   }
 
   async contexts () {
@@ -67,7 +86,7 @@ export class NetdataClient {
     const marker = `webminai-system-probe-${randomUUID()}`
     const command = [
       "$ErrorActionPreference='Stop'",
-      `$path=Join-Path $env:ProgramData 'Intent AI Ops\\${marker}'`,
+      `$path=Join-Path $env:ProgramData 'WebminAI\\${marker}'`,
       "[IO.File]::WriteAllText($path,'ok',[Text.Encoding]::ASCII)",
       'Remove-Item -LiteralPath $path -Force',
       "Write-Output 'WEBMINAI_WINDOWS_SYSTEM_OK'"
@@ -89,11 +108,12 @@ export class NetdataClient {
       '$dockerCli=[bool]$dockerPath;$dockerDaemon=$false;$dockerCompose=$false;$dockerServerOs=$null;$dockerServerVersion=$null;$dockerServerArchitecture=$null',
       'if($dockerPath){$out=[IO.Path]::GetTempFileName();$err=[IO.Path]::GetTempFileName();try{$process=Start-Process -FilePath $dockerPath -ArgumentList @(\'info\',\'--format\',\'{{.OSType}}|{{.ServerVersion}}|{{.Architecture}}\') -PassThru -RedirectStandardOutput $out -RedirectStandardError $err;if($process.WaitForExit(3000)){$dockerInfo=(Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue).Trim();$fields=@($dockerInfo -split \'\\|\',3);if($fields.Count -eq 3 -and $fields[0] -in @(\'linux\',\'windows\') -and -not[string]::IsNullOrWhiteSpace($fields[1]) -and -not[string]::IsNullOrWhiteSpace($fields[2])){$dockerDaemon=$true;$dockerServerOs=$fields[0];$dockerServerVersion=$fields[1];$dockerServerArchitecture=$fields[2]}};Remove-Item -LiteralPath $out,$err -Force -ErrorAction SilentlyContinue;$out=[IO.Path]::GetTempFileName();$err=[IO.Path]::GetTempFileName();$compose=Start-Process -FilePath $dockerPath -ArgumentList @(\'compose\',\'version\') -PassThru -RedirectStandardOutput $out -RedirectStandardError $err;if($compose.WaitForExit(3000)){$composeOutput=(Get-Content -LiteralPath $out -Raw -ErrorAction SilentlyContinue).Trim();if($composeOutput -match \'^Docker Compose version \'){$dockerCompose=$true}}}finally{Remove-Item -LiteralPath $out,$err -Force -ErrorAction SilentlyContinue}}',
       '$os=Get-CimInstance Win32_OperatingSystem;$computer=Get-CimInstance Win32_ComputerSystem;$cpu=Get-CimInstance Win32_Processor|Select-Object -First 1',
+      '$installedMemory=[int64]$computer.TotalPhysicalMemory;if($installedMemory -lt 8GB){try{$installedMemory=[int64](Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop|Measure-Object Capacity -Sum).Sum}catch{$installedMemory=0}}',
       '$featureStates=[ordered]@{};foreach($name in @(\'Microsoft-Windows-Subsystem-Linux\',\'VirtualMachinePlatform\')){$featureStates[$name]=[string](Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction SilentlyContinue).State}',
-      '$firmwareVirtualization=[bool]($computer.HypervisorPresent -or $cpu.VirtualizationFirmwareEnabled);$slat=[bool]($computer.HypervisorPresent -or $cpu.SecondLevelAddressTranslationExtensions);$dockerInstallSupported=[bool]($os.ProductType -eq 1 -and [int]$os.BuildNumber -ge 22631 -and [Environment]::Is64BitOperatingSystem -and $computer.TotalPhysicalMemory -ge 8GB -and $slat -and $firmwareVirtualization)',
+      '$firmwareVirtualization=[bool]($computer.HypervisorPresent -or $cpu.VirtualizationFirmwareEnabled);$slat=[bool]($computer.HypervisorPresent -or $cpu.SecondLevelAddressTranslationExtensions);$dockerInstallSupported=[bool]($os.ProductType -eq 1 -and [int]$os.BuildNumber -ge 22631 -and [Environment]::Is64BitOperatingSystem -and $installedMemory -ge 8GB -and $slat -and $firmwareVirtualization)',
       '[pscustomobject]@{platform=\'windows\';identity=\'LocalSystem\';powerShellVersion=$PSVersionTable.PSVersion.ToString();is64BitProcess=[Environment]::Is64BitProcess;nativeProcessMode=\'start-process-wait\';commands=[ordered]@{winget=$winget;chocolatey=$chocolatey;msiexec=$msiexec;curl=$curl;docker=$dockerCli};bootstrap=[ordered]@{osCaption=$os.Caption;osBuild=[int]$os.BuildNumber;productType=[int]$os.ProductType;memoryBytes=[int64]$computer.TotalPhysicalMemory;consoleUser=[string]$computer.UserName;hypervisorPresent=[bool]$computer.HypervisorPresent;firmwareVirtualization=$firmwareVirtualization;slat=$slat;slatReportedByProcessor=[bool]$cpu.SecondLevelAddressTranslationExtensions;features=$featureStates;pendingReboot=[bool](Test-Path \'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending\')};docker=[ordered]@{cliAvailable=$dockerCli;daemonReachable=$dockerDaemon;composeAvailable=$dockerCompose;composeCommand=$(if($dockerCompose){\'docker compose\'}else{$null});serverOs=$dockerServerOs;serverVersion=$dockerServerVersion;serverArchitecture=$dockerServerArchitecture;installSupported=$dockerInstallSupported;installMethod=\'wsl2-docker-desktop\';virtualizationRequired=$true;virtualizationAvailable=$firmwareVirtualization;virtualizationInstructions=\'Enable AMD SVM/AMD-V or Intel VT-x in BIOS/UEFI; for a Windows VM enable nested virtualization in the outer hypervisor, fully restart Windows, and retry.\'}} | ConvertTo-Json -Depth 6 -Compress'
     ].join(';')
-    const result = await this.runCommand(command, { timeoutSeconds: 10 })
+    const result = await this.runCommand(command, { timeoutSeconds: 30 })
     if (result.exitCode !== 0) {
       throw new Error(`could not inspect the Windows execution environment: ${result.stderr.trim() || `exit ${result.exitCode}`}`)
     }
@@ -128,12 +148,13 @@ export class NetdataClient {
     const command = [
       'freebsdVersion="$(freebsd-version -ru 2>/dev/null | tr \'\\n\' \'|\' | sed \'s/|$//\')"',
       'architecture="$(uname -m)"',
+      'memoryBytes="$(sysctl -n hw.physmem 2>/dev/null || true)"',
       'jailed="$(sysctl -n security.jail.jailed 2>/dev/null || printf 0)"',
       'podmanCli=no; podmanReady=no; composeAvailable=no; composeCommand=',
       'if command -v podman >/dev/null 2>&1; then podmanCli=yes; if podman info >/dev/null 2>&1; then podmanReady=yes; fi; fi',
       'if command -v podman-compose >/dev/null 2>&1 && podman-compose version >/dev/null 2>&1; then composeAvailable=yes; composeCommand=podman-compose; fi',
-      'major="$(freebsd-version -u 2>/dev/null | sed -E \'s/^([0-9]+).*/\\1/\')"; installSupported=no; case "$major" in \'\'|*[!0-9]*) ;; *) if [ "$major" -ge 15 ] && command -v pkg >/dev/null 2>&1; then installSupported=yes; fi ;; esac',
-      'printf \'freebsdVersion=%s\\narchitecture=%s\\njailed=%s\\npodmanCli=%s\\npodmanReady=%s\\ncomposeAvailable=%s\\ncomposeCommand=%s\\ninstallSupported=%s\\n\' "$freebsdVersion" "$architecture" "$jailed" "$podmanCli" "$podmanReady" "$composeAvailable" "$composeCommand" "$installSupported"'
+      'installSupported=no; case "$(freebsd-version -r 2>/dev/null)" in 14.4-*|15.[1-9]*-*) if command -v pkg >/dev/null 2>&1; then installSupported=yes; fi ;; esac',
+      'printf \'freebsdVersion=%s\\nmemoryBytes=%s\\narchitecture=%s\\njailed=%s\\npodmanCli=%s\\npodmanReady=%s\\ncomposeAvailable=%s\\ncomposeCommand=%s\\ninstallSupported=%s\\n\' "$freebsdVersion" "$memoryBytes" "$architecture" "$jailed" "$podmanCli" "$podmanReady" "$composeAvailable" "$composeCommand" "$installSupported"'
     ].join('; ')
     const result = await this.runCommand(command, { timeoutSeconds: 15 })
     if (result.exitCode !== 0) {
@@ -148,6 +169,7 @@ export class NetdataClient {
       platform: 'freebsd',
       freebsdVersion: values.freebsdVersion || null,
       architecture: values.architecture || null,
+      memoryBytes: /^\d+$/u.test(values.memoryBytes ?? '') && Number.isSafeInteger(Number(values.memoryBytes)) ? Number(values.memoryBytes) : null,
       packageManager: 'pkg',
       serviceManager: 'rc.d',
       shell: '/bin/sh',
@@ -165,7 +187,7 @@ export class NetdataClient {
         requiresExplicitLinuxPlatform: true,
         virtualizationRequired: false,
         virtualizationAvailable: true,
-        virtualizationInstructions: 'FreeBSD Podman uses jails and VFS; CPU virtualization is not required. Install it on the outer FreeBSD 15+ host, not inside a jail.'
+        virtualizationInstructions: 'FreeBSD Podman uses jails and VFS; CPU virtualization is not required. Install it on the outer FreeBSD 14.4 or 15.1+ host, not inside a jail.'
       }
     }
   }
@@ -270,7 +292,7 @@ export class NetdataClient {
     }
   }
 
-  async runCommand (command, { timeoutSeconds = 30 } = {}) {
+  async runCommand (command, { timeoutSeconds = 30, onRecovery } = {}) {
     if (typeof command !== 'string' || command.length === 0 || command.length > 32768) {
       throw new TypeError('command must be a non-empty string no longer than 32768 characters')
     }
@@ -282,19 +304,20 @@ export class NetdataClient {
     const result = await this.postJson(
       `/api/v3/function?function=webminai%3Acommand&timeout=${timeoutSeconds}`,
       body,
-      (timeoutSeconds + 5) * 1000
+      (timeoutSeconds + 5) * 1000,
+      onRecovery
     )
     return decodeCommandOutput(result)
   }
 
-  async startJob (command, { timeoutSeconds = 3600 } = {}) {
+  async startJob (command, { timeoutSeconds = 3600, onRecovery } = {}) {
     validateCommand(command)
     validateJobTimeout(timeoutSeconds)
     const request = [
       `timeoutSeconds=${timeoutSeconds}`,
       `command=${Buffer.from(command, 'utf8').toString('base64url')}`
     ].join('\n')
-    const result = await this.signedJobRequest('job_start', request)
+    const result = await this.signedJobRequest('job_start', request, onRecovery)
     if (result?.status !== 'accepted' || result?.state !== 'running') {
       throw new Error('Netdata job start returned an invalid response')
     }
@@ -302,12 +325,14 @@ export class NetdataClient {
     return result
   }
 
-  async jobStatus (jobId) {
+  async jobStatus (jobId, { onRecovery } = {}) {
     validateJobId(jobId)
-    const result = decodeCommandOutput(await this.signedJobRequest('job_status', jobId))
+    const result = decodeCommandOutput(await this.signedJobRequest('job_status', jobId, onRecovery))
     if (!JOB_STATES.has(result?.state) || result.jobId !== jobId) {
       throw new Error('Netdata job status returned an invalid response')
     }
+    const orphaned = result.state === 'failed' && result.exitCode === 125 && ['detached job controller exited before recording a result', 'job worker exited without a result'].includes(result.stderr?.trim())
+    if (result.state === 'unknown' || orphaned) return { ...result, state: 'unknown', exitCode: null, recoveryRequired: true }
     return result
   }
 
@@ -329,7 +354,10 @@ export class NetdataClient {
     timeoutSeconds = 3600,
     pollIntervalMs = 1000,
     statusErrorAttempts = 120,
+    statusRecoveryTimeoutMs = 120000,
     signal,
+    retainResult = false,
+    onStarted = async (_status) => {},
     onStatus = (_status) => {}
   } = {}) {
     if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 100 || pollIntervalMs > 10000) {
@@ -342,11 +370,15 @@ export class NetdataClient {
       throw new TypeError('job status error attempts must be between 0 and 120')
     }
     if (typeof onStatus !== 'function') throw new TypeError('job status callback must be a function')
+    if (!Number.isInteger(statusRecoveryTimeoutMs) || statusRecoveryTimeoutMs < 1 || statusRecoveryTimeoutMs > 300000) throw new TypeError('job status recovery timeout must be between 1 and 300000 milliseconds')
 
-    const started = await this.startJob(command, { timeoutSeconds })
+    const started = await this.startJob(command, { timeoutSeconds, onRecovery: progress => onStatus(progress) })
     const jobId = started.jobId
+    await onStarted(started)
     let cancellationRequested = false
     let consecutiveStatusErrors = 0
+    let recoveryStarted
+    let recoveryRequired = false
     while (true) {
       if (signal?.aborted && !cancellationRequested) {
         await this.cancelJob(jobId)
@@ -354,17 +386,31 @@ export class NetdataClient {
       }
       let status
       try {
-        status = await this.jobStatus(jobId)
+        status = await this.jobStatus(jobId, {
+          onRecovery: async progress => {
+            recoveryRequired = true
+            recoveryStarted ??= Date.now()
+            await onStatus({ jobId, ...progress })
+          }
+        })
         consecutiveStatusErrors = 0
+        recoveryStarted = undefined
       } catch (error) {
         consecutiveStatusErrors++
-        if (consecutiveStatusErrors > statusErrorAttempts || !isRecoverableJobStatusError(error)) throw error
+        recoveryRequired = true
+        recoveryStarted ??= Date.now()
+        if (consecutiveStatusErrors > statusErrorAttempts || Date.now() - recoveryStarted >= statusRecoveryTimeoutMs || !isRecoverableJobStatusError(error)) {
+          await onStatus({ jobId, state: 'operator_review_required' })
+          throw error
+        }
         await onStatus({ jobId, state: 'temporarily_unavailable', attempt: consecutiveStatusErrors })
         await wait(pollIntervalMs)
         continue
       }
       await onStatus(status)
+      if (status.state === 'unknown') return { ...status, cleaned: false }
       if (TERMINAL_JOB_STATES.has(status.state)) {
+        if (retainResult || recoveryRequired) return { ...status, cleaned: false, ...(recoveryRequired ? { recoveryRequired: true } : {}) }
         try {
           await this.cleanupJob(jobId)
           return { ...status, cleaned: true }
@@ -376,12 +422,13 @@ export class NetdataClient {
     }
   }
 
-  async signedJobRequest (functionName, request) {
+  async signedJobRequest (functionName, request, onRecovery) {
     const body = createSignedCommand(request, this.actionKey)
     return this.postJson(
       `/api/v3/function?function=webminai%3A${functionName}&timeout=10`,
       body,
-      15000
+      15000,
+      onRecovery
     )
   }
 
@@ -436,13 +483,14 @@ export class NetdataClient {
     }
   }
 
-  async postJson (path, body, timeoutMs = 35000) {
+  async postJson (path, body, timeoutMs = 35000, onRecovery) {
     validateApiPath(path)
     const command = curlCommand('POST', path)
     try {
       const result = await this.ssh.execute(this.connectionUrl, command, {
         input: `${JSON.stringify(body)}\n`,
-        timeoutMs
+        timeoutMs,
+        ...(onRecovery ? { onRecovery } : {})
       })
       return parseJsonResponse(result.stdout)
     } catch (error) {
@@ -504,6 +552,15 @@ export function createKubernetesApiCommand ({ method, path, body, contentType = 
   ].join('\n')
 }
 
+export function parseKubernetesApiCommand (command) {
+  if (typeof command !== 'string' || command.length > 32768) throw new TypeError('Invalid Kubernetes API command')
+  const match = /^v=1\nmethod=(GET|POST|PUT|PATCH|DELETE)\npath=([A-Za-z0-9_-]+)\ncontentType=(application\/(?:json|merge-patch\+json|apply-patch\+yaml))\nbody=([A-Za-z0-9_-]*)$/u.exec(command)
+  if (!match) throw new TypeError('Only canonical Kubernetes API commands are supported; shell execution is unavailable')
+  const request = { method: match[1], path: Buffer.from(match[2], 'base64url').toString('utf8'), contentType: match[3], body: Buffer.from(match[4], 'base64url').toString('utf8') }
+  if (createKubernetesApiCommand(request) !== command) throw new TypeError('Noncanonical Kubernetes API command')
+  return request
+}
+
 function curlCommand (method, path) {
   const request = method === 'POST'
     ? '--request POST --header "Content-Type: application/json" --data-binary @-'
@@ -544,7 +601,7 @@ function decodeCommandOutput (result) {
   }
 }
 
-const JOB_STATES = new Set(['running', 'cancelling', 'succeeded', 'failed', 'timed_out', 'cancelled', 'completed', 'cleaned'])
+const JOB_STATES = new Set(['running', 'cancelling', 'succeeded', 'failed', 'timed_out', 'cancelled', 'completed', 'cleaned', 'unknown'])
 const TERMINAL_JOB_STATES = new Set(['succeeded', 'failed', 'timed_out', 'cancelled'])
 
 function validateCommand (command) {
@@ -566,7 +623,19 @@ function validateJobId (jobId) {
 }
 
 function netdataRequestError (method, path, cause) {
-  return new Error(`Netdata ${method} ${path} failed: ${cause.message}`, { cause })
+  let status
+  let clockHint = ''
+  if (cause?.result?.code === 22 && !cause.result.timedOut && !cause.result.signal && typeof cause.result.stdout === 'string' && Buffer.byteLength(cause.result.stdout) <= 16384) {
+    try {
+      const body = JSON.parse(cause.result.stdout)
+      const value = body?.status
+      if (Number.isInteger(value) && value >= 400 && value <= 599) status = value
+      if (status === 403 && body.error === 'expired signed payload') clockHint = '; signed request expired, check host/client UTC synchronization before reviewed continuation'
+    } catch {}
+  }
+  const error = new Error(`Netdata ${method} ${path} failed${status ? ` (HTTP ${status})` : ''}${clockHint}: ${cause.message}`, { cause })
+  if (status) error.netdataHttpStatus = status
+  return error
 }
 
 function isTransientNetdataError (error) {
@@ -580,6 +649,8 @@ function isTransientNetdataError (error) {
 }
 
 function isRecoverableJobStatusError (error) {
+  if (error?.recoveryExhausted || error?.cause?.recoveryExhausted) return false
+  if (error?.reconnected || error?.cause?.reconnected) return true
   const evidence = [
     error?.message,
     error?.cause?.message,

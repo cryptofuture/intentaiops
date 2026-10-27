@@ -1,3 +1,6 @@
+import { freebsdNginxSecurityCommand } from './freebsd-nginx-security.js'
+import { freebsdInstallMissingPackages } from './freebsd-runtime-packages.js'
+
 const VERSION = '6.57.0'
 const APP_ROOT = '/usr/local/lib/webminai-ghost-18110'
 const DATA_ROOT = '/var/db/webminai-ghost-18110'
@@ -22,7 +25,7 @@ export function buildFreebsdGhostTask (taskId, freebsdExecution) {
       warnings: ['Ghost officially supports Ubuntu 24 for production. This learned native FreeBSD route is community-tested by Intent AI Ops and is not an upstream-supported Ghost platform.', 'This controlled validation publishes the marker and Ghost under TCP port 18110 without DNS or TLS.'],
       commands: [
         item('prepare-ghost', prepare(state), 'Capture package and identity baselines and generate the database password on-host'),
-        item('install-ghost-runtime', installRuntime(state), 'Install exact FreeBSD Node.js 22, Oracle MySQL 8, nginx, and native build prerequisites', ['prepare-ghost'], 1800000, 'job'),
+        item('install-ghost-runtime', installRuntime(state), 'Install exact FreeBSD Node.js 22, Oracle MySQL 8, nginx, and native build prerequisites', ['prepare-ghost'], 3600000, 'job'),
         item('install-ghost-application', installApplication(state), `Install exact Ghost ${VERSION} from the npm registry and validate the packaged runtime`, ['install-ghost-runtime'], 3600000, 'job'),
         item('initialize-ghost-database', initializeDatabase(), 'Initialize isolated MySQL storage and the least-privilege Ghost database account', ['install-ghost-runtime', 'prepare-ghost'], 900000, 'job'),
         item('configure-ghost', configure(), 'Create the isolated Ghost identity, rc.d service, content storage, and nginx reverse proxy', ['install-ghost-application', 'initialize-ghost-database'], 900000, 'job'),
@@ -37,7 +40,8 @@ export function buildFreebsdGhostTask (taskId, freebsdExecution) {
 }
 
 function prepare (state) {
-  return `[ ! -d ${quote(state)} ] || exit 0; ${prepareFresh(state)}`
+  const ownership = `for kind in user group; do if [ "$kind" = user ]; then pw usershow mysqlrouter >/dev/null 2>&1; else pw groupshow mysqlrouter >/dev/null 2>&1; fi || : > ${quote(state)}/$kind-mysqlrouter-created; done`
+  return `[ ! -d ${quote(state)} ] || exit 0; ${prepareFresh(state)}; ${ownership}`
 }
 
 function prepareFresh (state) {
@@ -45,12 +49,16 @@ function prepareFresh (state) {
 }
 
 function installRuntime (state) {
-  return `set -eu; env ASSUME_ALWAYS_YES=yes pkg install -y node22-22.23.1 npm-node22-11.18.0 mysql80-server-8.0.46 nginx python312 gmake pkgconf; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}; node -e 'const [major,minor,patch]=process.versions.node.split(".").map(Number); process.exit(major === 22 && (minor > 23 || minor === 23 && patch >= 1) ? 0 : 1)'; /usr/local/libexec/mysqld --version | grep -F 'Ver 8.0'`
+  return installRuntimePackages(state) + `; ${freebsdNginxSecurityCommand(state)}`
+}
+
+function installRuntimePackages (state) {
+  return `set -eu; pkg update -f; ${freebsdInstallMissingPackages(['node22', 'npm-node22', 'mysql80-server', 'nginx', 'python312', 'gmake', 'pkgconf'])}; pkg query -a '%n' | LC_ALL=C sort -u > ${quote(`${state}/packages.after`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} > ${quote(`${state}/packages.added`)}; node -e 'const [major,minor,patch]=process.versions.node.split(".").map(Number); process.exit(major === 22 && (minor > 23 || minor === 23 && patch >= 1) ? 0 : 1)'; /usr/local/libexec/mysqld --version | grep -F 'Ver 8.0'`
 }
 
 function installApplication (state) {
   const archive = `${state}/ghost-${VERSION}.tgz`
-  return `set -eu; rm -rf -- ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(`${state}/npm-cache`)} ${quote(`${state}/node-gyp`)} ${quote(`${state}/pnpm-store`)} ${quote(`${state}/corepack`)}; curl --fail --location --silent --show-error https://registry.npmjs.org/ghost/-/ghost-${VERSION}.tgz --output ${quote(archive)}; [ "$(sha256 -q ${quote(archive)})" = ${quote(ARCHIVE_SHA256)} ]; tar -xzf ${quote(archive)} -C ${quote(APP_ROOT)} --strip-components 1; export npm_config_cache=${quote(`${state}/npm-cache`)} npm_config_devdir=${quote(`${state}/node-gyp`)} npm_config_python=/usr/local/bin/python3.12 COREPACK_HOME=${quote(`${state}/corepack`)}; cd ${quote(APP_ROOT)}; corepack pnpm install --prod --frozen-lockfile --store-dir ${quote(`${state}/pnpm-store`)}; corepack pnpm add --prod --save-exact --ignore-workspace-root-check --store-dir ${quote(`${state}/pnpm-store`)} @img/sharp-freebsd-wasm32@0.35.3; node -p "require('./package.json').version" | grep -Fx ${quote(VERSION)}; node -e "require('mysql2'); require('sharp')"; chmod -R a+rX ${quote(APP_ROOT)}`
+  return `set -eu; rm -rf -- ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(APP_ROOT)}; install -d -o root -g wheel -m 0755 ${quote(`${state}/npm-cache`)} ${quote(`${state}/node-gyp`)} ${quote(`${state}/pnpm-store`)} ${quote(`${state}/corepack`)}; curl --fail --location --silent --show-error https://registry.npmjs.org/ghost/-/ghost-${VERSION}.tgz --output ${quote(archive)}; [ "$(sha256 -q ${quote(archive)})" = ${quote(ARCHIVE_SHA256)} ]; tar -xzf ${quote(archive)} -C ${quote(APP_ROOT)} --strip-components 1; export NODE_OPTIONS="\${NODE_OPTIONS:+$NODE_OPTIONS }--network-family-autoselection-attempt-timeout=2000"; export npm_config_cache=${quote(`${state}/npm-cache`)} npm_config_devdir=${quote(`${state}/node-gyp`)} npm_config_python=/usr/local/bin/python3.12 COREPACK_HOME=${quote(`${state}/corepack`)}; cd ${quote(APP_ROOT)}; corepack pnpm install --prod --frozen-lockfile --store-dir ${quote(`${state}/pnpm-store`)}; corepack pnpm add --prod --save-exact --ignore-workspace-root-check --store-dir ${quote(`${state}/pnpm-store`)} @img/sharp-freebsd-wasm32@0.35.3; node -p "require('./package.json').version" | grep -Fx ${quote(VERSION)}; node -e "require('mysql2'); require('sharp')"; chmod -R a+rX ${quote(APP_ROOT)}`
 }
 
 function initializeDatabase () {
@@ -133,15 +141,19 @@ function verify () {
 }
 
 function remove (state) {
+  return `set -eu; router_user=; router_group=; [ ! -f ${quote(state + '/user-mysqlrouter-created')} ] || router_user=yes; [ ! -f ${quote(state + '/group-mysqlrouter-created')} ] || router_group=yes; ${removeApplication(state)}; if [ "$router_user" = yes ]; then pw userdel mysqlrouter >/dev/null 2>&1 || ! pw usershow mysqlrouter >/dev/null 2>&1; fi; if [ "$router_group" = yes ]; then pw groupdel mysqlrouter >/dev/null 2>&1 || ! pw groupshow mysqlrouter >/dev/null 2>&1; fi`
+}
+
+function removeApplication (state) {
   return `set -eu; service nginx onestop >/dev/null 2>&1 || true; service webminai_ghost stop >/dev/null 2>&1 || true; service webminai_ghost_mysql stop >/dev/null 2>&1 || true; rm -f -- ${quote(GHOST_RC)} ${quote(MYSQL_RC)} ${quote(NGINX_CONFIG)}; rm -rf -- ${quote(APP_ROOT)} ${quote(DATA_ROOT)}; if [ -d ${quote(state)} ]; then [ ! -e ${quote(`${state}/credential-created`)} ] || rm -f -- ${quote(`${CREDENTIALS}/database_password`)}; [ -e ${quote(`${state}/credentials-preexisting`)} ] || rm -rf -- ${quote(CREDENTIALS)}; fi; if [ -s ${quote(`${state}/packages.added`)} ]; then while IFS= read -r package; do [ -z "$package" ] || env ASSUME_ALWAYS_YES=yes pkg delete -f -y "$package"; done < ${quote(`${state}/packages.added`)}; fi; if [ -d ${quote(state)} ]; then for identity in webminai_ghost mysql; do [ -e ${quote(state)}/user-$identity-preexisting ] || pw userdel "$identity" >/dev/null 2>&1 || true; [ -e ${quote(state)}/group-$identity-preexisting ] || pw groupdel "$identity" >/dev/null 2>&1 || true; done; fi; rmdir /usr/local/etc/nginx >/dev/null 2>&1 || true; rm -rf -- ${quote(state)}`
 }
 
 function waitGhost () {
-  return 'ready=; for attempt in $(jot 180); do curl --fail --location --silent --show-error --max-time 3 http://127.0.0.1:2368/blog/ >/dev/null 2>&1 && { ready=yes; break; }; sleep 2; done; [ "$ready" = yes ]'
+  return 'ready=; for attempt in $(jot 60); do curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:2368/blog/ >/dev/null 2>&1 && { ready=yes; break; }; sleep 2; done; [ "$ready" = yes ]'
 }
 
 function primaryAddress () {
-  return 'interface=$(route -n get default | awk \'/interface:/{print $2; exit}\'); address=$(ifconfig "$interface" inet | awk \'/inet /{print $2; exit}\'); [ -n "$address" ]'
+  return 'address=$(printenv WEBMINAI_PUBLIC_ADDRESS || true); if [ -z "$address" ]; then interface=$(route -n get default | awk \'/interface:/{print $2; exit}\'); address=$(ifconfig "$interface" inet | awk \'/inet /{print $2; exit}\'); fi; printf "%s\\n" "$address" | awk -F. \'NF != 4 {exit 1} {for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || length($i)>3 || $i+0>255) exit 1}\''
 }
 
 function item (id, command, purpose, dependsOn = [], timeoutMs = 300000, executionMode = null, risk = 'change') {

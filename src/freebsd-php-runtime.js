@@ -1,6 +1,18 @@
 export const FREEBSD_PHP_IMAGE = 'localhost/webminai-freebsd-php84-nginx:15.1'
 
-export function buildFreebsdPhpRuntimeCommand (buildRoot) {
+export function freebsdContainerImages (execution = {}) {
+  const version = execution.freebsdVersion?.split('|')[0]
+  const legacy = version?.startsWith('14.4-') === true
+  if (version && !legacy && !/^15[.][1-9][0-9]*-/u.test(version)) throw new Error('Native FreeBSD images require a reviewed 14.4 or 15.1+ host')
+  return {
+    base: legacy ? 'ghcr.io/freebsd/freebsd-runtime:14.4' : 'ghcr.io/freebsd/freebsd-notoolchain:15.1',
+    php: legacy ? 'localhost/webminai-freebsd-php84-nginx:14.4' : FREEBSD_PHP_IMAGE,
+    database: 'localhost/webminai-freebsd-mariadb:11.8' + (legacy ? '-freebsd14' : ''),
+    wordpress: 'localhost/webminai-freebsd-wordpress:7.0.2-php84' + (legacy ? '-freebsd14' : '')
+  }
+}
+
+export function buildFreebsdPhpRuntimeCommand (buildRoot, images = freebsdContainerImages()) {
   return `set -eu; root=${quote(`${buildRoot}/php-runtime`)}; rm -rf -- "$root"; install -d -m 0755 "$root/rootfs/usr/local/sbin" "$root/rootfs/usr/local/etc/nginx"; cat > "$root/rootfs/usr/local/etc/php-fpm.conf" <<'CONF'
 [global]
 daemonize = yes
@@ -32,13 +44,13 @@ install -d -m 0755 /srv/app /var/run/webminai
 exec /usr/local/sbin/nginx -g 'daemon off;'
 SH
 chmod 0755 "$root/rootfs/usr/local/sbin/webminai-entrypoint"; cat > "$root/Containerfile" <<'CF'
-FROM ghcr.io/freebsd/freebsd-notoolchain:15.1
+FROM ${images.base}
 RUN env ASSUME_ALWAYS_YES=yes IGNORE_OS_VERSION=yes pkg bootstrap -r FreeBSD && pkg install -y nginx php84 php84-bcmath php84-ctype php84-curl php84-dom php84-fileinfo php84-filter php84-gd php84-gmp php84-iconv php84-intl php84-mbstring php84-mysqli php84-opcache php84-pcntl php84-pdo php84-pdo_mysql php84-posix php84-session php84-simplexml php84-soap php84-sodium php84-tokenizer php84-xml php84-xmlreader php84-xmlwriter php84-zip php84-zlib ca_root_nss && pkg clean -y
 COPY rootfs /
 EXPOSE 80
 ENTRYPOINT ["/usr/local/sbin/webminai-entrypoint"]
 CF
-cd "$root"; TMPDIR=/var/db/containers/tmp podman build -t ${FREEBSD_PHP_IMAGE} .`
+cd "$root"; TMPDIR=/var/db/containers/tmp podman build -t ${images.php} .`
 }
 
 function quote (value) {

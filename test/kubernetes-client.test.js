@@ -7,6 +7,50 @@ import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { KubernetesApiError, KubernetesClient } from '../src/kubernetes-client.js'
 
+test('Kubernetes observation has a wall-clock deadline even when the response never completes', async () => {
+  let calls = 0
+  const client = new KubernetesClient({
+    server: 'https://cluster.example',
+    ca: Buffer.from('ca'),
+    token: 'token',
+    requestImpl: () => {
+      calls++
+      const request = new EventEmitter()
+      request.end = () => {}
+      request.destroy = error => request.emit('error', error)
+      return request
+    }
+  })
+  const hold = setTimeout(() => {}, 1000)
+  try { await assert.rejects(client.request('/version', { timeoutMs: 10 }), /observation deadline exceeded/u) } finally { clearTimeout(hold) }
+  assert.equal(calls, 1)
+})
+
+for (const event of ['aborted', 'error']) {
+  test(`Kubernetes interrupted response rejects promptly without replay: ${event}`, async () => {
+    let calls = 0
+    const client = new KubernetesClient({
+      server: 'https://cluster.example',
+      ca: Buffer.from('ca'),
+      token: 'token',
+      requestImpl: (_url, _options, callback) => {
+        calls++
+        const request = new EventEmitter()
+        request.end = () => {
+          const response = new PassThrough()
+          response.statusCode = 200
+          callback(response)
+          response.write('{"incomplete":')
+          response.emit(event, new Error('private response content'))
+        }
+        return request
+      }
+    })
+    await assert.rejects(Promise.race([client.version(), new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error('response remained stuck')), 1000); timer.unref() })]), error => error instanceof KubernetesApiError && !error.message.includes('private response content'))
+    assert.equal(calls, 1)
+  })
+}
+
 test('Kubernetes client preserves invalid JSON as the API error cause', async () => {
   const client = new KubernetesClient({
     server: 'https://cluster.example',

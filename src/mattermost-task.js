@@ -1,3 +1,6 @@
+import { postgresApplicationDatabaseCommand } from './linux-application-database.js'
+import { applicationFileOwnershipGuard } from './linux-php-foundation.js'
+
 const VERSION = '11.7.8'
 const PORT = 18111
 const APP_PORT = 8065
@@ -13,6 +16,7 @@ const DATABASE_USER = 'webminai_mattermost'
 const ARCHIVE = `mattermost-team-${VERSION}-linux-amd64.tar.gz`
 const ARCHIVE_URL = `https://releases.mattermost.com/${VERSION}/${ARCHIVE}`
 const ARCHIVE_SHA256 = '0fc1637ca6cec0a53fc7112a22f67651dba50fe3667e5ed957acf0d3bbb9da93'
+const ARCHIVE_BYTES = 411962109
 const MATTERMOST_IMAGE = 'mattermost/mattermost-team-edition@sha256:65c8e3fa5122307b833eb08d3ea402b2f829a0fd43a82f6e2ccea0e14225c970'
 const POSTGRES_IMAGE = 'postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94'
 const NGINX_IMAGE = 'nginx@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46'
@@ -57,15 +61,16 @@ function buildNativeTask (taskId, context, profile) {
     item('capture-baseline', 'baseline', nativeBaseline(state, paths, profile), 'Capture packages, services, repository stream, and task-owned paths exactly once'),
     item('install-stack', 'packages', nativePackages(state, profile), `Install nginx and PostgreSQL ${profile.postgresMajor}+ through the reviewed ${profile.family} route`, ['capture-baseline'], 1200000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(), 'Generate the PostgreSQL password on-host without emitting it', ['capture-baseline']),
-    item('initialize-database', 'database', nativeDatabase(profile), 'Initialize PostgreSQL and create the isolated Mattermost database role', ['install-stack', 'generate-credentials']),
-    item('install-mattermost', 'acquire', nativeAcquire(state), `Download, checksum, and install the official Mattermost Team Edition ${VERSION} tarball`, ['install-stack'], 1800000, 'job'),
+    item('initialize-database', 'database', nativeDatabase(state, profile), 'Initialize PostgreSQL and create the isolated Mattermost database role', ['install-stack', 'generate-credentials']),
+    item('install-mattermost', 'acquire', nativeAcquire(state), `Download, checksum, and install the official Mattermost Team Edition ${VERSION} tarball`, ['install-stack'], 3600000, 'job'),
     item('configure-mattermost', 'configure', nativeConfigure(paths, profile), 'Create protected runtime configuration, systemd service, storage, and nginx proxy', ['initialize-database', 'install-mattermost']),
     item('verify-mattermost', 'verify', nativeVerify(profile), 'Verify Mattermost health, PostgreSQL persistence, version, marker, and restart recovery', ['configure-mattermost'], 1200000, 'job')
   ]
+  commands.find(command => command.id === 'install-mattermost').retry = { attempts: 2, intervalMs: 2000, exitCodes: [143], states: ['timed_out'] }
   const revertCommands = [
-    item('stop-mattermost', 'cleanup', nativeStop(paths), 'Stop and remove only the task-owned Mattermost service and nginx site', [], 300000, undefined, 'destructive'),
-    item('drop-database', 'cleanup', nativeDropDatabase(profile), 'Drop only the task-owned PostgreSQL database and role', ['stop-mattermost'], 300000, undefined, 'destructive'),
-    item('remove-mattermost-files', 'cleanup', `set -eu; rm -rf -- ${quote(APP_ROOT)} ${quote(DATA_ROOT)} ${quote(CREDENTIALS)}`, 'Remove task-owned application, persistent data, and credentials', ['drop-database'], 300000, undefined, 'destructive'),
+    item('stop-mattermost', 'cleanup', nativeStop(state, paths), 'Stop and remove only the task-owned Mattermost service and nginx site', [], 300000, undefined, 'destructive'),
+    item('drop-database', 'cleanup', nativeDropDatabase(state, profile), 'Drop only the task-owned PostgreSQL database and role', ['stop-mattermost'], 300000, undefined, 'destructive'),
+    item('remove-mattermost-files', 'cleanup', `set -eu; ${applicationFileOwnershipGuard(state, [APP_ROOT, DATA_ROOT, CREDENTIALS, paths.serviceFile, paths.nginxVhost, ...(paths.nginxEnableLink ? [paths.nginxEnableLink] : [])])}; rm -rf -- ${quote(APP_ROOT)} ${quote(DATA_ROOT)} ${quote(CREDENTIALS)}`, 'Remove task-owned application, persistent data, and credentials', ['drop-database'], 300000, undefined, 'destructive'),
     item('restore-stack', 'cleanup', nativeRestore(state, paths, profile), 'Restore package, service, and module state from the factual baseline', ['remove-mattermost-files'], 1200000, 'job', 'destructive')
   ]
   return envelope({
@@ -171,7 +176,8 @@ function nativeBaseline (state, paths, profile) {
     ? `dpkg-query -W -f=${quote(DPKG_PACKAGE_FORMAT)} | LC_ALL=C sort -u > ${quote(`${state}/packages.before`)}`
     : `rpm -qa --qf '%{NAME}\\n' | LC_ALL=C sort -u > ${quote(`${state}/packages.before`)}`
   return join([
-    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...owned.map(path => `test ! -e ${quote(path)}`),
+    'set -eu', `test ! -L ${quote(state)}`, `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...owned.map(path => `test ! -e ${quote(path)}; test ! -L ${quote(path)}`),
+    "if id webminai-mattermost >/dev/null 2>&1; then printf '%s\\n' 'BASELINE_DRIFT: Mattermost account already exists' >&2; exit 1; fi",
     `install -d -o root -g root -m 0700 ${quote(state)}`, packageSnapshot,
     `systemctl is-active --quiet nginx 2>/dev/null && : > ${quote(`${state}/nginx.active`)} || true`, `systemctl is-enabled --quiet nginx 2>/dev/null && : > ${quote(`${state}/nginx.enabled`)} || true`,
     `systemctl is-active --quiet ${quote(profile.service)} 2>/dev/null && : > ${quote(`${state}/postgres.active`)} || true`, `systemctl is-enabled --quiet ${quote(profile.service)} 2>/dev/null && : > ${quote(`${state}/postgres.enabled`)} || true`,
@@ -211,17 +217,10 @@ function credentialsCommand () {
   ])
 }
 
-function nativeDatabase (profile) {
+function nativeDatabase (state, profile) {
   return join([
     'set -eu', `systemctl start ${quote(profile.service)}`, 'ready=', 'for attempt in $(seq 1 60); do runuser -u postgres -- psql -Atqc \'SELECT 1\' postgres >/dev/null 2>&1 && ready=yes && break; sleep 2; done', '[ "$ready" = yes ]',
-    `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
-    `runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_roles WHERE rolname='${DATABASE_USER}'" postgres | grep -Fx 1 || runuser -u postgres -- createuser --login ${quote(DATABASE_USER)}`,
-    `runuser -u postgres -- psql -v ON_ERROR_STOP=1 -v password="$password" postgres <<'SQL'
-ALTER ROLE ${DATABASE_USER} WITH LOGIN PASSWORD :'password';
-SQL
-:`,
-    `runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_database WHERE datname='${DATABASE}'" postgres | grep -Fx 1 || runuser -u postgres -- createdb -O ${quote(DATABASE_USER)} ${quote(DATABASE)}`,
-    `PGPASSWORD="$password" psql -h 127.0.0.1 -U ${quote(DATABASE_USER)} -d ${quote(DATABASE)} -Atqc 'SELECT 1' | grep -Fx 1`, 'printf \'%s\\n\' database-ready'
+    postgresApplicationDatabaseCommand({ state, database: DATABASE, user: DATABASE_USER, credentials: CREDENTIALS })
   ])
 }
 
@@ -229,8 +228,8 @@ function nativeAcquire (state) {
   const artifact = `${state}/${ARCHIVE}`
   return join([
     'set -eu', `if [ ! -x ${quote(`${APP_ROOT}/bin/mattermost`)} ]; then`, `rm -rf -- ${quote(`${APP_ROOT}.new`)}`, `install -d -o root -g root -m 0755 ${quote(`${APP_ROOT}.new`)}`,
-    `if [ ! -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then rm -f -- ${quote(artifact)}; curl --fail --location --retry 5 --retry-delay 2 --silent --show-error --output ${quote(artifact)} ${quote(ARCHIVE_URL)}; fi`,
-    `printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(artifact)} | sha256sum -c -`, `tar -xzf ${quote(artifact)} -C ${quote(`${APP_ROOT}.new`)} --strip-components=1`,
+    `if [ ! -s ${quote(artifact)} ] || ! printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(artifact)} | sha256sum -c - >/dev/null 2>&1; then if [ -f ${quote(artifact)} ] && [ "$(wc -c < ${quote(artifact)})" -ge ${ARCHIVE_BYTES} ]; then rm -f -- ${quote(artifact)}; fi; downloaded=; for attempt in 1 2 3 4 5 6; do if curl --fail --location --continue-at - --retry 0 --connect-timeout 15 --max-time 600 --max-filesize ${ARCHIVE_BYTES} --silent --show-error --output ${quote(artifact)} ${quote(ARCHIVE_URL)}; then downloaded=yes; break; else download_status=$?; fi; case "$download_status" in 6|7|16|18|28|35|52|55|56|92) ;; *) exit "$download_status";; esac; [ "$attempt" -lt 6 ] || exit "$download_status"; sleep 2; done; [ "$downloaded" = yes ]; fi`,
+    `printf '%s  %s\\n' ${quote(ARCHIVE_SHA256)} ${quote(artifact)} | sha256sum -c - || { rm -f -- ${quote(artifact)}; exit 1; }`, `tar -xzf ${quote(artifact)} -C ${quote(`${APP_ROOT}.new`)} --strip-components=1`,
     `test -x ${quote(`${APP_ROOT}.new/bin/mattermost`)}`, `mv ${quote(`${APP_ROOT}.new`)} ${quote(APP_ROOT)}`, 'fi',
     `${quote(`${APP_ROOT}/bin/mattermost`)} version | grep -F ${quote(VERSION)}`, 'printf \'%s\\n\' mattermost-installed'
   ])
@@ -242,7 +241,7 @@ function nativeConfigure (paths, profile) {
   return join([
     'set -eu', `id webminai-mattermost >/dev/null 2>&1 || useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-mattermost`,
     `install -d -o webminai-mattermost -g webminai-mattermost -m 0750 ${quote(DATA_ROOT)} ${quote(`${DATA_ROOT}/data`)} ${quote(`${DATA_ROOT}/logs`)} ${quote(`${DATA_ROOT}/plugins`)} ${quote(`${DATA_ROOT}/client/plugins`)}`,
-    `chown -R webminai-mattermost:webminai-mattermost ${quote(APP_ROOT)} ${quote(DATA_ROOT)}`, `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
+    `chown -R webminai-mattermost:webminai-mattermost ${quote(APP_ROOT)} ${quote(DATA_ROOT)}`, `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`,
     "primary=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (field=1; field<=NF; field++) if ($field == \"src\") { print $(field+1); exit }}' || true)", "[ -n \"$primary\" ] || primary=$(hostname -I 2>/dev/null | awk '{print $1}')", "case \"$primary\" in ''|*[!0-9a-fA-F:.]*) printf 'could not resolve a safe primary address\\n' >&2; exit 1;; esac",
     `chgrp webminai-mattermost ${quote(CREDENTIALS)}`, `chmod 0710 ${quote(CREDENTIALS)}`,
     `umask 077; printf 'MM_SERVICESETTINGS_LISTENADDRESS=127.0.0.1:${APP_PORT}\\nMM_SERVICESETTINGS_SITEURL=http://%s:${PORT}\\nMM_SQLSETTINGS_DRIVERNAME=postgres\\nMM_SQLSETTINGS_DATASOURCE=postgres://${DATABASE_USER}:%s@127.0.0.1:5432/${DATABASE}?sslmode=disable&connect_timeout=10\\nMM_FILESETTINGS_DIRECTORY=${DATA_ROOT}/data\\nMM_PLUGINSETTINGS_DIRECTORY=${DATA_ROOT}/plugins\\nMM_PLUGINSETTINGS_CLIENTDIRECTORY=${DATA_ROOT}/client/plugins\\nMM_LOGSETTINGS_ENABLEFILE=false\\nMM_LOGSETTINGS_ENABLECONSOLE=true\\n' "$primary" "$password" > ${quote(`${CREDENTIALS}/service.env`)}`,
@@ -257,7 +256,7 @@ function nativeConfigure (paths, profile) {
 function nativeVerify (profile) {
   return join([
     'set -eu', waitUrl(`http://127.0.0.1:${APP_PORT}/api/v4/system/ping`, 180),
-    `${quote(`${APP_ROOT}/bin/mattermost`)} version | grep -F ${quote(VERSION)}`, `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
+    `${quote(`${APP_ROOT}/bin/mattermost`)} version | grep -F ${quote(VERSION)}`, `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`,
     `PGPASSWORD="$password" psql -h 127.0.0.1 -U ${quote(DATABASE_USER)} -d ${quote(DATABASE)} -Atqc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'" | awk '$1 > 0 { ok=1 } END { exit !ok }'`,
     `curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${PORT}/ | grep -Fx ${quote(MARKER)}`,
     `curl --fail --silent --show-error --max-time 5 http://127.0.0.1:${PORT}/api/v4/system/ping | grep -F 'OK'`,
@@ -265,29 +264,25 @@ function nativeVerify (profile) {
   ])
 }
 
-function nativeStop (paths) {
+function nativeStop (state, paths) {
   return join([
-    'set -eu', `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, `rm -f -- ${quote(paths.serviceFile)}`, 'systemctl daemon-reload',
+    'set -eu', applicationFileOwnershipGuard(state, [APP_ROOT, DATA_ROOT, CREDENTIALS, paths.serviceFile, paths.nginxVhost, ...(paths.nginxEnableLink ? [paths.nginxEnableLink] : [])]), `systemctl disable --now ${quote(SERVICE)} 2>/dev/null || true`, `rm -f -- ${quote(paths.serviceFile)}`, 'systemctl daemon-reload',
     `rm -f -- ${quote(paths.nginxVhost)}`, ...(paths.nginxEnableLink ? [`rm -f -- ${quote(paths.nginxEnableLink)}`] : []),
     'if command -v nginx >/dev/null 2>&1; then nginx -t', 'systemctl is-active --quiet nginx && systemctl reload nginx || true', 'fi'
   ])
 }
 
-function nativeDropDatabase (profile) {
-  return join([
-    'set -eu', 'if command -v psql >/dev/null 2>&1 && runuser -u postgres -- psql -Atqc \'SELECT 1\' postgres >/dev/null 2>&1; then',
-    `runuser -u postgres -- psql -v ON_ERROR_STOP=1 postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${DATABASE}' AND pid <> pg_backend_pid();" >/dev/null`,
-    `runuser -u postgres -- dropdb --if-exists ${quote(DATABASE)}`, `runuser -u postgres -- dropuser --if-exists ${quote(DATABASE_USER)}`, 'fi', 'printf \'%s\\n\' database-removed'
-  ])
+function nativeDropDatabase (state, profile) {
+  return postgresApplicationDatabaseCommand({ state, database: DATABASE, user: DATABASE_USER, credentials: CREDENTIALS, rollback: true })
 }
 
 function nativeRestore (state, paths, profile) {
   const removePackages = profile.family === 'debian'
-    ? `if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(awk '{print $1}' ${quote(`${state}/packages.added`)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages || true; fi`
-    : `if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(`${state}/packages.added`)} | tr '\\n' ' '); [ -z "$packages" ] || dnf remove -y $packages || true; fi`
-  const commands = ['set -eu', `[ -d ${quote(state)} ] || { printf '%s\\n' already-reverted; exit 0; }`]
+    ? `if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(awk '{print $1}' ${quote(`${state}/packages.added`)} | grep -Ev '^(netdata|openssh|curl|ca-certificates)(:|$)' | tr '\\n' ' '); [ -z "$packages" ] || DEBIAN_FRONTEND=noninteractive apt-get purge -y $packages; fi`
+    : `if [ -s ${quote(`${state}/packages.added`)} ]; then packages=$(grep -Ev '^(netdata|openssh|curl|ca-certificates)$' ${quote(`${state}/packages.added`)} | tr '\\n' ' '); [ -z "$packages" ] || dnf remove -y $packages; fi`
+  const commands = ['set -eu', `test ! -L ${quote(state)}`, `[ -d ${quote(state)} ] || { printf '%s\\n' already-reverted; exit 0; }`]
   if (profile.family === 'debian') {
-    commands.push(`if [ -s ${quote(`${state}/postgres-cluster.created`)} ]; then major=$(sed -n '1p' ${quote(`${state}/postgres-cluster.created`)}); case "$major" in ''|*[!0-9]*) exit 1;; esac; command -v pg_dropcluster >/dev/null 2>&1 && pg_dropcluster --stop "$major" main || true; fi`)
+    commands.push(`if [ -s ${quote(`${state}/postgres-cluster.created`)} ]; then major=$(sed -n '1p' ${quote(`${state}/postgres-cluster.created`)}); case "$major" in ''|*[!0-9]*) exit 1;; esac; command -v pg_dropcluster >/dev/null 2>&1 ; pg_dropcluster --stop "$major" main; fi`)
   } else {
     commands.push(`if [ -f ${quote(`${state}/postgres-hba.before`)} ]; then cp -a -- ${quote(`${state}/postgres-hba.before`)} ${quote(profile.hba)}; elif [ -f ${quote(profile.hba)} ]; then rule='host ${DATABASE} ${DATABASE_USER} 127.0.0.1/32 scram-sha-256'; awk -v rule="$rule" '$0 != rule' ${quote(profile.hba)} > ${quote(`${profile.hba}.webminai-new`)}; chown postgres:postgres ${quote(`${profile.hba}.webminai-new`)}; chmod 0600 ${quote(`${profile.hba}.webminai-new`)}; mv ${quote(`${profile.hba}.webminai-new`)} ${quote(profile.hba)}; fi`)
   }
@@ -298,7 +293,7 @@ function nativeRestore (state, paths, profile) {
   commands.push(`if [ ! -e ${quote(`${state}/postgres-data.existed`)} ]; then rm -rf -- ${quote(profile.dataRoot)}; fi`)
   commands.push(`if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable nginx >/dev/null 2>&1 || true; else systemctl disable nginx >/dev/null 2>&1 || true; fi`, `if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start nginx; else systemctl stop nginx 2>/dev/null || true; fi`)
   commands.push(`if [ -e ${quote(`${state}/postgres.enabled`)} ]; then systemctl enable ${quote(profile.service)} >/dev/null 2>&1 || true; else systemctl disable ${quote(profile.service)} >/dev/null 2>&1 || true; fi`, `if [ -e ${quote(`${state}/postgres.active`)} ]; then systemctl start ${quote(profile.service)}; else systemctl stop ${quote(profile.service)} 2>/dev/null || true; fi`)
-  commands.push('id webminai-mattermost >/dev/null 2>&1 && userdel webminai-mattermost 2>/dev/null || true', `rm -rf -- ${quote(state)}`)
+  commands.push('if id webminai-mattermost >/dev/null 2>&1; then userdel webminai-mattermost; fi', `rm -rf -- ${quote(state)}`)
   return join(commands)
 }
 
@@ -331,7 +326,7 @@ function writeCompose () {
   ].join('\n')
   const nginx = ['server {', `    listen ${PORT};`, '    server_name _;', '    location = / { default_type text/plain; return 200 "' + MARKER + '\\n"; }', '    location /api/ {', `        proxy_pass http://app:${APP_PORT};`, '        proxy_set_header Host $host;', '        proxy_set_header X-Real-IP $remote_addr;', '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;', '        proxy_set_header X-Forwarded-Proto $scheme;', '    }', '}'].join('\n')
   return join([
-    'set -eu', `install -d -o root -g root -m 0755 ${quote(SERVICE_ROOT)}`, `password=$(cat ${quote(`${CREDENTIALS}/database_password`)})`,
+    'set -eu', `install -d -o root -g root -m 0755 ${quote(SERVICE_ROOT)}`, `password=$(sed -n 1p ${quote(`${CREDENTIALS}/database_password`)})`,
     "primary=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (field=1; field<=NF; field++) if ($field == \"src\") { print $(field+1); exit }}' || true)", "[ -n \"$primary\" ] || primary=$(hostname -I 2>/dev/null | awk '{print $1}')", "case \"$primary\" in ''|*[!0-9a-fA-F:.]*) printf 'could not resolve a safe primary address\\n' >&2; exit 1;; esac",
     `umask 077; printf 'POSTGRES_PASSWORD=%s\\nMM_SQLSETTINGS_DATASOURCE=postgres://${DATABASE_USER}:%s@db:5432/${DATABASE}?sslmode=disable&connect_timeout=10\\nMM_SERVICESETTINGS_SITEURL=http://%s:${PORT}\\n' "$password" "$password" "$primary" > ${quote(`${CREDENTIALS}/credentials.env`)}`, `chmod 0600 ${quote(`${CREDENTIALS}/credentials.env`)}`,
     `printf '%s\\n' ${compose.split('\n').map(quote).join(' ')} > ${quote(`${SERVICE_ROOT}/compose.yaml`)}`, `chmod 0644 ${quote(`${SERVICE_ROOT}/compose.yaml`)}`,

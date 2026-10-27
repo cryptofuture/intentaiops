@@ -1,3 +1,13 @@
+import { applicationDatabaseCommand } from './linux-application-database.js'
+
+export function httpMarkerCheck (curlCommand, marker, grepFlags = '-F') {
+  return `(response=$(${curlCommand}) || exit $?; printf '%s' "$response" | grep ${quote(grepFlags)} ${quote(marker)} >/dev/null)`
+}
+
+export function applicationFileOwnershipGuard (state, paths) {
+  return `if [ ! -d ${quote(state)} ]; then for path in ${paths.map(quote).join(' ')}; do [ ! -e "$path" ] && [ ! -L "$path" ] || { printf '%s\n' 'APPLICATION_OWNERSHIP_UNCONFIRMED: preserve files and request operator review' >&2; exit 1; }; done; exit 0; fi; test ! -L ${quote(state)}`
+}
+
 /** @param {{taskId: number, linuxContext: any, docker?: any, application: any}} options */
 export function buildLinuxPhpApplicationFoundation ({ taskId, linuxContext, docker = {}, application }) {
   validateInputs(taskId, linuxContext, application)
@@ -17,7 +27,7 @@ function buildNativeFoundation ({ taskId, linuxContext, application }) {
     item('install-packages', 'packages', installPackages({ state, family, profile }), 'Install the reviewed distro-specific nginx, PHP-FPM, and MariaDB stack', ['capture-baseline'], 1800000, 'job'),
     item('verify-artifacts', 'acquire', "printf '%s\n' application-artifact-hook", 'Acquire and verify the application release', ['install-packages'], 1800000, 'job'),
     item('generate-credentials', 'secrets', credentialsCommand(application.credentials), 'Generate protected application credentials on the host', ['capture-baseline']),
-    item('prepare-database', 'database', databaseCommand({ family, profile, application }), 'Initialize MariaDB and create only the task-owned database identity', ['install-packages', 'generate-credentials']),
+    item('prepare-database', 'database', databaseCommand({ state, family, profile, application }), 'Initialize MariaDB and create only the task-owned database identity', ['install-packages', 'generate-credentials']),
     item('extract-application', 'configure', "printf '%s\n' application-extract-hook", 'Extract the verified application release', ['verify-artifacts']),
     item('configure-php-fpm', 'configure', phpFpmCommand(profile, application), 'Create the reviewed PHP-FPM pool and task-owned Unix socket', ['install-packages', 'extract-application']),
     item('configure-nginx', 'configure', nginxCommand({ state, profile, application }), 'Create and load the reviewed nginx virtual host', ['configure-php-fpm']),
@@ -35,7 +45,7 @@ function buildNativeFoundation ({ taskId, linuxContext, application }) {
       commands,
       revertCommands: nativeRevert({ state, family, profile, services, application })
     },
-    verifyApplied: `curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${application.port}/ | grep -Fq ${quote(application.marker)}`,
+    verifyApplied: httpMarkerCheck(`curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${application.port}/`, application.marker),
     verifyReverted: `test ! -e ${quote(application.webRoot)} && test ! -e ${quote(application.artifacts)} && test ! -e ${quote(application.credentials)}`,
     stateProbe: pathProbe(paths)
   }
@@ -85,14 +95,14 @@ function buildComposeFoundation ({ taskId, linuxContext, docker, application }) 
       ],
       revertCommands: composeRevert(state, application)
     },
-    verifyApplied: `cd ${quote(application.serviceRoot)} && docker compose -p ${quote(application.project)} ps --status running --services | grep -q . && curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${application.port}/ | grep -Fq ${quote(application.marker)}`,
+    verifyApplied: `cd ${quote(application.serviceRoot)} && docker compose -p ${quote(application.project)} ps --status running --services | grep -q . && ${httpMarkerCheck(`curl --fail --silent --show-error --max-time 10 http://127.0.0.1:${application.port}/`, application.marker)}`,
     verifyReverted: `test ! -e ${quote(application.serviceRoot)} && test ! -e ${quote(application.credentials)} && test ! -e ${quote(state)} && { ! command -v docker >/dev/null 2>&1 || ! docker ps -aq --filter label=com.docker.compose.project=${quote(application.project)} | grep -q .; }`,
     stateProbe: pathProbe(paths)
   }
 }
 
 function nativeBaseline ({ state, family, profile, services, paths }) {
-  return ['set -eu', `state=${quote(state)}`, 'if [ ! -s "$state/packages.before" ]; then :', `for path in ${paths.filter(path => path !== state).map(quote).join(' ')}; do [ ! -e "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`, 'install -d -o root -g root -m 0700 "$state"', packageSnapshot(family, '"$state/packages.before"'), ...services.map((service, index) => `${serviceActive(service)} && : > "$state/service-${index}.active" || true`), '[ ! -d /var/lib/mysql/mysql ] || : > "$state/database-data.existed"', profile.nginxIncludeRequired ? `if [ -f ${quote(profile.nginxMainConfig)} ]; then cp -a ${quote(profile.nginxMainConfig)} "$state/nginx.conf.before"; fi` : ':', 'fi', "printf '%s\n' baseline-ready"].join('; ')
+  return ['set -eu', mariadbDataPreflight(), `state=${quote(state)}`, 'if [ ! -s "$state/packages.before" ]; then :', `for path in ${paths.filter(path => path !== state && path !== profile.nginxMainConfig).map(quote).join(' ')}; do [ ! -e "$path" ] && [ ! -L "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`, 'install -d -o root -g root -m 0700 "$state"', packageSnapshot(family, '"$state/packages.before"'), ...services.map((service, index) => `${serviceActive(service)} && : > "$state/service-${index}.active" || true`), '[ ! -d /var/lib/mysql/mysql ] || : > "$state/database-data.existed"', profile.nginxIncludeRequired ? `if [ -f ${quote(profile.nginxMainConfig)} ]; then cp -a ${quote(profile.nginxMainConfig)} "$state/nginx.conf.before"; fi` : ':', 'fi', "printf '%s\n' baseline-ready"].join('; ')
 }
 
 function installPackages ({ state, family, profile }) {
@@ -100,12 +110,38 @@ function installPackages ({ state, family, profile }) {
   return `set -eu; status=0; ( set -e; ${packageInstall(family, profile.packages)} ) > ${log} 2>&1 || status=$?; tail -n 20 ${log} || true; [ "$status" -eq 0 ] || exit "$status"; ${packageSnapshot(family, quote(`${state}/packages.after`))}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.after`)} | grep -Ev '^(curl|netdata|netdata-|openssh|openssh-|webminai|webminai-)' > ${quote(`${state}/packages.added`)} || true; printf '%s\n' packages-ready`
 }
 
+export function mariadbDataPreflight () {
+  return "if [ -f /var/lib/mysql/auto.cnf ] || [ -f /var/lib/mysql/mysql.ibd ] || { [ -f /var/lib/mysql/mysql_upgrade_info ] && grep -Eq '^[5-8][.]' /var/lib/mysql/mysql_upgrade_info; }; then printf '%s\\n' 'Existing MySQL data requires operator-reviewed migration before installing MariaDB; data was not modified.' >&2; exit 1; fi"
+}
+
+export function wordpressArtifactCommand (artifacts) {
+  return [
+    'set -eu',
+    `install -d -o root -g root -m 0755 ${quote(artifacts)}`,
+    `if [ -s ${quote(`${artifacts}/wordpress.tar.gz`)} ] && [ -s ${quote(`${artifacts}/wordpress.tar.gz.sha1`)} ] && [ -s ${quote(`${artifacts}/wp-cli.phar`)} ] && [ -s ${quote(`${artifacts}/wp-cli.phar.sha512`)} ]; then wp_expected=$(tr -d '\r\n' < ${quote(`${artifacts}/wordpress.tar.gz.sha1`)}); wp_actual=$(sha1sum ${quote(`${artifacts}/wordpress.tar.gz`)} | awk '{print $1}'); cli_expected=$(tr -d '\r\n' < ${quote(`${artifacts}/wp-cli.phar.sha512`)}); cli_actual=$(sha512sum ${quote(`${artifacts}/wp-cli.phar`)} | awk '{print $1}'); if [ "$wp_actual" = "$wp_expected" ] && [ "$cli_actual" = "$cli_expected" ]; then printf '%s\n' artifacts-already-verified; exit 0; fi; fi`,
+    `curl --fail --location --silent --show-error --output ${quote(`${artifacts}/wordpress.tar.gz`)} https://wordpress.org/latest.tar.gz`,
+    `curl --fail --location --silent --show-error --output ${quote(`${artifacts}/wordpress.tar.gz.sha1`)} https://wordpress.org/latest.tar.gz.sha1`,
+    `expected=$(tr -d '\\r\\n' < ${quote(`${artifacts}/wordpress.tar.gz.sha1`)})`,
+    'printf \'%s\' "$expected" | grep -Eq \'^[0-9A-Fa-f]{40}$\'',
+    `actual=$(sha1sum ${quote(`${artifacts}/wordpress.tar.gz`)} | awk '{print $1}')`,
+    '[ "$actual" = "$expected" ]',
+    `curl --fail --location --silent --show-error --output ${quote(`${artifacts}/wp-cli.phar`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar`,
+    `curl --fail --location --silent --show-error --output ${quote(`${artifacts}/wp-cli.phar.sha512`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar.sha512`,
+    `expected=$(tr -d '\\r\\n' < ${quote(`${artifacts}/wp-cli.phar.sha512`)})`,
+    'printf \'%s\' "$expected" | grep -Eq \'^[0-9A-Fa-f]{128}$\'',
+    `actual=$(sha512sum ${quote(`${artifacts}/wp-cli.phar`)} | awk '{print $1}')`,
+    '[ "$actual" = "$expected" ]',
+    `chmod 0755 ${quote(`${artifacts}/wp-cli.phar`)}`,
+    'printf \'%s\n\' artifacts-verified'
+  ].join('; ')
+}
+
 function credentialsCommand (root, names = ['db_password', 'admin_password']) {
   return `set -eu; umask 077; install -d -o root -g root -m 0700 ${quote(root)}; ${names.map(name => `[ -s ${quote(`${root}/${name}`)} ] || openssl rand -hex 32 > ${quote(`${root}/${name}`)}`).join('; ')}; chmod 0600 ${names.map(name => quote(`${root}/${name}`)).join(' ')}; printf '%s\n' credentials-ready`
 }
 
-function databaseCommand ({ family, profile, application }) {
-  return `set -eu; initialized=; if [ ! -d /var/lib/mysql/mysql ]; then mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null; initialized=yes; fi; install -d -o mysql -g mysql -m 0755 /run/mariadb /run/mysqld; if [ -n "$initialized" ] || ! ${serviceActive(profile.mariadbService)}; then ${serviceRestart(profile.mariadbService, family)}; fi; ready=; for attempt in $(seq 1 30); do mariadb --protocol=socket -uroot -e 'SELECT 1' >/dev/null 2>&1 && { ready=yes; break; }; sleep 1; done; [ "$ready" = yes ]; dbpass=$(sed -n 1p ${quote(`${application.credentials}/db_password`)}); printf "CREATE DATABASE IF NOT EXISTS ${application.database} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS '${application.database}'@'${profile.databaseHost}' IDENTIFIED BY '%s'; ALTER USER '${application.database}'@'${profile.databaseHost}' IDENTIFIED BY '%s'; GRANT ALL PRIVILEGES ON ${application.database}.* TO '${application.database}'@'${profile.databaseHost}'; FLUSH PRIVILEGES;\n" "$dbpass" "$dbpass" | mariadb --protocol=socket -uroot >/dev/null 2>&1; printf '%s\n' database-ready`
+function databaseCommand ({ state, family, profile, application }) {
+  return `set -eu; initialized=; if [ ! -d /var/lib/mysql/mysql ]; then mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql >/dev/null; initialized=yes; fi; install -d -o mysql -g mysql -m 0755 /run/mariadb /run/mysqld; if [ -n "$initialized" ] || ! ${serviceActive(profile.mariadbService)}; then ${serviceRestart(profile.mariadbService, family)}; fi; ready=; for attempt in $(seq 1 30); do mariadb --protocol=socket -uroot -e 'SELECT 1' >/dev/null 2>&1 && { ready=yes; break; }; sleep 1; done; [ "$ready" = yes ]; ${applicationDatabaseCommand({ state, database: application.database, host: profile.databaseHost, credentials: application.credentials })}`
 }
 
 function phpFpmCommand (profile, application) {
@@ -120,13 +156,15 @@ function nginxCommand ({ state, profile, application }) {
   const lines = ['server {', `    listen 0.0.0.0:${application.port};`, '    server_name _;', `    root ${application.webRoot};`, '    index index.php index.html;', '    location / { try_files $uri $uri/ /index.php?$args; }', `    location ~ \\.php$ { include fastcgi_params; fastcgi_pass ${profile.nginxFastcgiPass}; fastcgi_param HTTP_HOST $http_host; fastcgi_param SERVER_PORT $server_port; fastcgi_param REQUEST_SCHEME $scheme; fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; }`, '}']
   const include = profile.nginxIncludeRequired ? `if [ ! -f ${quote(`${state}/nginx.conf.before`)} ]; then cp -a ${quote(profile.nginxMainConfig)} ${quote(`${state}/nginx.conf.before`)}; fi; grep -Fqx ${quote(`    ${profile.nginxIncludeDirective}`)} ${quote(profile.nginxMainConfig)} || sed -i '$i\\    ${escapeSed(profile.nginxIncludeDirective)}' ${quote(profile.nginxMainConfig)};` : ''
   const link = profile.nginxEnableLink ? `ln -sfn ${quote(profile.nginxVhost)} ${quote(profile.nginxEnableLink)};` : ''
-  return `set -eu; ${include} install -d -o root -g root -m 0755 ${quote(profile.nginxVhost.slice(0, profile.nginxVhost.lastIndexOf('/')))}; printf '%s\n' ${lines.map(quote).join(' ')} > ${quote(profile.nginxVhost)}; ${link} nginx -t; ${serviceRestart(profile.nginxService, profileFamily(profile))}; printf '%s\n' nginx-ready`
+  const check = profileFamily(profile) === 'alpine' ? `rc-service ${quote(profile.nginxService)} checkconfig` : 'nginx -t'
+  return `set -eu; ${include} install -d -o root -g root -m 0755 ${quote(profile.nginxVhost.slice(0, profile.nginxVhost.lastIndexOf('/')))}; printf '%s\n' ${lines.map(quote).join(' ')} > ${quote(profile.nginxVhost)}; ${link} ${check}; ${serviceRestart(profile.nginxService, profileFamily(profile))}; printf '%s\n' nginx-ready`
 }
 
 function nativeRevert ({ state, family, profile, services, application }) {
+  const ownership = applicationFileOwnershipGuard(state, nativePaths(application, profile, state).filter(path => path !== state && path !== profile.nginxMainConfig))
   return [
-    item('remove-application-database', 'cleanup', `set +e; [ -d ${quote(state)} ] || exit 0; printf "DROP DATABASE IF EXISTS ${application.database}; DROP USER IF EXISTS '${application.database}'@'localhost'; DROP USER IF EXISTS '${application.database}'@'127.0.0.1'; FLUSH PRIVILEGES;\n" | mariadb --protocol=socket -uroot >/dev/null 2>&1 || true; exit 0`, 'Drop only the task-owned database and local users', []),
-    item('remove-application-files', 'cleanup', `set -eu; rm -rf -- ${quote(application.webRoot)} ${quote(application.artifacts)} ${quote(application.credentials)} ${quote(profile.phpFpmRuntimeDirectory)}; rm -f -- ${quote(profile.phpFpmPool)} ${quote(profile.nginxVhost)} ${profile.phpExtensionConfig ? quote(profile.phpExtensionConfig) : ''} ${profile.nginxEnableLink ? quote(profile.nginxEnableLink) : ''}; ${profile.nginxIncludeRequired ? `if [ -f ${quote(`${state}/nginx.conf.before`)} ]; then cp -a ${quote(`${state}/nginx.conf.before`)} ${quote(profile.nginxMainConfig)}; fi` : ':'}; printf '%s\n' files-removed`, 'Remove only task-owned application and service configuration', ['remove-application-database']),
+    item('remove-application-database', 'cleanup', applicationDatabaseCommand({ state, database: application.database, host: profile.databaseHost, rollback: true }), 'Drop only the task-owned database and local user after verifying ownership', []),
+    item('remove-application-files', 'cleanup', `set -eu; ${ownership}; rm -rf -- ${quote(application.webRoot)} ${quote(application.artifacts)} ${quote(application.credentials)} ${quote(profile.phpFpmRuntimeDirectory)}; rm -f -- ${quote(profile.phpFpmPool)} ${quote(profile.nginxVhost)} ${profile.phpExtensionConfig ? quote(profile.phpExtensionConfig) : ''} ${profile.nginxEnableLink ? quote(profile.nginxEnableLink) : ''}; ${profile.nginxIncludeRequired ? `if [ -f ${quote(`${state}/nginx.conf.before`)} ]; then cp -a ${quote(`${state}/nginx.conf.before`)} ${quote(profile.nginxMainConfig)}; fi` : ':'}; printf '%s\n' files-removed`, 'Remove only task-owned application and service configuration', ['remove-application-database']),
     item('restore-packages-services', 'cleanup', restoreCommand({ state, family, services }), 'Restore service activity and remove only task-added packages', ['remove-application-files'])
   ]
 }
@@ -153,8 +191,8 @@ function composeRevert (state, application) {
 }
 
 function restoreCommand ({ state, family, services }) {
-  const restore = services.map((service, index) => `[ -e ${quote(`${state}/service-${index}.active`)} ] && ${serviceRestart(service, family)} || ${serviceStop(service, family)}`).join('; ')
-  return `set +e; [ -d ${quote(state)} ] || exit 0; ${restore}; ${removeAddedPackages(family, state)}; [ -e ${quote(`${state}/database-data.existed`)} ] || rm -rf -- /var/lib/mysql /run/mysqld /run/mariadb; rm -rf -- ${quote(state)}; exit 0`
+  const restore = services.map((service, index) => `if [ -e ${quote(`${state}/service-${index}.active`)} ]; then ${serviceRestart(service, family)}; else ${serviceStop(service, family)}; fi`).join('; ')
+  return `set -eu; [ -d ${quote(state)} ] || exit 0; ${restore}; ${removeAddedPackages(family, state)}; [ -e ${quote(`${state}/database-data.existed`)} ] || rm -rf -- /var/lib/mysql /run/mysqld /run/mariadb; rm -rf -- ${quote(state)}; exit 0`
 }
 
 function packageSnapshot (family, destination) {
@@ -169,7 +207,7 @@ function packageInstall (family, packages) {
   if (family === 'debian') return `env DEBIAN_FRONTEND=noninteractive apt-get update; env DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade -y ${list}`
   if (family === 'alpine') return `apk add --no-cache ${list}`
   if (family === 'arch') return `pacman -Sy --noconfirm --needed ${list}`
-  if (family === 'suse') return `zypper --non-interactive refresh --force; zypper --non-interactive install --no-recommends ${list}`
+  if (family === 'suse') return `zypper --non-interactive refresh; zypper --non-interactive install --no-recommends ${list}`
   return `dnf -y install ${list}`
 }
 

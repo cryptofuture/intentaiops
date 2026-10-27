@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
-import { buildCandidatePlanningContext, buildCommonTask, commonTaskEligibility, listCommonTasks, listEligibleCommonTasks } from '../src/common-tasks.js'
+import { buildCandidatePlanningContext, buildCommonTask, commonTaskEligibility, commonTaskFoundationIds, listCommonTasks, listEligibleCommonTasks } from '../src/common-tasks.js'
 import { rootExecutionPolicy } from '../src/execution-policy.js'
 import { LinuxHostContextService } from '../src/linux-host-context.js'
 import { validateCommandPlan } from '../src/plan-validator.js'
+import { validateDockerAndSecrets } from '../src/planner-platform-policy.js'
 import { hostHealthProfile, isHostHealthTask } from '../src/host-health-task.js'
 import { isSystemUpdateTask, systemUpdateProfile } from '../src/system-update-task.js'
+
+test('native n8n declares its SQLite workflow without a database server foundation', () => {
+  assert.deepEqual(commonTaskFoundationIds('n8n-linux', { platform: 'linux', docker: { preferred: false } }), ['linux-baseline', 'host-generated-credentials', 'service-verification', 'safe-baseline-rollback'])
+  assert.ok(commonTaskFoundationIds('n8n-linux', { platform: 'linux', docker: { preferred: true } }).includes('linux-docker-compose'))
+})
 
 test('common task catalog contains ten syntactically valid reversible plans', () => {
   const available = listCommonTasks({ category: 'system' })
@@ -130,12 +136,29 @@ test('maintenance catalog installs current-release updates without reboot or rel
   assert.match(linux.find(item => item.id === 'install-current-release-updates').command, /apt-get -y .* dist-upgrade/u)
   assert.match(linux.find(item => item.id === 'install-current-release-updates').command, /zypper --non-interactive update/u)
   const freebsd = buildCommonTask('system-update-freebsd', 222, { platform: 'freebsd' }).plan.commands
+  assert.equal(freebsd.find(item => item.id === 'install-current-release-updates').executionMode, 'job')
+  assert.equal(freebsd.find(item => item.id === 'install-current-release-updates').timeoutMs, 3600000)
   assert.match(freebsd.find(item => item.id === 'report-system-update').command, /installed-userland-before/u)
   assert.match(freebsd.find(item => item.id === 'report-system-update').command, /full-base-update-log/u)
   const windows = buildCommonTask('system-update-windows', 221, { platform: 'windows' }).plan.commands
   assert.match(windows.find(item => item.id === 'install-current-release-updates').command, /Test-FeatureUpgrade/u)
   assert.match(windows.find(item => item.id === 'install-current-release-updates').command, /3689bdc8-b205-4af4-8d4a-a63924c5e9d5/u)
   assert.match(windows.find(item => item.id === 'report-system-update').command, /AvailableFeatureUpgrades/u)
+})
+
+test('release indexes retain newer two-digit major versions before limiting output', () => {
+  const report = buildCommonTask('system-update-linux', 230, { platform: 'linux' }).plan.commands.find(item => item.id === 'report-system-update').command
+  const versions = ['10', '10.0', '10.1', '10.2', '8', ...Array.from({ length: 11 }, (_, i) => `8.${i}`), '9', ...Array.from({ length: 9 }, (_, i) => `9.${i}`), '9.8']
+  const index = versions.map(version => `<a href="${version}/">${version}/</a>`).join('\n')
+  for (const [id, label] of [['almalinux', 'AlmaLinux'], ['rocky', 'Rocky Linux']]) {
+    const command = report.split(`${id}) `)[1].split(' ;; ')[0]
+    const result = spawnSync('/bin/sh', ['-c', `curl () { printf '%s\\n' '${index}'; }; ${command}`], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    const lines = result.stdout.trim().split('\n')
+    assert.equal(lines.length, 10)
+    assert.ok(lines.includes(`published-release: ${label} 10.2`), result.stdout)
+    assert.ok(lines.indexOf(`published-release: ${label} 10.2`) > lines.indexOf(`published-release: ${label} 9.8`))
+  }
 })
 
 test('common task catalog exposes every promoted Linux application candidate', () => {
@@ -169,11 +192,57 @@ test('Intent AI Ops installer is the last application task on every host platfor
     assert.equal(validateCommandPlan(built.plan, rootExecutionPolicy({})), built.plan)
     assert.match(built.plan.commands.find(command => command.id === 'install-intent-ai-ops').command, /raw\.githubusercontent\.com/u)
     assert.equal(built.plan.revertCommands.length, 1)
+    if (platform === 'freebsd') {
+      const install = built.plan.commands.find(command => command.id === 'install-intent-ai-ops').command
+      const rollback = built.plan.revertCommands[0].command
+      assert.match(install, /if \[ ! -e "\$state\/packages[.]before" \]/u)
+      assert.match(install, /trap 'status=\$\?/u)
+      assert.match(install, /packages[.]after/u)
+      assert.match(rollback, /test -s "\$state\/packages[.]before"; test -s "\$state\/packages[.]after"/u)
+      assert.match(rollback, /comm -13/u)
+      assert.match(rollback, /grep -Ev/u)
+      assert.doesNotMatch(rollback, /pkg delete -f|pkg delete[^;]+\|\| true/u)
+    }
     if (platform !== 'windows') {
+      const install = built.plan.commands.find(command => command.id === 'install-intent-ai-ops').command
+      for (const marker of ['owns-root', 'installed']) {
+        assert.ok(install.includes(`: > "$state/${marker}"; chmod 0600 "$state/${marker}"`))
+      }
       for (const command of [...built.plan.commands, ...built.plan.revertCommands]) {
         const syntax = spawnSync('/bin/sh', ['-n', '-c', command.command], { encoding: 'utf8' })
         assert.equal(syntax.status, 0, `${platform}/${command.id}: ${syntax.stderr}`)
       }
+    }
+  }
+})
+
+test('promoted native Linux applications remain eligible across the lab distributions', async () => {
+  const service = new LinuxHostContextService({ fetchImpl: async () => new Response('official release', { status: 200 }) })
+  const common = ['wordpress', 'woocommerce', 'joomla', 'drupal', 'prestashop', 'moodle', 'n8n', 'intent-ai-ops']
+  const hosts = [
+    ['almalinux', '9.8', 'dnf', ['jellyfin', 'mattermost']],
+    ['alpine', '3.23', 'apk', []],
+    ['arch', '', 'pacman', ['jellyfin']],
+    ['debian', '13', 'apt', ['jellyfin', 'mattermost']],
+    ['fedora', '44', 'dnf', ['jellyfin']],
+    ['opensuse-leap', '16.0', 'zypper', ['jellyfin']],
+    ['ol', '9.8', 'dnf', ['jellyfin', 'mattermost']],
+    ['rocky', '9.8', 'dnf', ['jellyfin', 'mattermost']],
+    ['ubuntu', '24.04', 'apt', ['jellyfin', 'mattermost', 'ghost', 'odoo']]
+  ]
+  for (const [id, versionId, manager, extra] of hosts) {
+    const linuxContext = await service.build({
+      inventory: { info: { agents: [{ application: { os: 'Linux' } }] } },
+      execution: { platform: 'linux', architecture: 'x86_64', init: id === 'alpine' ? 'openrc' : 'systemd', osRelease: { ID: id, VERSION_ID: versionId }, commands: { [manager]: true } }
+    })
+    const options = { platform: 'linux', category: 'application', linuxContext, docker: { preferred: false, ready: false, hostIsContainer: true } }
+    const expected = [...common, ...extra].map(name => `${name}-linux`).sort()
+    assert.deepEqual(listEligibleCommonTasks(options).map(task => task.id).sort(), expected, id)
+    for (const catalogId of expected) {
+      const built = buildCommonTask(catalogId, 901, options)
+      assert.equal(validateCommandPlan(built.plan, rootExecutionPolicy({})), built.plan, `${id}/${catalogId}`)
+      assert.doesNotThrow(() => validateDockerAndSecrets(built.plan, { webminaiDocker: options.docker }), `${id}/${catalogId} must remain reusable under AI planning policy`)
+      assert.ok(!built.plan.commands.some(command => command.id === 'record-compatibility'), `${id}/${catalogId} must deploy, not substitute a no-change report`)
     }
   }
 })
@@ -202,8 +271,63 @@ test('Intent AI Ops macOS and Windows tasks install directly on the host', () =>
   })
   const windowsCommand = windows.plan.commands.find(command => command.id === 'install-intent-ai-ops').command
   assert.match(windowsCommand, /Copy-Item -LiteralPath/u)
-  assert.match(windowsCommand, /C:\\ProgramData\\IntentAIOps/u)
+  assert.match(windowsCommand, /C:\\ProgramData\\IntentAIOps\\Cli/u)
+  assert.ok(!windows.plan.modifiedFiles.includes('C:\\ProgramData\\IntentAIOps'))
+  assert.match(windows.plan.commands[0].command, /user-path-was-absent/u)
+  assert.match(windows.plan.revertCommands[0].command, /user-path-was-absent/u)
+  assert.match(windows.plan.commands[0].command, /DoNotExpandEnvironmentNames/u)
+  assert.match(windows.plan.commands[0].command, /Get-Command intentaiops\.cmd[^;]+-or \(\(Test-Path/u)
+  assert.match(windows.plan.revertCommands[0].command, /RegistryValueKind/u)
+  assert.match(windows.plan.revertCommands[0].command, /PATH_CHANGED/u)
+  assert.doesNotMatch(windows.plan.revertCommands[0].command, /SetEnvironmentVariable/u)
+  assert.match(windows.stateProbe, /machinePathDigest=.*userPathDigest=/u)
   assert.doesNotMatch(windowsCommand, /Docker|WSL|container/u)
+})
+
+test('FreeBSD Automatic selects every available Podman route while retaining explicit host-only exceptions', () => {
+  const containerApps = new Set(['wordpress', 'woocommerce', 'joomla', 'drupal', 'prestashop', 'moodle', 'nextcloud', 'odoo', 'home-assistant', 'magento'].map(name => `${name}-freebsd`))
+  const nativeApps = new Set(['jellyfin', 'mattermost', 'n8n', 'ghost', 'intent-ai-ops'].map(name => `${name}-freebsd`))
+  const applications = listCommonTasks({ category: 'application', platform: 'freebsd' }).filter(task => !task.prerequisite)
+  assert.equal(applications.length, containerApps.size + nativeApps.size)
+  for (const release of ['14.4-RELEASE-p12', '15.1-RELEASE-p6']) {
+    for (const preference of [undefined, 'auto', 'enabled']) {
+      const execution = { platform: 'freebsd', architecture: 'amd64', freebsdVersion: release, memoryBytes: 4294967296, docker: { ready: true, daemonReachable: true, hostIsContainer: false } }
+      for (const application of applications) {
+        assert.ok(containerApps.has(application.id) || nativeApps.has(application.id), 'New application requires an explicit route expectation')
+        const plan = buildCommonTask(application.id, 901, { platform: 'freebsd', freebsdExecution: execution, docker: { preference, ready: true, preferred: true } }).plan
+        validateCommandPlan(plan, rootExecutionPolicy({}))
+        const commands = plan.commands.map(command => command.command).join('\n')
+        const candidateEnabled = preference === 'enabled' && application.id !== 'intent-ai-ops-freebsd'
+        const additionalQualified = ['jellyfin-freebsd', 'n8n-freebsd'].includes(application.id) || (['ghost-freebsd', 'mattermost-freebsd'].includes(application.id) && release.startsWith('15.1-'))
+        assert.equal(/\bpodman(?:-compose)?\s/u.test(commands), containerApps.has(application.id) || candidateEnabled || additionalQualified, `${release}/${preference ?? 'default'}/${application.id}`)
+        assert.doesNotMatch(commands, /\bdocker(?:-compose)?\s/u)
+      }
+    }
+  }
+})
+
+test('FreeBSD Disabled rejects container-only tasks while retaining existing native routes', () => {
+  const containerOnly = new Set(['wordpress', 'woocommerce', 'joomla', 'drupal', 'prestashop', 'moodle', 'nextcloud'].map(name => `${name}-freebsd`))
+  for (const release of ['14.4-RELEASE-p12', '15.1-RELEASE-p6']) {
+    const execution = { platform: 'freebsd', architecture: 'amd64', freebsdVersion: release, memoryBytes: 4294967296, docker: { ready: true, daemonReachable: true, hostIsContainer: false } }
+    for (const inventoryOnly of [false, true]) {
+      const docker = { preference: 'disabled', preferred: false, ready: true }
+      const options = { platform: 'freebsd', ...(inventoryOnly ? { inventory: { webminaiExecution: execution, webminaiDocker: docker } } : { freebsdExecution: execution, docker }) }
+      for (const application of listCommonTasks({ category: 'application', platform: 'freebsd' }).filter(task => !task.prerequisite)) {
+        if (containerOnly.has(application.id)) {
+          assert.throws(() => buildCommonTask(application.id, 902, options), /Podman is disabled/u)
+          assert.equal(commonTaskEligibility(application.id, options).eligible, false)
+        } else {
+          const built = buildCommonTask(application.id, 902, options)
+          assert.ok(built.plan.commands.every(command => !/\bpodman(?:-compose)?\s/u.test(command.command)))
+          assert.equal(commonTaskEligibility(application.id, options).eligible, true)
+        }
+      }
+      for (const definition of listCommonTasks({ platform: 'freebsd' }).filter(task => ['diagnostic', 'maintenance'].includes(task.category))) {
+        assert.equal(commonTaskEligibility(definition.id, options).eligible, true, 'Disabled must preserve inspection and maintenance')
+      }
+    }
+  }
 })
 
 test('verified FreeBSD catalog exposes native PHP application routes', () => {
@@ -285,7 +409,8 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd', docker: { daemonReachable: true, composeAvailable: true } }
   })
   assert.equal(validateCommandPlan(jellyfin.plan, rootExecutionPolicy({})), jellyfin.plan)
-  assert.match(jellyfin.plan.commands.find(item => item.id === 'install-jellyfin-runtime').command, /jellyfin-10\.11\.11/u)
+  assert.match(jellyfin.plan.commands.find(item => item.id === 'install-jellyfin-runtime').command, /jellyfin-\$package_version/u)
+  assert.ok(jellyfin.plan.commands.find(item => item.id === 'install-jellyfin-runtime').command.includes('^10[.]11[.]11(_[0-9]+)?(,[0-9]+)?$'))
   assert.match(jellyfin.plan.commands.find(item => item.id === 'prepare-jellyfin').command, /\[ ! -d .*99-jellyfin-freebsd.* \] \|\| exit 0/u)
   assert.match(jellyfin.plan.commands.find(item => item.id === 'deploy-jellyfin').command, /Startup\/Complete/u)
   assert.match(jellyfin.verifyApplied, /System\/Info\/Public/u)
@@ -294,7 +419,7 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd', docker: { daemonReachable: true, composeAvailable: true } }
   })
   assert.equal(validateCommandPlan(mattermost.plan, rootExecutionPolicy({})), mattermost.plan)
-  assert.match(mattermost.plan.commands.find(item => item.id === 'install-mattermost-runtime').command, /mattermost-server-11\.7\.3_1/u)
+  assert.match(mattermost.plan.commands.find(item => item.id === 'install-mattermost-runtime').command, /mattermost-server-11\.7\.10_2/u)
   assert.match(mattermost.plan.commands.find(item => item.id === 'initialize-mattermost-admin').command, /system_admin/u)
   assert.match(mattermost.verifyApplied, /api\/v4\/system\/ping/u)
   const n8n = buildCommonTask('n8n-freebsd', 101, {
@@ -302,8 +427,9 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd', docker: { daemonReachable: true, composeAvailable: true } }
   })
   assert.equal(validateCommandPlan(n8n.plan, rootExecutionPolicy({})), n8n.plan)
-  assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-runtime').command, /node24-24\.18\.0/u)
-  assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /n8n@2\.33\.7/u)
+  assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-runtime').command, /for package in 'node24' 'npm-node24'/u)
+  assert.match(n8n.plan.commands.find(item => item.id === 'resolve-n8n-dependencies').command, /n8n@2\.33\.7/u)
+  assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /ci --ignore-scripts/u)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /SQLITE_DQS/u)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /-Bsymbolic/u)
   assert.match(n8n.plan.commands.find(item => item.id === 'install-n8n-application').command, /application-installed/u)
@@ -322,32 +448,34 @@ test('verified FreeBSD catalog exposes native PHP application routes', () => {
     freebsdExecution: { platform: 'freebsd' }
   })
   assert.equal(validateCommandPlan(odoo.plan, rootExecutionPolicy({})), odoo.plan)
-  assert.match(odoo.plan.commands.find(item => item.id === 'install-odoo-runtime').command, /postgresql17-server-17\.10/u)
+  assert.match(odoo.plan.commands.find(item => item.id === 'install-odoo-runtime').command, /'postgresql17-server' 'nginx'/u)
   assert.equal(odoo.plan.commands.find(item => item.id === 'install-odoo-runtime').timeoutMs, 3600000)
   assert.match(odoo.plan.commands.find(item => item.id === 'install-odoo-application').command, /GEVENTSETUP_EMBED_LIBEV=0/u)
   assert.match(odoo.plan.commands.find(item => item.id === 'configure-odoo').command, /CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1/u)
   assert.doesNotMatch(odoo.plan.commands.find(item => item.id === 'install-odoo-runtime').command, /pkg clean/u)
-  assert.match(odoo.verifyApplied, /odoo\/web\/login/u)
+  assert.match(odoo.verifyApplied, /18112\/web\/login/u)
+  assert.match(odoo.verifyApplied, /18112\/__intentaiops-health/u)
   const homeAssistant = buildCommonTask('home-assistant-freebsd', 104, {
     platform: 'freebsd',
     freebsdExecution: { platform: 'freebsd' }
   })
   assert.equal(validateCommandPlan(homeAssistant.plan, rootExecutionPolicy({})), homeAssistant.plan)
-  assert.match(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-runtime').command, /python314-3\.14\.7/u)
+  assert.match(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-runtime').command, /'python314' 'py314-sqlite3'/u)
   assert.match(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-application').command, /uv==0\.11\.31/u)
   assert.match(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-application').command, /application-installed/u)
   assert.doesNotMatch(homeAssistant.plan.commands.find(item => item.id === 'install-home-assistant-runtime').command, /pkg clean/u)
   assert.match(homeAssistant.plan.commands.find(item => item.id === 'verify-home-assistant').command, /for attempt in \$\(jot 90\)/u)
   assert.match(homeAssistant.plan.commands.find(item => item.id === 'initialize-home-assistant').command, /for attempt in \$\(jot 60\)/u)
-  assert.match(homeAssistant.verifyApplied, /homeassistant\//u)
+  assert.match(homeAssistant.verifyApplied, /18115\/__intentaiops-health/u)
+  assert.match(homeAssistant.verifyApplied, /18115\/ \| grep -Fi 'home assistant'/u)
   const magento = buildCommonTask('magento-freebsd', 105, {
     platform: 'freebsd',
     freebsdExecution: { platform: 'freebsd' }
   })
   assert.equal(validateCommandPlan(magento.plan, rootExecutionPolicy({})), magento.plan)
-  assert.match(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /php84-8\.4\.24/u)
+  assert.match(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /'php84' 'php84-composer'/u)
   assert.equal(magento.plan.commands.find(item => item.id === 'install-magento-runtime').timeoutMs, 3600000)
-  assert.match(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /opensearch219-2\.19\.5/u)
+  assert.match(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /'opensearch219' 'valkey8'/u)
   assert.match(magento.plan.commands.find(item => item.id === 'install-magento-source').command, /application-installed/u)
   assert.match(magento.plan.commands.find(item => item.id === 'initialize-magento').command, /application-initialized/u)
   assert.doesNotMatch(magento.plan.commands.find(item => item.id === 'install-magento-runtime').command, /pkg clean/u)
@@ -421,10 +549,30 @@ test('Linux Docker and FreeBSD Podman common tasks expose actionable platform pr
     docker: { platform: 'freebsd', preference: 'auto', ready: false, installSupported: true, installMethod: 'freebsd-podman-linux' }
   })
   assert.equal(validateCommandPlan(freebsd.plan, rootExecutionPolicy({})), freebsd.plan)
-  assert.match(freebsd.plan.commands[0].command, /FreeBSD 15 or newer/u)
+  assert.match(freebsd.plan.commands[0].command, /FreeBSD 14[.]4 or 15[.]1\+/u)
   assert.match(freebsd.plan.commands[0].command, /nested virtualization are not required/u)
   assert.match(freebsd.plan.commands.find(item => item.id === 'install-podman-suite').command, /podman-suite py312-podman-compose/u)
+  const podmanInstall = freebsd.plan.commands.find(item => item.id === 'install-podman-suite').command
+  assert.ok(podmanInstall.includes('REBOOT_REQUIRED'))
+  assert.ok(podmanInstall.indexOf('REBOOT_REQUIRED') < podmanInstall.indexOf('pkg install'), 'Reject missing matching kernel facilities before package changes')
   assert.match(freebsd.plan.revertCommands.find(item => item.id === 'verify-podman-baseline').command, /\[ ! -d .*121-freebsd-podman.* \] \|\|/u)
+})
+
+test('FreeBSD bootstrap preserves pre-existing Podman workload lifecycle', () => {
+  const built = buildCommonTask('podman-freebsd', 121, { platform: 'freebsd', freebsdExecution: { platform: 'freebsd', docker: { installSupported: true } } })
+  assert.match(built.plan.commands.find(item => item.id === 'capture-podman-baseline').command, /command -v podman[^;]+podman[.]preexisting/u)
+  const install = built.plan.commands.find(item => item.id === 'install-podman-suite').command
+  const restore = built.plan.revertCommands.find(item => item.id === 'restore-podman-baseline').command
+  for (const command of [install, restore]) {
+    const guard = command.match(/\[ -e "\$state\/podman[.]preexisting" \][^;]+service podman (?:start|stop)[^;]+/u)?.[0]
+    assert.ok(guard)
+    for (const existing of [true, false]) {
+      const fixture = `test () { [ "$2" = /fixture/podman.preexisting ] && ${existing ? 'return 0' : 'return 1'}; return 1; }; service () { called=yes; }; called=no; state=/fixture; `
+      const result = spawnSync('/bin/sh', ['-c', fixture + guard.replace(/\[ -e ("[^"]+") \]/gu, 'test -e $1') + '; printf "$called"'], { encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(result.stdout, existing ? 'no' : 'yes')
+    }
+  }
 })
 
 test('macOS catalog exposes a virtualization-gated Colima prerequisite', () => {
@@ -446,7 +594,13 @@ test('macOS catalog exposes a virtualization-gated Colima prerequisite', () => {
   assert.equal(validateCommandPlan(built.plan, rootExecutionPolicy({})), built.plan)
   assert.match(built.plan.commands[0].command, /kern\.hv_support/u)
   assert.match(built.plan.commands[0].command, /MACOS_HYPERVISOR_UNAVAILABLE/u)
-  assert.match(built.plan.commands.find(item => item.id === 'install-colima-toolchain').command, /brew.*install.*colima.*docker.*docker-compose/u)
+  assert.match(built.plan.commands.find(item => item.id === 'install-colima-toolchain').command, /for formula in.*colima.*docker.*docker-compose/u)
+  assert.match(built.plan.commands.find(item => item.id === 'install-colima-toolchain').command, /HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1/u)
+  assert.match(built.plan.commands.find(item => item.id === 'install-colima-toolchain').command, /docker-buildx/u)
+  assert.match(built.plan.commands.find(item => item.id === 'verify-colima').command, /buildx version/u)
+  assert.match(built.plan.commands.find(item => item.id === 'capture-colima-baseline').command, /default-profile\.existed/u)
+  assert.match(built.plan.commands.find(item => item.id === 'start-colima').command, /default-profile\.existed.*colima start'.*default-profile\.created/u)
+  assert.doesNotMatch(built.plan.revertCommands.find(item => item.id === 'remove-task-colima').command, /rm -rf/u)
   assert.doesNotMatch(built.plan.commands.map(item => item.command).join('\n'), /Docker\.app/u)
   for (const command of [...built.plan.commands, ...built.plan.revertCommands]) {
     const syntax = spawnSync('/bin/sh', ['-n', '-c', command.command], { encoding: 'utf8' })
@@ -465,6 +619,7 @@ test('macOS catalog exposes a virtualization-gated Colima prerequisite', () => {
   assert.equal(validateCommandPlan(wordpress.plan, rootExecutionPolicy({})), wordpress.plan)
   assert.match(wordpress.plan.commands.find(item => item.id === 'write-compose').command, /wordpress:7\.0\.2-php8\.3-fpm/u)
   assert.match(wordpress.plan.commands.find(item => item.id === 'write-compose').command, /\/Users\/mac\/\.webminai\/credentials\/wordpress/u)
+  assert.match(wordpress.plan.commands.find(item => item.id === 'write-compose').command, /unset DOCKER_CONTEXT/u)
   assert.doesNotMatch(JSON.stringify(wordpress.plan), /\/var\/lib\/webminai|\/opt\/webminai|\/root\/wordpress_credentials|systemctl|apt-get|dpkg/u)
   for (const command of [...wordpress.plan.commands, ...wordpress.plan.revertCommands]) {
     const syntax = spawnSync('/bin/sh', ['-n', '-c', command.command], { encoding: 'utf8' })
@@ -482,6 +637,14 @@ test('macOS catalog exposes a virtualization-gated Colima prerequisite', () => {
     assert.match(serialized, /DOCKER_HOST='unix:\/\/\/Users\/mac\/\.colima\/default\/docker\.sock'/u)
     assert.doesNotMatch(serialized, /\/opt\/webminai\/services|\/root\/[a-z_-]+_credentials|\/var\/lib\/webminai\/task-state|systemctl (start|stop) docker/u)
     assert.doesNotMatch(serialized, /stat -c|ip -4 route|hostname -I|\$\(seq /u)
+    assert.deepEqual(candidate.plan.commands.find(command => command.id.startsWith('start-')).diagnostic, { kind: 'compose', target: `/Users/mac/.webminai/services/${application}` })
+    if (['ghost', 'magento'].includes(application)) {
+      assert.equal(candidate.plan.commands[0].id, 'validate-image-cpu')
+      assert.equal(candidate.plan.commands[0].timeoutMs, 30000)
+      assert.match(candidate.plan.commands[0].command, /colima ssh/u)
+      assert.match(candidate.plan.commands[0].command, /CPU_IMAGE_COMPATIBILITY_UNVERIFIED/u)
+      assert.ok(candidate.plan.commands.find(command => command.id === 'capture-baseline').dependsOn.includes('validate-image-cpu'))
+    }
     for (const command of [...candidate.plan.commands, ...candidate.plan.revertCommands]) {
       const syntax = spawnSync('/bin/sh', ['-n', '-c', command.command], { encoding: 'utf8' })
       assert.equal(syntax.status, 0, `${application}/${command.id}: ${syntax.stderr}`)
@@ -765,6 +928,8 @@ test('verified PrestaShop task resolves nginx and PHP-FPM socket routes without 
     assert.equal(built.plan.applicationDelta.application.id, 'prestashop')
     const serialized = JSON.stringify(built.plan)
     assert.match(serialized, /WEBMINAI_PRESTASHOP_OK/u)
+    assert.match(serialized, /public const PACK_DOWNLOAD_TIMEOUT = 120;/u)
+    assert.match(serialized, /unsupported language timeout source/u)
     assert.match(serialized, /67babe2beb58ea242ca09f2942a301e5e09567c0e04f88525b2cfb6f671a5eeb/u)
     assert.doesNotMatch(serialized, /WEBMINAI_DRUPAL_OK/u)
     assert.doesNotMatch(serialized, /password: [0-9A-Fa-f]{16,}/u)
@@ -790,6 +955,8 @@ test('verified PrestaShop task resolves nginx and PHP-FPM socket routes without 
       assert.match(built.plan.revertCommands.find(item => item.id === 'remove-prestashop-swap').command, /swapoff/u)
     } else {
       const install = built.plan.commands.find(item => item.id === 'install-prestashop').command
+      assert.equal(built.plan.commands.find(item => item.id === 'install-prestashop').executionMode, 'job')
+      assert.equal(built.plan.commands.find(item => item.id === 'install-prestashop').timeoutMs, 1800000)
       assert.match(built.plan.commands.find(item => item.id === 'install-packages').command, /module enable php:8\.3/u)
       assert.match(built.plan.revertCommands.find(item => item.id === 'restore-packages-services').command, /module reset php/u)
       assert.match(install, /auto_prepend_file/u)
@@ -852,7 +1019,7 @@ test('verified Moodle task resolves public-root nginx, PHP-FPM socket, off-web d
       const compose = built.plan.commands.find(item => item.id === 'write-compose').command
       const pullImages = built.plan.commands.find(item => item.id === 'pull-images')
       const initialize = built.plan.commands.find(item => item.id === 'initialize-moodle')
-      assert.match(compose, /FROM php:8\.4\.23-fpm-bookworm/u)
+      assert.match(compose, /FROM php:8\.4\.27-fpm-bookworm@sha256:[a-f0-9]{64}/u)
       assert.equal(compose.includes('%s  %s\\n'), true)
       assert.match(compose, /root \/var\/www\/html\/public/u)
       assert.match(compose, /fastcgi_pass unix:\/run\/php-fpm\/webminai\.sock/u)
@@ -862,13 +1029,13 @@ test('verified Moodle task resolves public-root nginx, PHP-FPM socket, off-web d
       assert.doesNotMatch(compose, /exec -T --user www-data -e WEBMINAI_MOODLE_URL/u)
       assert.match(built.plan.commands.find(item => item.id === 'prepare-moodle-swap').command, /fallocate -l 2G/u)
       assert.equal(pullImages.executionMode, 'job')
-      assert.equal(pullImages.timeoutMs, 45 * 60 * 1000)
+      assert.equal(pullImages.timeoutMs, 60 * 60 * 1000)
       assert.match(pullImages.command, /docker buildx build --builder 'webminai-moodle-[0-9]+' --pull --network host --load/u)
       assert.match(pullImages.command, /docker buildx rm --force 'webminai-moodle-[0-9]+'/u)
       assert.match(pullImages.command, /moby\/buildkit:buildx-stable-1/u)
       assert.match(built.plan.revertCommands.find(item => item.id === 'remove-compose-project').command, /docker buildx rm --force 'webminai-moodle-[0-9]+'/u)
       assert.match(built.verifyReverted, /docker buildx inspect 'webminai-moodle-[0-9]+'/u)
-      assert.doesNotMatch(pullImages.command, /docker image inspect 'php:8\.4\.23-fpm-bookworm'/u)
+      assert.doesNotMatch(pullImages.command, /docker image inspect 'php:8\.4\.27-fpm-bookworm/u)
       assert.doesNotMatch(pullImages.command, /nohup|moodle-build\.pid|build-still-running/u)
       assert.equal(initialize.executionMode, 'job')
       assert.equal(initialize.timeoutMs, 30 * 60 * 1000)
@@ -891,7 +1058,8 @@ test('verified Moodle task resolves public-root nginx, PHP-FPM socket, off-web d
       }
       if (route.context.management.family === 'rhel') {
         const packages = built.plan.commands.find(item => item.id === 'install-packages').command
-        assert.match(packages, /remi-release-9\.rpm/u)
+        assert.match(packages, /remi-release-9\.8-1\.el9\.remi\.noarch\.rpm/u)
+        assert.match(packages, /21100d93098f5821ff21d7ed511c99d874ba895438c2b78d8c73937133158d73/u)
         assert.match(packages, /module enable mariadb:10\.11/u)
         assert.match(packages, /php84-php-fpm/u)
         assert.match(packages, /php84-php-sodium/u)

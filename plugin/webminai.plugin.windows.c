@@ -622,7 +622,7 @@ static int run_command(const char *command, int timeout_seconds, struct command_
     } else if (wait_result == WAIT_OBJECT_0) {
         DWORD exit_code = 1;
         GetExitCodeProcess(process.hProcess, &exit_code);
-        result->exit_code = exit_code <= INT_MAX ? (int)exit_code : 1;
+        result->exit_code = (int32_t)exit_code;
         TerminateJobObject(job, exit_code);
     } else {
         append_windows_error(&result->stderr_buffer, "wait for Windows PowerShell", GetLastError());

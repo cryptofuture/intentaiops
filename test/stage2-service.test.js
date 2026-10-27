@@ -46,7 +46,7 @@ for (const expectedPlatform of ['linux', 'windows']) {
       assert.equal(options.expectedPlatform, expectedPlatform)
       return {
         status: 'active',
-        health: { version: '0.7.2' },
+        health: { version: '0.8.0' },
         executionIdentity: expectedPlatform === 'windows' ? 'system' : 'root'
       }
     }
@@ -142,7 +142,7 @@ test('stage 2 activation copies over SCP, installs over SSH, verifies, and clean
       calls.push({ type: 'execute', connectionUrl, command, options })
       if (command.includes('mktemp')) return { stdout: '/tmp/webminai.Ab12Cd34\n' }
       if (command.includes(' activate ')) {
-        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","netdataAction":"installed","pluginAction":"installed","pluginVersion":"0.7.2","previousPluginVersion":"none"}\n' }
+        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","netdataAction":"installed","pluginAction":"installed","pluginVersion":"0.8.0","previousPluginVersion":"none"}\n' }
       }
       if (command.includes('/api/v3/info')) return { stdout: '{"os":"linux"}' }
       if (command.includes('/api/v3/functions')) return { stdout: '{"functions":["webminai:command"]}' }
@@ -171,7 +171,7 @@ test('stage 2 activation copies over SCP, installs over SSH, verifies, and clean
   assert.equal(installer.command.includes(actionKey), false)
   assert.equal(installer.command.includes('webminai-root'), false)
   assert.match(installer.command, /install-if-needed/)
-  assert.match(installer.command, /'0\.7\.2'$/)
+  assert.match(installer.command, /'0\.8\.0'$/)
   assert.equal(installer.options.input, `${actionKey}\n`)
   assert.ok(calls.some(call => call.command?.startsWith("rm -rf -- '/tmp/webminai.Ab12Cd34'")))
 })
@@ -191,7 +191,7 @@ test('FreeBSD activation selects the native architecture artifact and verifies t
       if (command.includes('$(uname -s)')) return { stdout: 'system=FreeBSD\nmachine=amd64\n' }
       if (command.includes('mktemp')) return { stdout: '/tmp/webminai.FreeBSD1\n' }
       if (command.includes(' activate ')) {
-        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","platform":"freebsd","netdataAction":"installed","pluginAction":"installed","pluginVersion":"0.7.2","previousPluginVersion":"none"}\n' }
+        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","platform":"freebsd","netdataAction":"installed","pluginAction":"installed","pluginVersion":"0.8.0","previousPluginVersion":"none"}\n' }
       }
       if (command.includes('/api/v3/info')) return { stdout: '{"os":"freebsd"}' }
       if (command.includes('/api/v3/functions')) return { stdout: '{}' }
@@ -249,7 +249,7 @@ test('macOS activation uses sudo-compatible Unix Stage 2 flow and verifies root 
       calls.push({ type: 'execute', command, options })
       if (command.includes('$(uname -s)')) return { stdout: 'system=Darwin\nmachine=arm64\n' }
       if (command.includes('mktemp')) return { stdout: '/tmp/webminai.MacArm12\n' }
-      if (command.includes(' activate ')) return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","platform":"macos","netdataAction":"installed","pluginAction":"installed","pluginVersion":"0.7.2","previousPluginVersion":"none"}\n' }
+      if (command.includes(' activate ')) return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","platform":"macos","netdataAction":"installed","pluginAction":"installed","pluginVersion":"0.8.0","previousPluginVersion":"none"}\n' }
       if (command.includes('/api/v3/info')) return { stdout: '{"os":"macos"}' }
       if (command.includes('/api/v3/functions')) return { stdout: '{}' }
       if (command.includes('webminai%3Ahealth')) return rootHealthResponse('macos')
@@ -297,7 +297,7 @@ test('Windows activation installs over system SSH and verifies LocalSystem execu
       }
       if (script?.includes('Remove-Item -LiteralPath')) return { stdout: '' }
       if (command.includes(' Activate ')) {
-        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","platform":"windows","netdataAction":"installed","pluginAction":"installed","pluginVersion":"0.7.2","identity":"system","isLocalSystem":true}\r\n' }
+        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","platform":"windows","netdataAction":"installed","pluginAction":"installed","pluginVersion":"0.8.0","identity":"system","isLocalSystem":true}\r\n' }
       }
       if (command.includes('/api/v3/info')) return { stdout: '{"os":"windows"}' }
       if (command.includes('/api/v3/functions')) return { stdout: '{"functions":["webminai:command"]}' }
@@ -499,7 +499,7 @@ test('plugin-only activation requires existing Netdata without extra artifacts',
       if (command.includes('mktemp')) return { stdout: '/tmp/webminai.Plugin12\n' }
       if (command.includes(' activate ')) {
         assert.match(command, /require-existing/)
-        return { stdout: 'WEBMINAI_RESULT {"ownership":"preexisting","status":"active","netdataAction":"existing","pluginAction":"updated","pluginVersion":"0.7.2","previousPluginVersion":"0.1.0"}\n' }
+        return { stdout: 'WEBMINAI_RESULT {"ownership":"preexisting","status":"active","netdataAction":"existing","pluginAction":"updated","pluginVersion":"0.8.0","previousPluginVersion":"0.1.0"}\n' }
       }
       if (command.includes('/api/v3/info')) return { stdout: '{}' }
       if (command.includes('/api/v3/functions')) return { stdout: '{}' }
@@ -523,7 +523,7 @@ test('plugin-only activation requires existing Netdata without extra artifacts',
   })
   assert.equal(result.status, 'active')
   assert.equal(result.pluginAction, 'updated')
-  assert.equal(result.pluginVersion, '0.7.2')
+  assert.equal(result.pluginVersion, '0.8.0')
   assert.equal(result.previousPluginVersion, '0.1.0')
   assert.equal(result.netdataAction, 'existing')
   assert.equal(calls.filter(call => call.type === 'copy').length, 2)
@@ -582,7 +582,7 @@ test('failed plugin-only update restores the previous plugin and preserves manag
       commands.push(command)
       if (command.includes('mktemp')) return { stdout: '/tmp/webminai.PluginFail1\n' }
       if (command.includes(' activate ')) {
-        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","netdataAction":"existing","pluginAction":"updated","pluginVersion":"0.7.2"}\n' }
+        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","netdataAction":"existing","pluginAction":"updated","pluginVersion":"0.8.0"}\n' }
       }
       if (command.includes('/api/v3/')) throw new Error('updated plugin is unavailable')
       if (command.includes('rollback-activation')) {
@@ -617,7 +617,7 @@ test('failed verification preserves an unchanged existing Stage 2 installation',
       commands.push(command)
       if (command.includes('mktemp')) return { stdout: '/tmp/webminai.Unchanged1\n' }
       if (command.includes(' activate ')) {
-        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","netdataAction":"existing","pluginAction":"unchanged","pluginVersion":"0.7.2"}\n' }
+        return { stdout: 'WEBMINAI_RESULT {"ownership":"managed","status":"active","netdataAction":"existing","pluginAction":"unchanged","pluginVersion":"0.8.0"}\n' }
       }
       if (command.includes('/api/v3/')) throw new Error('transient health failure')
       if (command.startsWith('rm -rf')) return { stdout: '' }
@@ -922,7 +922,7 @@ function rootHealthResponse (platform) {
   return {
     stdout: JSON.stringify({
       status: 'ok',
-      version: '0.7.2',
+      version: '0.8.0',
       ...(platform ? { platform } : {}),
       effectiveUid: 0
     })
@@ -944,7 +944,7 @@ function windowsHealthResponse () {
   return {
     stdout: JSON.stringify({
       status: 'ok',
-      version: '0.7.2',
+      version: '0.8.0',
       platform: 'windows',
       executionMode: 'windows-system',
       isLocalSystem: true

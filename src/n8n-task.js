@@ -35,11 +35,12 @@ function buildNativeTask (taskId, context) {
   const commands = [
     item('capture-baseline', 'baseline', nativeBaseline(state, profile), 'Capture package, repository, nginx, and task-owned path state exactly once'),
     item('install-runtime', 'packages', nativePackages(state, context, profile), `Install the reviewed ${profile.nodeDescription}, nginx, and required utilities`, ['capture-baseline'], 1800000, 'job'),
-    item('install-n8n', 'acquire', nativeNpmInstall(state, profile), `Install n8n ${VERSION} into an isolated application prefix`, ['install-runtime'], 3600000, 'job'),
+    item('install-n8n', 'acquire', nativeNpmInstall(state), `Install n8n ${VERSION} into an isolated application prefix`, ['install-runtime'], 3600000, 'job'),
     item('generate-credentials', 'secrets', nativeCredentials(), 'Generate the n8n encryption key on-host without emitting it', ['capture-baseline']),
-    item('configure-services', 'configure', nativeConfigure(profile), 'Create the locked service account, n8n service, and isolated nginx marker vhost', ['install-n8n', 'generate-credentials']),
+    item('configure-services', 'configure', nativeConfigure(profile, state), 'Create the locked service account, n8n service, and isolated nginx marker vhost', ['install-n8n', 'generate-credentials']),
     item('verify-n8n', 'verify', nativeVerify(profile), 'Verify n8n health, SQLite persistence, and the nginx marker', ['configure-services'], 900000, 'job')
   ]
+  for (const id of ['install-runtime', 'install-n8n']) commands.find(command => command.id === id).retry = { attempts: 2, intervalMs: 2000, exitCodes: [143], states: ['timed_out'] }
   const revertCommands = [
     item('stop-n8n', 'cleanup', nativeStop(profile), 'Stop and remove only the task-owned n8n service and nginx vhost', [], 300000, undefined, 'destructive'),
     item('remove-n8n-files', 'cleanup', `set -eu; rm -rf -- ${quote(APP_ROOT)} ${quote(DATA_ROOT)} ${quote(CREDENTIALS)}`, 'Remove task-owned application data and protected credentials', ['stop-n8n'], 300000, undefined, 'destructive'),
@@ -50,7 +51,7 @@ function buildNativeTask (taskId, context) {
     state,
     route: `native-${family}`,
     overview: `Install n8n ${VERSION} with ${profile.nodeDescription}, an isolated service, SQLite persistence, and nginx on port ${PORT}.`,
-    files: [state, APP_ROOT, DATA_ROOT, CREDENTIALS, profile.serviceFile, profile.nginxVhost, ...profile.repositoryPaths],
+    files: [state, APP_ROOT, DATA_ROOT, CREDENTIALS, profile.serviceFile, profile.nginxVhost, ...profile.repositoryPaths, ...(!profile.systemd ? ['/run/nginx'] : [])],
     commands,
     revertCommands,
     verifyApplied: nativeVerify(profile),
@@ -147,8 +148,8 @@ function nativeProfile (context) {
 function nativeBaseline (state, profile) {
   const paths = [APP_ROOT, DATA_ROOT, CREDENTIALS, profile.serviceFile, profile.nginxVhost, ...(profile.nginxEnableLink ? [profile.nginxEnableLink] : [])]
   return join([
-    'set -eu', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...paths.map(path => `test ! -e ${quote(path)}`),
-    `install -d -o root -g root -m 0700 ${quote(`${state}/repo-backup`)}`,
+    'set -eu', 'umask 077', `if [ ! -s ${quote(`${state}/packages.before`)} ]; then`, ...paths.map(path => `if [ -e ${quote(path)} ] || [ -L ${quote(path)} ]; then printf '%s\\n' ${quote(`BASELINE_DRIFT: managed path already exists: ${path}`)} >&2; exit 1; fi`),
+    `install -d -o root -g root -m 0700 ${quote(state)} ${quote(`${state}/repo-backup`)}`,
     `${packageList(profile.family)} > ${quote(`${state}/packages.before`)}`,
     serviceActive(profile.nginxService, profile.systemd, `${state}/nginx.active`),
     serviceEnabled(profile.nginxService, profile.systemd, `${state}/nginx.enabled`),
@@ -169,7 +170,7 @@ function nativePackages (state, context, profile) {
           ? 'pacman -Sy --noconfirm --needed ca-certificates curl openssl nginx nodejs-lts-jod npm base-devel python'
           : 'zypper --non-interactive refresh; zypper --non-interactive install -y ca-certificates curl openssl nginx nodejs24 npm24 shadow gcc gcc-c++ make python3'
   return join([
-    'set -eu', install,
+    'set -eu', 'umask 022', install,
     `node -e ${quote("const [major,minor]=process.versions.node.split('.').map(Number); if (!((major===22&&minor>=22)||major===24)) process.exit(1)")}`,
     'npm --version >/dev/null', 'nginx -v',
     `${packageList(family)} > ${quote(`${state}/packages.after`)}`,
@@ -202,16 +203,17 @@ function rpmPackages () {
   ])
 }
 
-function nativeNpmInstall (state, profile) {
-  const ensureSqlite = profile.family === 'arch'
-    ? `cd ${quote(APP_ROOT)}; if ! node -e ${quote("require('sqlite3')")}; then npm install-scripts approve sqlite3; npm_config_cache=${quote(`${state}/npm-cache`)} npm rebuild sqlite3 --loglevel=error; node -e ${quote("require('sqlite3')")}; fi`
-    : `cd ${quote(APP_ROOT)}; node -e ${quote("require('sqlite3')")}`
+function nativeNpmInstall (state) {
+  const ensureSqlite = `cd ${quote(APP_ROOT)}; if ! node -e ${quote("require('sqlite3')")}; then if npm install-scripts --help >/dev/null 2>&1; then npm install-scripts approve sqlite3; fi; npm_config_cache=${quote(`${state}/npm-cache`)} npm rebuild sqlite3 --loglevel=error; node -e ${quote("require('sqlite3')")}; fi`
   return join([
     'set -eu', 'umask 022', `install -d -o root -g root -m 0755 ${quote(APP_ROOT)}`, `install -d -o root -g root -m 0755 ${quote(`${state}/npm-cache`)}`,
-    `if [ ! -x ${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} ]; then npm_config_cache=${quote(`${state}/npm-cache`)} npm --prefix ${quote(APP_ROOT)} install --omit=dev --no-audit --no-fund --loglevel=error ${quote(`n8n@${VERSION}`)}; fi`,
+    'export NODE_OPTIONS="${NODE_OPTIONS:-} --network-family-autoselection-attempt-timeout=5000"', // eslint-disable-line no-template-curly-in-string
+    `if [ ! -f ${quote(`${APP_ROOT}/.webminai-npm-complete`)} ]; then rm -rf -- ${quote(`${APP_ROOT}/node_modules`)}; rm -f -- ${quote(`${APP_ROOT}/package-lock.json`)}; npm_config_cache=${quote(`${state}/npm-cache`)} npm --prefix ${quote(APP_ROOT)} install --prefer-offline --maxsockets=4 --omit=dev --no-audit --no-fund --loglevel=error --fetch-retries=5 --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=30000 --fetch-timeout=120000 ${quote(`n8n@${VERSION}`)}; fi`,
     ensureSqlite,
     `chmod -R a+rX ${quote(APP_ROOT)}`,
-    `${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} --version | grep -Fx ${quote(VERSION)}`, "printf '%s\\n' n8n-installed"
+    `${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} --version | grep -Fx ${quote(VERSION)}`,
+    `${quote(`${APP_ROOT}/node_modules/.bin/n8n`)} start --help >/dev/null`,
+    `: > ${quote(`${APP_ROOT}/.webminai-npm-complete`)}`, "printf '%s\\n' n8n-installed"
   ])
 }
 
@@ -219,7 +221,7 @@ function nativeCredentials () {
   return join(['set -eu', 'umask 077', `install -d -o root -g root -m 0700 ${quote(CREDENTIALS)}`, `[ -s ${quote(`${CREDENTIALS}/encryption_key`)} ] || openssl rand -hex 32 > ${quote(`${CREDENTIALS}/encryption_key`)}`, `chmod 0600 ${quote(`${CREDENTIALS}/encryption_key`)}`, `printf '%s\\n' ${quote(CREDENTIALS)}`])
 }
 
-function nativeConfigure (profile) {
+function nativeConfigure (profile, state) {
   const nginx = [
     'server {', `    listen ${PORT};`, '    server_name _;', '    default_type text/plain;', `    location = / { return 200 "${MARKER}\\n"; }`, '}'
   ].join('\n')
@@ -230,10 +232,10 @@ function nativeConfigure (profile) {
     '#!/sbin/openrc-run', `name="${SERVICE}"`, `command="${APP_ROOT}/start-openrc.sh"`, 'command_background=true', `pidfile="/run/${SERVICE}.pid"`, 'output_log="/var/log/webminai-n8n.log"', 'error_log="/var/log/webminai-n8n.log"', 'depend() { need net; }'
   ].join('\n')
   const alpineWrapper = [
-    '#!/bin/sh', 'set -eu', `export N8N_ENCRYPTION_KEY="$(cat ${CREDENTIALS}/encryption_key)"`, `export HOME=${DATA_ROOT}`, `export N8N_USER_FOLDER=${DATA_ROOT}`, `export N8N_PORT=${N8N_PORT}`, 'export N8N_LISTEN_ADDRESS=127.0.0.1', 'export N8N_DIAGNOSTICS_ENABLED=false', 'export N8N_VERSION_NOTIFICATIONS_ENABLED=false', 'export N8N_SECURE_COOKIE=false', `exec su-exec webminai-n8n:webminai-n8n ${APP_ROOT}/node_modules/.bin/n8n start`
+    '#!/bin/sh', 'set -eu', `export N8N_ENCRYPTION_KEY="$(sed -n 1p ${CREDENTIALS}/encryption_key)"`, `export HOME=${DATA_ROOT}`, `export N8N_USER_FOLDER=${DATA_ROOT}`, `export N8N_PORT=${N8N_PORT}`, 'export N8N_LISTEN_ADDRESS=127.0.0.1', 'export N8N_DIAGNOSTICS_ENABLED=false', 'export N8N_VERSION_NOTIFICATIONS_ENABLED=false', 'export N8N_SECURE_COOKIE=false', `exec su-exec webminai-n8n:webminai-n8n ${APP_ROOT}/node_modules/.bin/n8n start`
   ].join('\n')
   const pieces = [
-    'set -eu', 'id webminai-n8n >/dev/null 2>&1 || useradd -r -d ' + quote(DATA_ROOT) + ' -s /usr/sbin/nologin webminai-n8n 2>/dev/null || adduser -S -D -H -h ' + quote(DATA_ROOT) + ' -s /sbin/nologin webminai-n8n',
+    'set -eu', 'umask 077', `if ! id webminai-n8n >/dev/null 2>&1; then useradd -r -d ${quote(DATA_ROOT)} -s /usr/sbin/nologin webminai-n8n 2>/dev/null || adduser -S -D -H -h ${quote(DATA_ROOT)} -s /sbin/nologin webminai-n8n; : > ${quote(`${state}/user-created`)}; fi`,
     `install -d -o webminai-n8n -g webminai-n8n -m 0700 ${quote(DATA_ROOT)}`,
     `key=$(cat ${quote(`${CREDENTIALS}/encryption_key`)}); umask 077; printf 'N8N_ENCRYPTION_KEY=%s\\n' "$key" > ${quote(`${CREDENTIALS}/service.env`)}`,
     `printf '%s\\n' ${nginx.split('\n').map(quote).join(' ')} > ${quote(profile.nginxVhost)}`, `chmod 0644 ${quote(profile.nginxVhost)}`
@@ -243,6 +245,7 @@ function nativeConfigure (profile) {
   if (profile.systemd) {
     pieces.push(`printf '%s\\n' ${systemd.split('\n').map(quote).join(' ')} > ${quote(profile.serviceFile)}`, `chmod 0644 ${quote(profile.serviceFile)}`, 'systemctl daemon-reload', `systemctl enable --now ${quote(SERVICE)}`, 'nginx -t', startOrReload(profile.nginxService, true))
   } else {
+    pieces.push(`if [ ! -d /run/nginx ]; then install -d -o root -g root -m 0755 /run/nginx; : > ${quote(`${state}/created-runtime-directory`)}; fi`)
     pieces.push(`printf '%s\\n' ${alpineWrapper.split('\n').map(quote).join(' ')} > ${quote(`${APP_ROOT}/start-openrc.sh`)}`, `chmod 0755 ${quote(`${APP_ROOT}/start-openrc.sh`)}`, `printf '%s\\n' ${openrc.split('\n').map(quote).join(' ')} > ${quote(profile.serviceFile)}`, `chmod 0755 ${quote(profile.serviceFile)}`, `rc-update add ${quote(SERVICE)} default >/dev/null`, `rc-service ${quote(SERVICE)} start >/dev/null`, 'nginx -t', startOrReload(profile.nginxService, false))
   }
   return join(pieces)
@@ -263,13 +266,14 @@ function nativeStop (profile) {
 }
 
 function nativeRestore (state, context, profile) {
-  const commands = ['set -eu']
+  const commands = ['set -eu', `[ -d ${quote(state)} ] || exit 0`]
   profile.repositoryPaths.forEach((path, index) => commands.push(`if [ -e ${quote(`${state}/repo-${index}.existed`)} ]; then rm -rf -- ${quote(path)}; cp -a -- ${quote(`${state}/repo-backup/${index}`)} ${quote(path)}; else rm -rf -- ${quote(path)}; fi`))
   commands.push(`if [ -s ${quote(`${state}/packages.before`)} ]; then ${packageList(profile.family)} > ${quote(`${state}/packages.current`)}; LC_ALL=C comm -13 ${quote(`${state}/packages.before`)} ${quote(`${state}/packages.current`)} | grep -Ev '^(netdata|openssh|webminai)(-|$)' > ${quote(`${state}/packages.added`)} || true; fi`)
   commands.push(removeAddedPackages(profile.family, `${state}/packages.added`))
   if (profile.systemd) commands.push(`if systemctl cat ${quote(profile.nginxService)} >/dev/null 2>&1; then if [ -e ${quote(`${state}/nginx.enabled`)} ]; then systemctl enable ${quote(profile.nginxService)} >/dev/null 2>&1 || true; else systemctl disable ${quote(profile.nginxService)} >/dev/null 2>&1 || true; fi; if [ -e ${quote(`${state}/nginx.active`)} ]; then systemctl start ${quote(profile.nginxService)}; else systemctl stop ${quote(profile.nginxService)} 2>/dev/null || true; fi; fi`)
   else commands.push(`if [ -e ${quote(`${state}/nginx.enabled`)} ]; then rc-update add nginx default >/dev/null 2>&1 || true; else rc-update del nginx default >/dev/null 2>&1 || true; fi`, `if [ -e ${quote(`${state}/nginx.active`)} ]; then rc-service nginx start >/dev/null; else rc-service nginx stop >/dev/null 2>&1 || true; fi`)
-  commands.push('id webminai-n8n >/dev/null 2>&1 && { userdel webminai-n8n 2>/dev/null || deluser webminai-n8n 2>/dev/null || true; } || true', `rm -rf -- ${quote(state)}`)
+  if (!profile.systemd) commands.push(`if [ -e ${quote(`${state}/created-runtime-directory`)} ] && [ ! -e ${quote(`${state}/nginx.active`)} ] && [ -d /run/nginx ]; then rmdir /run/nginx; fi`)
+  commands.push(`if [ -e ${quote(`${state}/user-created`)} ]; then id webminai-n8n >/dev/null 2>&1 && { userdel webminai-n8n 2>/dev/null || deluser webminai-n8n 2>/dev/null || true; } || true; fi`, `rm -rf -- ${quote(state)}`)
   return join(commands)
 }
 
@@ -314,7 +318,7 @@ function removeCompose (state) {
 }
 
 function restoreDocker (state) {
-  return join(['set -eu', `if [ ! -e ${quote(`${state}/docker.existed`)} ]; then`, `if [ -s ${quote(`${state}/packages.added`)} ]; then xargs -r apt-get purge -y < ${quote(`${state}/packages.added`)}; fi`, 'rm -f /etc/apt/sources.list.d/docker.sources /etc/apt/keyrings/docker.asc', 'apt-get autoremove -y', 'rm -rf /var/lib/docker /var/lib/containerd /etc/docker', `elif [ -e ${quote(`${state}/docker.active`)} ]; then systemctl start docker; else systemctl stop docker 2>/dev/null || true; fi`, `rm -rf -- ${quote(state)}`])
+  return join(['set -eu', `[ -d ${quote(state)} ] || exit 0`, `if [ ! -e ${quote(`${state}/docker.existed`)} ]; then`, `if [ -s ${quote(`${state}/packages.added`)} ]; then xargs -r apt-get purge -y < ${quote(`${state}/packages.added`)}; fi`, 'rm -f /etc/apt/sources.list.d/docker.sources /etc/apt/keyrings/docker.asc', 'rm -rf /var/lib/docker /var/lib/containerd /etc/docker', `elif [ -e ${quote(`${state}/docker.active`)} ]; then systemctl start docker; else systemctl stop docker 2>/dev/null || true; fi`, `rm -rf -- ${quote(state)}`])
 }
 
 function waitHealth () {
@@ -333,9 +337,9 @@ function packageList (family) {
 }
 
 function removeAddedPackages (family, file) {
-  if (family === 'debian') return `if [ -s ${quote(file)} ]; then export DEBIAN_FRONTEND=noninteractive; xargs -r apt-get purge -y < ${quote(file)}; apt-get autoremove -y; fi`
+  if (family === 'debian') return `if [ -s ${quote(file)} ]; then export DEBIAN_FRONTEND=noninteractive; xargs -r apt-get purge -y < ${quote(file)}; fi`
   if (family === 'alpine') return `if [ -s ${quote(file)} ]; then xargs -r apk del < ${quote(file)}; fi`
-  if (family === 'arch') return `if [ -s ${quote(file)} ]; then xargs -r pacman -Rns --noconfirm < ${quote(file)}; fi`
+  if (family === 'arch') return `if [ -s ${quote(file)} ]; then if grep -Fxq nginx ${quote(file)}; then systemctl stop nginx; fi; xargs -r pacman -Rns --noconfirm < ${quote(file)}; fi`
   if (family === 'suse') return `if [ -s ${quote(file)} ]; then xargs -r zypper --non-interactive remove -u -y < ${quote(file)}; fi`
   return `if [ -s ${quote(file)} ]; then installed=; while IFS= read -r package; do [ -z "$package" ] || ! rpm -q -- "$package" >/dev/null 2>&1 || installed="$installed $package"; done < ${quote(file)}; [ -z "$installed" ] || dnf remove -y $installed; fi`
 }

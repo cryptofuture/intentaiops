@@ -127,6 +127,7 @@ struct command_result {
 };
 
 #if defined(WEBMINAI_PLATFORM_KUBERNETES)
+#include "kubernetes-recovery-script.h"
 struct kubernetes_request {
     char method[7];
     char content_type[48];
@@ -138,6 +139,17 @@ struct kubernetes_request {
 
 static char replay_nonces[MAX_REPLAY_NONCES][65];
 static size_t replay_index;
+static sigset_t response_previous_signals;
+
+static void emit_heartbeat(int signal_number) {
+    (void)signal_number;
+    int previous_errno = errno;
+    static const char sample[] = "BEGIN webminai.status\nSET active = 1\nEND\n";
+    ssize_t written = write(STDOUT_FILENO, sample, sizeof(sample) - 1);
+    (void)written;
+    alarm(15);
+    errno = previous_errno;
+}
 
 static void respond_error(const char *transaction, int status, const char *message);
 static void respond_health(const char *transaction);
@@ -164,6 +176,7 @@ static int run_job_worker(const char *job_id);
 #endif
 #if defined(WEBMINAI_PLATFORM_KUBERNETES)
 static int run_kubernetes_request(const char *command, int timeout_seconds, struct command_result *result);
+static int run_recovery_request(const char *command, int timeout_seconds, struct command_result *result);
 #endif
 
 static void process_payload_header(char *header, char **line, size_t *line_capacity) {
@@ -230,6 +243,7 @@ static int plugin_loop(void) {
     printf("FUNCTION GLOBAL \"webminai:health\" 10 \"WebminAI plugin health\" \"\" \"any\" 100 1\n");
 #if defined(WEBMINAI_PLATFORM_KUBERNETES)
     printf("FUNCTION GLOBAL \"webminai:command\" 300 \"Run a signed, approved Kubernetes API request\" \"\" \"any\" 100 1\n");
+    printf("FUNCTION GLOBAL \"webminai:recovery\" 60 \"Access signed persistent common-task recovery records\" \"\" \"any\" 100 1\n");
 #else
     printf("FUNCTION GLOBAL \"webminai:command\" 300 \"Run a signed, approved command as root\" \"\" \"any\" 100 1\n");
     printf("FUNCTION GLOBAL \"webminai:job_start\" 15 \"Start a signed, approved root command job\" \"\" \"any\" 100 1\n");
@@ -238,6 +252,14 @@ static int plugin_loop(void) {
     printf("FUNCTION GLOBAL \"webminai:job_cleanup\" 15 \"Remove a completed WebminAI command job\" \"\" \"any\" 100 1\n");
 #endif
     fflush(stdout);
+
+    struct sigaction heartbeat = {0};
+    struct sigaction previous_heartbeat;
+    heartbeat.sa_handler = emit_heartbeat;
+    heartbeat.sa_flags = SA_RESTART;
+    sigemptyset(&heartbeat.sa_mask);
+    if (sigaction(SIGALRM, &heartbeat, &previous_heartbeat) != 0) return 1;
+    alarm(15);
 
     while (read_protocol_line(&line, &line_capacity) >= 0) {
         while (waitpid(-1, NULL, WNOHANG) > 0) {}
@@ -258,6 +280,8 @@ static int plugin_loop(void) {
             }
         }
     }
+    alarm(0);
+    sigaction(SIGALRM, &previous_heartbeat, NULL);
     free(line);
     return 0;
 }
@@ -271,11 +295,15 @@ static void handle_payload(const char *header, const char *body) {
         return;
     }
     bool command_function = strstr(header, "webminai:command") != NULL;
+    bool recovery_function = false;
+#if defined(WEBMINAI_PLATFORM_KUBERNETES)
+    recovery_function = strstr(header, "webminai:recovery") != NULL;
+#endif
     bool job_start_function = strstr(header, "webminai:job_start") != NULL;
     bool job_status_function = strstr(header, "webminai:job_status") != NULL;
     bool job_cancel_function = strstr(header, "webminai:job_cancel") != NULL;
     bool job_cleanup_function = strstr(header, "webminai:job_cleanup") != NULL;
-    if (!command_function && !job_start_function && !job_status_function &&
+    if (!command_function && !recovery_function && !job_start_function && !job_status_function &&
         !job_cancel_function && !job_cleanup_function) {
         respond_error(transaction, 404, "unknown function");
         return;
@@ -332,7 +360,13 @@ static void handle_payload(const char *header, const char *body) {
     if (timeout_seconds < 1) timeout_seconds = 1;
     if (timeout_seconds > 300) timeout_seconds = 300;
     struct command_result result = {0};
-    if (run_command(command, timeout_seconds, &result) != 0) {
+    int started;
+#if defined(WEBMINAI_PLATFORM_KUBERNETES)
+    if (recovery_function) started = run_recovery_request(command, timeout_seconds > 60 ? 60 : timeout_seconds, &result);
+    else
+#endif
+    started = run_command(command, timeout_seconds, &result);
+    if (started != 0) {
         free(command);
         respond_error(transaction, 500, "failed to start command");
         return;
@@ -835,6 +869,93 @@ static bool valid_kubernetes_token(const char *token) {
     return *token != '\0';
 }
 
+static int run_recovery_request(const char *command, int timeout_seconds, struct command_result *result) {
+    const char *target = getenv("WEBMINAI_RECOVERY_TARGET");
+    unsigned char identity[32];
+    if (target == NULL || strlen(target) != 71 || strncmp(target, "SHA256:", 7) != 0 || !decode_hex(target + 7, identity, sizeof(identity))) {
+        static const char message[] = "{\"available\":false}";
+        result->exit_code = 0;
+        buffer_append(&result->stdout_buffer, message, sizeof(message) - 1);
+        return 0;
+    }
+    if (strlen(command) > MAX_COMMAND_BYTES) return -1;
+    char *copy = strdup(command);
+    if (copy == NULL) return -1;
+    char *save = NULL;
+    char *version = strtok_r(copy, "\n", &save);
+    char *operation = strtok_r(NULL, "\n", &save);
+    char *arguments = strtok_r(NULL, "\n", &save);
+    if (version == NULL || strcmp(version, "v=1") != 0 || operation == NULL || strncmp(operation, "operation=", 10) != 0 || arguments == NULL || strncmp(arguments, "args=", 5) != 0 || strtok_r(NULL, "\n", &save) != NULL) { free(copy); return -1; }
+    operation += 10;
+    arguments += 5;
+    int expected = -1;
+    if (strcmp(operation, "key") == 0 || strcmp(operation, "initialize") == 0) expected = 0;
+    else if (strcmp(operation, "list") == 0 || strcmp(operation, "verification-key") == 0) expected = 1;
+    else if (strcmp(operation, "read") == 0 || strcmp(operation, "rotate-key") == 0) expected = 2;
+    else if (strcmp(operation, "ownership") == 0) expected = 3;
+    else if (strcmp(operation, "release") == 0) expected = 4;
+    else if (strcmp(operation, "claim") == 0 || strcmp(operation, "takeover") == 0) expected = 5;
+    else if (strcmp(operation, "append") == 0) expected = 7;
+    if (expected < 0) { free(copy); return -1; }
+    char *argv[15] = {"sh", "-c", (char *)recovery_helper, "intentaiops-recovery", operation, "kubernetes", NULL};
+    int count = 0;
+    if (*arguments != '\0') {
+        char *argument_save = NULL;
+        for (char *argument = strtok_r(arguments, ",", &argument_save); argument != NULL; argument = strtok_r(NULL, ",", &argument_save)) {
+            if (count >= 7 || strlen(argument) > 5600) { free(copy); return -1; }
+            for (const unsigned char *c = (const unsigned char *)argument; *c; c++) {
+                if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || strchr("_-/+=:", *c) != NULL)) { free(copy); return -1; }
+            }
+            argv[6 + count++] = strcmp(operation, "list") == 0 && strcmp(argument, "-") == 0 ? "" : argument;
+        }
+    }
+    if (count != expected) { free(copy); return -1; }
+    int out[2] = {-1, -1}, err[2] = {-1, -1};
+    if (pipe(out) != 0 || pipe(err) != 0) { close_pipe(out); close_pipe(err); free(copy); return -1; }
+    pid_t child = fork();
+    if (child < 0) { close_pipe(out); close_pipe(err); free(copy); return -1; }
+    if (child == 0) {
+        setpgid(0, 0);
+        dup2(out[1], STDOUT_FILENO); dup2(err[1], STDERR_FILENO);
+        close_pipe(out); close_pipe(err);
+        int input = open("/dev/null", O_RDONLY);
+        if (input < 0 || dup2(input, STDIN_FILENO) < 0) _exit(126);
+        if (input != STDIN_FILENO) close(input);
+        char target_environment[128];
+        snprintf(target_environment, sizeof(target_environment), "WEBMINAI_RECOVERY_TARGET=%s", target);
+        char *const environment[] = {"PATH=/usr/bin:/bin", "HOME=/", "LANG=C", target_environment, NULL};
+        execve("/bin/sh", argv, environment);
+        _exit(127);
+    }
+    free(copy);
+    close(out[1]); close(err[1]);
+    fcntl(out[0], F_SETFL, fcntl(out[0], F_GETFL) | O_NONBLOCK);
+    fcntl(err[0], F_SETFL, fcntl(err[0], F_GETFL) | O_NONBLOCK);
+    bool out_open = true, err_open = true, exited = false;
+    int status = 0;
+    int64_t deadline = monotonic_milliseconds() + (int64_t)timeout_seconds * 1000;
+    while (out_open || err_open || !exited) {
+        struct pollfd fds[2] = {{out[0], out_open ? POLLIN | POLLHUP : 0, 0}, {err[0], err_open ? POLLIN | POLLHUP : 0, 0}};
+        poll(fds, 2, 100);
+        if (out_open && fds[0].revents) drain_fd(out[0], &result->stdout_buffer, &out_open);
+        if (err_open && fds[1].revents) drain_fd(err[0], &result->stderr_buffer, &err_open);
+        if (!exited && waitpid(child, &status, WNOHANG) == child) exited = true;
+        if (!exited && monotonic_milliseconds() >= deadline) {
+            result->timed_out = true;
+            kill(-child, SIGTERM);
+            struct timespec pause = {0, 100000000}; nanosleep(&pause, NULL);
+            kill(-child, SIGKILL); waitpid(child, &status, 0); exited = true;
+        }
+        if (exited) {
+            if (out_open) { drain_fd(out[0], &result->stdout_buffer, &out_open); if (out_open) { close(out[0]); out_open = false; } }
+            if (err_open) { drain_fd(err[0], &result->stderr_buffer, &err_open); if (err_open) { close(err[0]); err_open = false; } }
+        }
+    }
+    if (WIFEXITED(status)) result->exit_code = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status)) { result->signal_number = WTERMSIG(status); result->exit_code = 128 + result->signal_number; }
+    return 0;
+}
+
 static int run_kubernetes_request(const char *command, int timeout_seconds, struct command_result *result) {
     struct kubernetes_request request = {0};
     if (!parse_kubernetes_request(command, &request)) {
@@ -1087,16 +1208,9 @@ static bool finish_orphaned_job(const char *job_id, struct command_result *resul
     while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {}
     if (load_job_result(job_id, result)) return true;
 
-    char pid_path[1024];
-    long command_pid = 0;
-    if (job_path(pid_path, sizeof(pid_path), job_id, "pid") &&
-        read_integer_file(pid_path, &command_pid) && command_pid > 1) {
-        kill(-(pid_t)command_pid, SIGTERM);
-    }
     static const char message[] = "detached job controller exited before recording a result";
     result->exit_code = 125;
     buffer_append(&result->stderr_buffer, message, sizeof(message) - 1);
-    persist_job_result(job_id, result);
     return true;
 }
 
@@ -1464,7 +1578,7 @@ static void handle_job_status(const char *transaction, const char *job_id) {
         return;
     }
     if (finish_orphaned_job(job_id, &result)) {
-        respond_job_state(transaction, job_id, result.exit_code == 0 ? "succeeded" : "failed", &result);
+        respond_job_state(transaction, job_id, "unknown", &result);
         free(result.stdout_buffer.data);
         free(result.stderr_buffer.data);
         return;
@@ -1734,12 +1848,17 @@ static void json_base64(const char *value, size_t length) {
 }
 
 static void respond_begin(const char *transaction, int status) {
+    sigset_t heartbeat;
+    sigemptyset(&heartbeat);
+    sigaddset(&heartbeat, SIGALRM);
+    if (sigprocmask(SIG_BLOCK, &heartbeat, &response_previous_signals) != 0) _exit(1);
     printf("FUNCTION_RESULT_BEGIN %s %d application/json 0\n", transaction, status);
 }
 
 static void respond_end(void) {
     printf("\nFUNCTION_RESULT_END\n");
     fflush(stdout);
+    if (sigprocmask(SIG_SETMASK, &response_previous_signals, NULL) != 0) _exit(1);
 }
 
 static void respond_error(const char *transaction, int status, const char *message) {
@@ -1757,6 +1876,9 @@ static void respond_health(const char *transaction) {
         WEBMINAI_PLUGIN_VERSION, WEBMINAI_PLATFORM_NAME, (long)geteuid());
 #if defined(WEBMINAI_PLATFORM_KUBERNETES)
     fputs(",\"executionMode\":\"kubernetes-api\"", stdout);
+    printf(",\"recoveryOpenSslAvailable\":%s", access("/usr/bin/openssl", X_OK) == 0 ? "true" : "false");
+    const char *recovery_target = getenv("WEBMINAI_RECOVERY_TARGET");
+    printf(",\"recoveryProtocolVersion\":1,\"recoveryConfigured\":%s", recovery_target != NULL && strlen(recovery_target) == 71 ? "true" : "false");
 #else
     fputs(",\"executionMode\":\"host-root\"", stdout);
 #endif

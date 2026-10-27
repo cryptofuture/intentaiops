@@ -43,7 +43,8 @@ export function taskDetailLines (task) {
     ...(task.retryOfTaskId ? [`Retry of: #${task.retryOfTaskId}`] : []),
     ...(task.groupRunId ? [`Multi-host run: #${task.groupRunId}`] : []),
     `Request: ${task.request}`,
-    ...(task.changeOverview ? [`Overview: ${task.changeOverview}`] : [])
+    ...(task.changeOverview ? [`Overview: ${task.changeOverview}`] : []),
+    ...(task.results ?? []).flatMap(result => (result.diagnostics ?? []).map(diagnostic => `${result.id} / ${result.status}: ${diagnostic.code} (${diagnostic.confidence}): ${diagnostic.explanation}`))
   ]
 }
 

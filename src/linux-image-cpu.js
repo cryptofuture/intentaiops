@@ -1,0 +1,3 @@
+export function linuxX86V2ImageProfile () {
+  return 'case "$(uname -m)" in x86_64|amd64) [ -r /proc/cpuinfo ] || { printf "CPU_FEATURES_UNAVAILABLE: cannot read CPU flags; no changes made\\n" >&2; exit 1; }; awk -F: \'/^flags[[:space:]]*:/ { seen=1; gsub(/[[:space:]]+/, " ", $2); flags=" " $2 " "; split("cx16 lahf_lm popcnt pni sse4_1 sse4_2 ssse3", required, " "); for (i in required) if (!index(flags, " " required[i] " ")) missing=1 } END { if (!seen) { print "CPU_FEATURES_UNAVAILABLE: cannot verify image prerequisites; no changes made" > "/dev/stderr"; exit 1 } print missing ? "compat" : "standard" }\' /proc/cpuinfo;; aarch64|arm64) printf standard;; *) printf "CPU_FEATURES_UNAVAILABLE: unsupported image architecture\\n" >&2; exit 1;; esac'
+}

@@ -6,6 +6,7 @@ import { AdminService } from '../src/admin-service.js'
 import { runProcess } from '../src/process-runner.js'
 import { SettingsStore } from '../src/settings-store.js'
 import { SystemSsh } from '../src/system-ssh.js'
+import { PLUGIN_VERSION } from '../src/plugin-version.js'
 
 const SERVER_ID = process.env.WEBMINAI_TEST_SERVER ?? 'windows-11'
 
@@ -38,10 +39,10 @@ async function main () {
       elevation: 'windows-admin',
       installNetdata: false
     })
-    assert.equal(activation.observed?.health?.version, '0.7.2')
+    assert.equal(activation.observed?.health?.version, PLUGIN_VERSION)
     const netdata = admin.netdata(server)
     const health = await netdata.health()
-    assert.equal(health.version, '0.7.2')
+    assert.equal(health.version, PLUGIN_VERSION)
     assert.equal(health.isLocalSystem, true)
     assert.equal(health.durableJobs, true)
     assert.equal(health.maxConcurrentJobs, 4)
@@ -73,7 +74,7 @@ async function main () {
     assert.match(acl.stdout, /^O:.*D:P/u)
     assert.match(acl.stdout, /\(A;;FA;;;SY\)/u)
     assert.match(acl.stdout, /\(A;;FA;;;BA\)/u)
-    process.stdout.write('WINDOWS_DURABLE_JOBS_OK plugin=0.7.2 restart=recovered cancel=cleaned acl=protected\n')
+    process.stdout.write(`WINDOWS_DURABLE_JOBS_OK plugin=${PLUGIN_VERSION} restart=recovered cancel=cleaned acl=protected\n`)
   } finally {
     await session.close()
   }

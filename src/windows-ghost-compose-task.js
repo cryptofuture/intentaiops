@@ -1,4 +1,4 @@
-import { buildWindowsComposeApplicationTask, windowsDockerPowerShellAdapter } from './windows-compose-foundation.js'
+import { buildWindowsComposeApplicationTask, windowsComposePullCommand, windowsDockerPowerShellAdapter } from './windows-compose-foundation.js'
 
 const GHOST = 'ghost@sha256:5cb081c6be54af505f28cde86f209e8e43910da0a406226a9e5e98045388599b'
 const MYSQL = 'mysql@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b'
@@ -22,10 +22,11 @@ export function buildWindowsGhostComposeTask (taskId, windowsExecution, docker) 
     changeOverview: `Reuse the promoted ismet digest-pinned Ghost topology on Windows Docker port ${PORT}.`,
     modifiedFiles: [`${ROOT}\\nginx.conf`, `${CREDENTIALS}\\credentials.env`],
     assumptions: [`Docker reports Linux-container mode (${windowsExecution.docker.serverVersion ?? 'version unavailable'}).`, 'Database credentials are generated on-host and written only into protected environment storage.'],
-    warnings: ['Docker Desktop must remain running for the service to remain available.'],
+    warnings: ['Docker Desktop must remain running for the service to remain available.', 'The blog and Ghost administrator are served under /blog/; the root path is a compatibility marker.'],
     commands: [
       item('write-compose', 'configure', writeCommand(), 'Write the ismet digest-pinned Ghost, MySQL, and nginx topology with protected environment material', ['generate-credentials']),
-      item('start-compose', 'services', startCommand(), 'Pull and start MySQL, Ghost, and nginx with positive health evidence', ['write-compose']),
+      item('pull-images', 'acquire', windowsComposePullCommand(ROOT, PROJECT), 'Pull pinned application images before service startup', ['write-compose']),
+      item('start-compose', 'services', startCommand(), 'Start MySQL, Ghost, and nginx with positive health evidence', ['pull-images']),
       item('initialize-ghost', 'initialize', initializeCommand(), 'Verify Ghost created persistent database and content state', ['start-compose']),
       item('verify-restart', 'verify', verifyCommand(), 'Verify Ghost version, database, blog, marker, and restart recovery', ['initialize-ghost'], 300000, undefined, 'read')
     ],
@@ -42,7 +43,7 @@ function writeCommand () {
   return ps(["$ErrorActionPreference='Stop'", address, `New-Item -Path '${q(ROOT)}' -ItemType Directory -Force|Out-Null`, `$password=[IO.File]::ReadAllText('${q(CREDENTIALS)}\\database_password').Trim()`, `$rootPassword=[IO.File]::ReadAllText('${q(CREDENTIALS)}\\database_root_password').Trim()`, environment, `[IO.File]::WriteAllText('${q(ROOT)}\\credentials.env',$environment,[Text.UTF8Encoding]::new($false))`, write(`${ROOT}\\compose.yaml`, compose), write(`${ROOT}\\nginx.conf`, nginx), `if(-not(Get-NetFirewallRule -Name '${PROJECT}' -ErrorAction SilentlyContinue)){New-NetFirewallRule -Name '${PROJECT}' -DisplayName 'Intent AI Ops ${PROJECT}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${PORT} -Profile Any|Out-Null}`, "Write-Output 'ghost-compose-written'"])
 }
 
-function startCommand () { return dockerPs(`& $docker compose -p '${PROJECT}' pull *> $null;& $docker compose -p '${PROJECT}' up -d *> $null;${health('db')};${health('ghost')};${marker()};Write-Output 'compose-started'`) }
+function startCommand () { return dockerPs(`& $docker compose -p '${PROJECT}' up -d *> $null;${health('db')};${health('ghost')};${marker()};Write-Output 'compose-started'`) }
 function initializeCommand () { return dockerPs(`$state=(& $docker compose -p '${PROJECT}' exec -T ghost /bin/sh -c 'if [ -d /var/lib/ghost/content/data ] && [ -d /var/lib/ghost/content/themes ]; then echo PERSISTED; else echo ABSENT; fi' 2>$null|Out-String).Trim();if($state -ne 'PERSISTED'){throw 'Ghost persistent content state was not created.'};Write-Output 'ghost-initialized'`) }
 function verifyCommand (restart = true) { return dockerPs(`${health('db')};${health('ghost')};$version=(& $docker compose -p '${PROJECT}' exec -T ghost node -p "require('/var/lib/ghost/current/package.json').version" 2>$null|Out-String).Trim();if($version -ne '6.56.0'){throw 'Ghost version verification failed.'};${marker()};$blog=Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:${PORT}/blog/' -TimeoutSec 10;if(-not $blog.StatusCode){throw 'Ghost blog verification failed.'};${restart ? `& $docker compose -p '${PROJECT}' restart ghost *> $null;${health('ghost')};` : ''}Write-Output 'verification-passed'`) }
 function health (service) { return `$ok=$false;for($i=0;$i -lt 120;$i++){$state=(& $docker inspect '${PROJECT}-${service}-1' --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' 2>$null|Out-String).Trim();if($state -eq 'healthy'){$ok=$true;break};Start-Sleep 2};if(-not $ok){throw '${service} did not become healthy.'}` }

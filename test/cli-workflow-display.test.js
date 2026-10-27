@@ -7,7 +7,9 @@ import {
   renderPlan,
   renderResults,
   renderTaskRecord,
-  reviewMultiHostPlans
+  reviewMultiHostPlans,
+  manageExecution,
+  setCodexSettings
 } from '../src/cli.js'
 import {
   catalogChoiceRows,
@@ -21,6 +23,44 @@ import {
   taskHistoryRows
 } from '../src/cli-workflow-display.js'
 import { TerminalUi } from '../src/terminal-ui.js'
+
+test('model picker limits reasoning to selected Codex capabilities and preserves settings on discovery failure', async () => {
+  const models = [
+    { model: 'gpt-6.1-sol', reasoningEfforts: ['low', 'max', 'ultra'] },
+    { model: 'mimo-v2.6-pro', reasoningEfforts: ['low', 'medium', 'high'] }
+  ]
+  for (const selected of models) {
+    const choices = []
+    const saved = []
+    const context = {
+      settings: { codex: { model: 'gpt-6.1-sol', reasoningEffort: 'low' } },
+      settingsStore: { setCodexSettings: async value => saved.push(value) },
+      ui: {
+        clear () {},
+        banner () {},
+        info () {},
+        success () {},
+        pause: async () => {},
+        choose: async (label, options) => {
+          choices.push(options.filter(item => item.value).map(item => item.value))
+          return label === 'Model' ? selected.model : selected.reasoningEfforts.at(-1)
+        }
+      }
+    }
+    await setCodexSettings({ context, planner: { listModels: async () => models } })
+    assert.deepEqual(choices, [models.map(item => item.model), selected.reasoningEfforts])
+    assert.equal(saved[0].model, selected.model)
+    assert.equal(saved[0].reasoningEffort, selected.reasoningEfforts.at(-1))
+    let warned = false
+    context.ui.warning = () => { warned = true }
+    await setCodexSettings({ context, planner: { listModels: async () => { throw new Error('unavailable') } } })
+    assert.equal(warned, true)
+    assert.equal(saved.length, 1)
+    context.ui.choose = async label => label === 'Model' ? selected.model : 'minimal'
+    await assert.rejects(setCodexSettings({ context, planner: { listModels: async () => models } }), /unsupported/u)
+    assert.equal(saved.length, 1)
+  }
+})
 
 test('verified application choices search label, description, and catalog id', () => {
   const [row] = catalogChoiceRows([{ id: 'wordpress', label: 'WordPress', description: 'Install a PHP publishing site' }])
@@ -98,6 +138,78 @@ test('plan rendering shows every complete apply and revert command without ANSI 
   assert.equal(hasSgr(output.text), false)
 })
 
+test('CLI catalog refresh matches controller eligibility including reviewed Windows Docker continuation', async () => {
+  for (const [kind, catalogId, label] of [['catalog', 'ghost-freebsd', 'native FreeBSD'], ['catalog', 'odoo-freebsd', 'native FreeBSD'], ['catalog', 'podman-freebsd', 'native FreeBSD'], ['catalog', 'ghost-linux', 'native Linux'], ['catalog', 'magento-windows', 'Windows'], ['catalog', 'brave-windows', 'Windows'], ['catalog', 'docker-desktop-windows', 'Windows'], ['catalog', 'unknown-fixture', null], ['ordinary', 'ghost-freebsd', null]]) {
+    const { ui } = plainUi()
+    ui.choose = async (_prompt, options) => {
+      const action = options.find(option => option.value === 'refresh-catalog')
+      assert.equal(action?.label ?? null, label ? `Refresh remaining ${label} catalog steps` : null)
+      return null
+    }
+    const controller = {
+      tasks: { get: () => ({ kind, catalogId }), revisions: () => [] },
+      inspect: () => ({ task: { status: 'partial' }, commands: [], revisions: [] })
+    }
+    await manageExecution({ ui, controller, serverId: 'fixture-host', taskId: 1 })
+  }
+})
+
+test('local operator reviews show stored commands rather than sanitized browser projections', async () => {
+  for (const action of ['inspect', 'propose', 'refresh-catalog', 'review-revision', 'resume']) {
+    const { ui, output } = plainUi()
+    const original = plan()
+    const checksum = 'a'.repeat(64)
+    original.commands[0].command = `printf '%s' '${checksum}'`
+    const publicPlan = { ...original, commands: original.commands.map(command => ({ ...command, command: '[redacted-64-hex]' })) }
+    const revision = { id: 7, parentId: 1, approved: 0, plan: publicPlan, fingerprint: 'decision', differences: {} }
+    const selections = [action, ...(action === 'review-revision' ? [revision] : []), null]
+    ui.choose = async () => selections.shift()
+    ui.editor = async () => 'Reviewed changes'
+    ui.pause = async () => {}
+    ui.confirm = async () => {
+      assert.ok(output.text.includes(checksum))
+      assert.ok(!output.text.includes('[redacted-64-hex]'))
+      return false
+    }
+    const proposal = { revisionId: 7, expectedVersion: 'state', fingerprint: 'decision', proposed: publicPlan, differences: {} }
+    const controller = {
+      tasks: { get: () => ({ kind: 'catalog', catalogId: 'ghost-linux', plan: original, results: [] }), revisions: () => [{ ...revision, plan: original }] },
+      inspect: () => ({ task: { status: 'partial', plan: publicPlan }, commands: [], revisions: [revision], stateVersion: 'state', fingerprint: 'decision' }),
+      propose: async () => proposal,
+      proposeCatalogRefresh: async () => proposal,
+      approve: () => { throw new Error('No implicit approval') },
+      resume: () => { throw new Error('No implicit execution') }
+    }
+    await manageExecution({ ui, controller, serverId: 'host', taskId: 1 })
+    assert.ok(output.text.includes(checksum), action)
+    assert.ok(!output.text.includes('[redacted-64-hex]'), action)
+  }
+})
+
+test('CLI pause refreshes live progress without weakening abort or execution decisions', async () => {
+  for (const action of ['pause', 'abort']) {
+    const { ui } = plainUi()
+    let version = 'shown'
+    const choices = [action, null]
+    ui.choose = async () => { version = 'advanced'; return choices.shift() }
+    ui.pause = async () => {}
+    let controlled = false
+    const controller = {
+      tasks: { get: () => ({ kind: 'ordinary' }), revisions: () => [] },
+      inspect: () => ({ task: { status: 'running' }, commands: [], revisions: [], stateVersion: version }),
+      control: (host, task, selected, expectedVersion) => {
+        assert.equal(host, 'host')
+        assert.equal(task, 1)
+        assert.equal(selected, action)
+        assert.equal(expectedVersion, action === 'pause' ? 'advanced' : 'shown')
+        controlled = true
+      }
+    }
+    await manageExecution({ ui, controller, serverId: 'host', taskId: 1 })
+    assert.ok(controlled)
+  }
+})
+
 test('result rendering keeps complete stdout and stderr in separate labelled sections', () => {
   const { ui, output } = plainUi()
   const stdout = `first line\n${'x'.repeat(5000)}\nlast line\n`
@@ -126,7 +238,7 @@ test('task record rendering retains consultation, retry, progress, result, and r
     consumedByTaskId: 24,
     changeOverview: 'Install the application',
     modifiedFiles: ['/srv/wordpress/compose.yaml'],
-    progress: [{ type: 'reasoning', message: 'Inspecting inventory' }],
+    progress: [{ type: 'reasoning', message: 'Inspecting inventory' }, { phase: 'execution-diagnostics', message: 'Connection failure evidence' }],
     results: [{ id: 'apply', status: 'completed', result: { stdout: 'applied', stderr: '' } }],
     revertResults: [{ id: 'revert', status: 'failed', result: { stdout: '', stderr: 'revert failed' } }],
     error: 'apply warning',
@@ -135,9 +247,11 @@ test('task record rendering retains consultation, retry, progress, result, and r
   for (const value of [
     'Status', 'Kind', 'Common task', 'Multi-host run', 'Retry of task', 'Retry correction',
     'Consultation context', 'Request', 'Consultation answer', 'Saved compact context',
-    'Used by task', 'Overview', 'Modified files and paths', 'Codex progress',
+    'Used by task', 'Overview', 'Modified files and paths', 'Task progress',
     'Execution results', 'Revert results', 'apply warning', 'rollback warning'
   ]) assert.match(output.text, new RegExp(escapeRegex(value)))
+  assert.match(output.text, /\[execution-diagnostics\] Connection failure evidence/u)
+  assert.doesNotMatch(output.text, /\[undefined\]/u)
 })
 
 test('task record renders a saved host health report and reusable diagnostic context', () => {
@@ -205,6 +319,15 @@ test('multi-host events label stdout and stderr and run summaries retain host er
   assert.match(output.text, /\[production\]\[stdout\] normal output/)
   assert.match(output.text, /\[production\]\[stderr\] failure output/)
   assert.match(output.text, /ERROR: \[production\] HTTP validation failed/)
+})
+
+test('rollout events show their run and stage without an undefined host or message', () => {
+  const { ui, output } = plainUi()
+  renderMultiHostEvent(ui, { type: 'rollout-stage', runId: 2, stage: 'canary', pendingHosts: 7 })
+  renderMultiHostEvent(ui, { type: 'rollout-halted', runId: 2, stage: 'canary', message: 'Remaining hosts await operator review' })
+  assert.match(output.text, /\[run #2\] Starting rollout stage canary; 7 hosts pending\./)
+  assert.match(output.text, /\[run #2\] Remaining hosts await operator review/)
+  assert.doesNotMatch(output.text, /undefined/)
 })
 
 test('Phase 2 remains a plain TerminalUi ESM interface without palette or alternate screen', async () => {

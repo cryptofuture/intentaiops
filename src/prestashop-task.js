@@ -1,5 +1,6 @@
+import { mariadbComposeBootstrap } from './mariadb-compose-bootstrap.js'
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
-import { buildLinuxPhpApplicationFoundation, linuxPhpApplicationProfile } from './linux-php-foundation.js'
+import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile } from './linux-php-foundation.js'
 
 const VERSION = '9.1.4'
 const DISTRIBUTION = '5.0'
@@ -77,13 +78,16 @@ function configureNativePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'install-packages', nativePackagesCommand(built.plan.commands.find(item => item.id === 'install-packages').command, state, linuxContext, profile))
   replaceCommand(built.plan, 'verify-artifacts', artifactCommand(profile), 'Acquire and verify the exact official PrestaShop distribution')
   renameCommand(built.plan, 'extract-application', 'extract-prestashop', extractCommand(profile), 'Extract the nested verified PrestaShop distribution with reviewed ownership and permissions')
-  renameCommand(built.plan, 'install-application', 'install-prestashop', installCommand(profile, state), 'Initialize the PrestaShop database using protected credential-file indirection inside PHP')
+  renameCommand(built.plan, 'install-application', 'install-prestashop', installCommand(profile, state), 'Initialize the PrestaShop database with protected credentials and a bounded 120-second language download timeout')
+  const install = built.plan.commands.find(item => item.id === 'install-prestashop')
+  install.executionMode = 'job'
+  install.timeoutMs = 1800000
   renameCommand(built.plan, 'verify-application', 'verify-prestashop')
   insertSequentialCommands(built.plan, 'install-prestashop', 'verify-prestashop', nativeInstallSteps(profile, state))
   replaceCommand(built.plan, 'verify-prestashop', nativeVerifyCommand(profile), 'Verify PrestaShop configuration, database state, installer removal, socket, and external marker')
   enhanceNativeModuleRestore(built.plan, state, linuxContext)
-  built.plan.modifiedFiles.push(`${ARTIFACTS}/prestashop.zip`, `${state}/installer-argv.php`, `${WEB_ROOT}/app/config/parameters.php`)
-  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/app/config/parameters.php`)} && test ! -d ${quote(`${WEB_ROOT}/install`)} && test -S ${quote(profile.phpFpmListener)} && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  built.plan.modifiedFiles.push(`${ARTIFACTS}/prestashop.zip`, `${state}/installer-argv.php`, `${WEB_ROOT}/app/config/parameters.php`, `${WEB_ROOT}/classes/Language.php`)
+  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/app/config/parameters.php`)} && test ! -d ${quote(`${WEB_ROOT}/install`)} && test -S ${quote(profile.phpFpmListener)} && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(WEB_ROOT)} && test ! -e ${quote(ARTIFACTS)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)}`
 }
 
@@ -93,11 +97,11 @@ function configureComposePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'pull-images', pullCommand(state), 'Pull and record the pinned official PrestaShop PHP-FPM, nginx, and MariaDB images')
   replaceCommand(built.plan, 'start-compose', startCommand(), 'Start MariaDB, PrestaShop PHP-FPM, and nginx and wait through bounded readiness')
   insertComposeSwapFoundation(built.plan, state)
-  renameCommand(built.plan, 'initialize-application', 'initialize-prestashop', composeInstallStepCommand(linuxContext, 'database'), 'Initialize the PrestaShop database inside the container using protected credential-file indirection')
+  renameCommand(built.plan, 'initialize-application', 'initialize-prestashop', composeInstallStepCommand(linuxContext, 'database'), 'Initialize the PrestaShop database inside the container with protected credentials and a bounded 120-second language download timeout')
   insertSequentialCommands(built.plan, 'initialize-prestashop', 'verify-compose', composeInstallSteps(linuxContext))
   replaceCommand(built.plan, 'verify-compose', composeVerifyCommand(linuxContext), 'Verify Compose health, Unix socket, protected configuration, and the PrestaShop marker')
   built.plan.modifiedFiles.push(`${SERVICE_ROOT}/compose.yaml`, `${SERVICE_ROOT}/php-fpm.conf`, `${SERVICE_ROOT}/nginx.conf`, `${SERVICE_ROOT}/installer-argv.php`, SWAP_FILE)
-  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq prestashop && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T prestashop test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/${ADMIN_DIRECTORY}/index.php && docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
+  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq prestashop && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} exec -T prestashop test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/${ADMIN_DIRECTORY}/index.php && docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(SERVICE_ROOT)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && test ! -e ${quote(SWAP_FILE)} && { ! command -v docker >/dev/null 2>&1 || ! docker ps -aq --filter label=com.docker.compose.project=${quote(PROJECT)} | grep -q .; }`
 }
 
@@ -216,7 +220,7 @@ function installCommand (profile, state) {
     'rm -f -- "$bootstrap_candidate"',
     `address=$(${profile.primaryAddressCommand})`,
     '[ -n "$address" ]',
-    `${nativeInstallerInvocation(profile, state, 'database')} >/dev/null 2>&1`,
+    `if ${nativeInstallerInvocation(profile, state, 'database')} > ${quote(`${state}/install-prestashop-database.log`)} 2>&1; then :; else status=$?; printf '%s\\n' 'PRESTASHOP_DATABASE_INSTALL_FAILED: private diagnostics retained in task state' >&2; exit "$status"; fi`,
     `test -f ${quote(`${WEB_ROOT}/app/config/parameters.php`)}`,
     'fi',
     "printf '%s\n' prestashop-database-ready"
@@ -275,7 +279,7 @@ function nativeVerifyCommand (profile) {
     `mariadb --protocol=socket -uroot -Nse ${quote(`SELECT COUNT(*) FROM ${DATABASE}.wmai_employee WHERE email='intentaiops@example.invalid';`)} | grep -Fxq 1 || { printf '%s\n' DATABASE_ADMIN_NOT_READY >&2; exit 1; }`,
     `address=$(${profile.primaryAddressCommand})`,
     '[ -n "$address" ] || { printf \'%s\\n\' HOST_ADDRESS_UNAVAILABLE >&2; exit 1; }',
-    `ready=; for attempt in $(seq 1 60); do if curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done`,
+    `ready=; for attempt in $(seq 1 60); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done`,
     '[ "$ready" = yes ] || { printf \'%s\\n\' APP_HTTP_MARKER_NOT_READY >&2; exit 1; }',
     "printf '%s\n' verification-passed"
   ].join('; ')
@@ -287,6 +291,7 @@ function composeCommand () {
     '  db:',
     `    image: ${DATABASE_IMAGE}`,
     '    restart: unless-stopped',
+    ...mariadbComposeBootstrap(),
     '    environment:',
     `      MARIADB_DATABASE: ${DATABASE}`,
     `      MARIADB_USER: ${DATABASE}`,
@@ -364,7 +369,7 @@ function composeCommand () {
 }
 
 function pullCommand (state) {
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} pull; docker image inspect ${quote(PRESTASHOP_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-0.after`)}; cp ${quote(`${state}/image-0.after`)} ${quote(`${state}/image-1.after`)}; docker image inspect ${quote(NGINX_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-2.after`)}; docker image inspect ${quote(DATABASE_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-3.after`)}; printf '%s\n' images-pulled`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose --parallel 1 -p ${quote(PROJECT)} pull --quiet; docker image inspect ${quote(PRESTASHOP_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-0.after`)}; cp ${quote(`${state}/image-0.after`)} ${quote(`${state}/image-1.after`)}; docker image inspect ${quote(NGINX_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-2.after`)}; docker image inspect ${quote(DATABASE_IMAGE)} --format '{{.Id}}' > ${quote(`${state}/image-3.after`)}; printf '%s\n' images-pulled`
 }
 
 function startCommand () {
@@ -410,7 +415,7 @@ function composeInstallStepCommand (linuxContext, step, finish = false, modules 
   if (finish) {
     commands.push(
       `docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install`,
-      `ready=; for attempt in $(seq 1 60); do if curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done`,
+      `ready=; for attempt in $(seq 1 60); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done`,
       '[ "$ready" = yes ]'
     )
   }
@@ -448,7 +453,7 @@ function composeFinalizeCommand (linuxContext) {
     `docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/apiplatform`,
     `docker compose -p ${quote(PROJECT)} exec -T prestashop test -w /var/www/html/var/cache`,
     `docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install`,
-    `ready=; for attempt in $(seq 1 60); do if curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done`,
+    `ready=; for attempt in $(seq 1 60); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done`,
     '[ "$ready" = yes ]',
     "printf '%s\n' prestashop-finalize-ready"
   ].join('; ')
@@ -456,7 +461,7 @@ function composeFinalizeCommand (linuxContext) {
 
 function composeVerifyCommand (linuxContext) {
   const addressCommand = linuxContext?.applications?.wordpress?.primaryAddressCommand ?? "ip -4 -o route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i == \"src\") {print $(i+1); exit}}'"
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq prestashop; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx; docker compose -p ${quote(PROJECT)} exec -T prestashop test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/app/config/parameters.php; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/${ADMIN_DIRECTORY}/index.php; docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/fosjsrouting; docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/apiplatform; docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install; address=$(${addressCommand}); [ -n "$address" ]; curl --fail --location --silent --show-error --max-time 20 "http://$address:${PORT}/" | grep -Fq ${MARKER}; printf '%s\n' verification-passed`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq prestashop; docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx; docker compose -p ${quote(PROJECT)} exec -T prestashop test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/app/config/parameters.php; docker compose -p ${quote(PROJECT)} exec -T prestashop test -f /var/www/html/${ADMIN_DIRECTORY}/index.php; docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/fosjsrouting; docker compose -p ${quote(PROJECT)} exec -T prestashop test -d /var/www/html/${ADMIN_DIRECTORY}/bundles/apiplatform; docker compose -p ${quote(PROJECT)} exec -T prestashop test ! -d /var/www/html/install; address=$(${addressCommand}); [ -n "$address" ]; ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 20 "http://$address:${PORT}/"`, MARKER)}; printf '%s\n' verification-passed`
 }
 
 function fpmSocketConfig () {
@@ -489,6 +494,12 @@ function nginxConfig () {
 function installerBootstrapLines () {
   return [
     '<?php',
+    "$languageFile = dirname(dirname($argv[0])) . '/classes/Language.php';",
+    '$languageSource = file_get_contents($languageFile);',
+    "if (!is_string($languageSource)) { fwrite(STDERR, 'language timeout source missing' . PHP_EOL); exit(1); }",
+    "$languageSource = str_replace('public const PACK_DOWNLOAD_TIMEOUT = 20;', 'public const PACK_DOWNLOAD_TIMEOUT = 120;', $languageSource, $changed);",
+    "if ($changed > 1 || substr_count($languageSource, 'public const PACK_DOWNLOAD_TIMEOUT = 120;') !== 1) { fwrite(STDERR, 'unsupported language timeout source' . PHP_EOL); exit(1); }",
+    "if ($changed === 1 && file_put_contents($languageFile, $languageSource) === false) { fwrite(STDERR, 'language timeout update failed' . PHP_EOL); exit(1); }",
     "$files = ['db_password' => getenv('WEBMINAI_DB_PASS_FILE'), 'password' => getenv('WEBMINAI_ADMIN_PASSWORD_FILE')];",
     'foreach ($files as $option => $path) {',
     "    if (!$path || !is_file($path)) { fwrite(STDERR, 'missing protected credential file' . PHP_EOL); exit(1); }",

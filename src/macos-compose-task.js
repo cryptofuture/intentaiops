@@ -4,13 +4,14 @@ import { buildJoomlaTask } from './joomla-task.js'
 import { buildDrupalTask } from './drupal-task.js'
 import { buildPrestaShopTask } from './prestashop-task.js'
 import { buildMoodleTask } from './moodle-task.js'
-import { buildMagentoTask } from './magento-task.js'
+import { buildMagentoTask, magentoComposeRelease } from './magento-task.js'
 import { buildN8nTask } from './n8n-task.js'
-import { buildGhostTask } from './ghost-task.js'
+import { buildGhostTask, ghostRelease } from './ghost-task.js'
 import { buildMattermostTask } from './mattermost-task.js'
 import { buildOdooTask } from './odoo-task.js'
 import { buildJellyfinTask } from './jellyfin-task.js'
 import { buildHomeAssistantTask } from './home-assistant-task.js'
+import { linuxX86V2ImageProfile } from './linux-image-cpu.js'
 
 const BUILDERS = {
   woocommerce: buildWooCommerceTask,
@@ -57,7 +58,7 @@ export function buildMacosComposeTask (application, taskId, execution = {}, dock
   const credentials = `${home}/.webminai/credentials/${application}`
   const addressCommand = "ifconfig | awk '/^[a-z0-9]+:/{iface=$1; sub(/:$/,\"\",iface)} /inet / && $2 != \"127.0.0.1\" {print $2; exit}'"
   const linuxContext = buildLinuxComposeReferenceContext({ architecture: execution.architecture, primaryAddressCommand: addressCommand })
-  const built = build(taskId, linuxContext, { preferred: true, ready: true, installSupported: true, installMethod: 'homebrew-colima' })
+  const built = build(taskId, linuxContext, { platform: 'macos', preferred: true, ready: true, installSupported: true, installMethod: 'homebrew-colima' })
   const original = JSON.stringify(built.plan)
   const originalState = firstMatch(original, new RegExp(`/var/lib/webminai/task-state/${taskId}-[A-Za-z0-9-]+`, 'u'))
   if (!originalState) throw new Error(`${application} Compose plan does not expose a task state path`)
@@ -68,12 +69,28 @@ export function buildMacosComposeTask (application, taskId, execution = {}, dock
   const originalDataRoot = HOST_DATA_ROOTS[application] ?? null
   const dataRoot = originalDataRoot ? `${home}/.webminai/data/${application}` : null
   const paths = { home, originalState, state, originalServiceRoot, serviceRoot, originalCredentials, credentials, originalDataRoot, dataRoot }
-  const images = extractImages(built.plan.commands.find(item => item.id === 'capture-baseline')?.command ?? original)
+  const images = application === 'ghost' ? [...ghostRelease().images] : application === 'magento' ? [...magentoComposeRelease().images] : extractImages(built.plan.commands.find(item => item.id === 'capture-baseline')?.command ?? original)
 
   for (const item of [...built.plan.commands, ...built.plan.revertCommands]) {
     item.command = adapt(item.command, paths)
   }
+  for (const item of built.plan.commands) if (/^(?:start|initialize|verify)-/u.test(item.id)) item.diagnostic = { kind: 'compose', target: serviceRoot }
   replace(built.plan.commands, 'capture-baseline', baseline({ state, serviceRoot, credentials, images, home }))
+  if (application === 'moodle') {
+    built.plan.commands.unshift({ id: 'validate-buildx', purpose: 'Require Docker Buildx before creating Moodle task files; run the reviewed Colima setup if it is missing', risk: 'read', requiresSudo: true, timeoutMs: 30000, command: withDocker("set -eu; docker buildx version >/dev/null 2>&1 || { printf '%s\\n' 'MACOS_BUILDX_UNAVAILABLE: run the reviewed Colima setup to install Docker Buildx before Moodle; no application files changed' >&2; exit 78; }", home) })
+    const capture = built.plan.commands.find(command => command.id === 'capture-baseline')
+    capture.dependsOn = [...(capture.dependsOn ?? []), 'validate-buildx']
+  }
+  if (application === 'ghost' || application === 'magento') {
+    const capture = built.plan.commands.find(command => command.id === 'capture-baseline')
+    const inspect = `env PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin colima ssh -- /bin/sh -c ${quote(linuxX86V2ImageProfile())}`
+    const probe = `/usr/bin/su -l ${quote(user)} -c ${quote(inspect)}`
+    built.plan.commands.unshift({ id: 'validate-image-cpu', purpose: 'Verify the Colima guest CPU supports the official database/search images before changing application state', risk: 'read', requiresSudo: true, timeoutMs: 30000, command: `set -eu; profile=$(${probe}); [ "$profile" = standard ] || { printf '%s\\n' 'CPU_IMAGE_COMPATIBILITY_UNVERIFIED: this Colima guest needs a separately verified compatibility image; no application changes made' >&2; exit 78; }` })
+    capture.dependsOn = [...(capture.dependsOn ?? []), 'validate-image-cpu']
+    const project = application === 'ghost' ? 'webminai-ghost-18110' : 'webminai-magento-18108'
+    const guards = `set -eu; if [ ! -e ${quote(`${state}/baseline.ready`)} ]; then test -z "$(docker ps -aq --filter label=com.docker.compose.project=${quote(project)})"; test -z "$(docker volume ls -q --filter label=com.docker.compose.project=${quote(project)})"; test -z "$(docker network ls -q --filter label=com.docker.compose.project=${quote(project)})"; fi`
+    capture.command = `${withDocker(guards, home)}; ${capture.command}; printf '%s\\n' standard > ${quote(`${state}/image-profile`)}`
+  }
   replace(built.plan.commands, 'prepare-docker', dockerReady(state, home))
   replace(built.plan.revertCommands, 'restore-docker', withDocker(`set -eu; rm -rf -- ${quote(state)}; printf '%s\n' colima-preserved`, home))
   const credentialCommand = built.plan.commands.find(item => item.id === 'generate-credentials')
@@ -89,7 +106,7 @@ export function buildMacosComposeTask (application, taskId, execution = {}, dock
   if (application === 'n8n') adaptN8nStartup(built.plan.commands)
   for (const item of [...built.plan.commands, ...built.plan.revertCommands]) {
     if (item.id.includes('swap')) item.command = withDocker("printf '%s\n' macos-colima-memory-managed", home)
-    if (!['capture-baseline', 'prepare-docker', 'generate-credentials', 'write-compose', 'remove-compose-files', 'restore-docker'].includes(item.id)) {
+    if (!['validate-image-cpu', 'validate-buildx', 'capture-baseline', 'prepare-docker', 'generate-credentials', 'write-compose', 'remove-compose-files', 'restore-docker'].includes(item.id)) {
       item.executionMode = 'job'
       item.timeoutMs = Math.max(item.timeoutMs ?? 300000, 30 * 60 * 1000)
     }
@@ -203,7 +220,7 @@ function dockerReady (state, home) {
 }
 
 function withDocker (command, home) {
-  const prefix = `export HOME=${quote(home)} PATH='/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin' DOCKER_HOST=${quote(`unix://${home}/.colima/default/docker.sock`)}`
+  const prefix = `unset DOCKER_CONTEXT; export HOME=${quote(home)} PATH='/usr/local/bin:/usr/local/sbin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin' DOCKER_HOST=${quote(`unix://${home}/.colima/default/docker.sock`)}`
   return command.startsWith(`${prefix}; `) ? command : `${prefix}; ${command}`
 }
 

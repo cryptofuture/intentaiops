@@ -1,5 +1,6 @@
 import { moodleComposeAssets, moodleRelease } from './moodle-task.js'
 import {
+  applyWindowsComposeOperationDefaults,
   buildWindowsComposeFoundation,
   powerShellQuote,
   powershell,
@@ -41,13 +42,13 @@ export function buildWindowsMoodleComposeTask (taskId, windowsExecution, docker)
       ],
       warnings: ['Docker Desktop must remain running for the site to remain available.', `The task creates a scoped inbound firewall rule for TCP ${PORT}.`],
       requiresConfirmation: true,
-      commands: foundation.commands.concat([
+      commands: applyWindowsComposeOperationDefaults(foundation.commands.concat([
         windowsComposeCommand('write-compose', 'configure', writeCommand(), 'Write the promoted Moodle image build, PHP-FPM socket, nginx, MariaDB, cron, and protected installer assets', ['generate-credentials']),
         windowsComposeCommand('pull-images', 'acquire', buildCommand(), 'Build the digest-verified Moodle image and pull the pinned nginx and MariaDB images', ['write-compose'], 45 * 60 * 1000, 'job'),
         windowsComposeCommand('start-compose', 'services', startCommand(), 'Start MariaDB, Moodle PHP-FPM, and nginx and wait for the CLI installer and Unix socket', ['pull-images']),
         windowsComposeCommand('initialize-moodle', 'initialize', initializeCommand(), 'Install Moodle through its official CLI using protected credential files, then start recurring cron', ['start-compose'], 30 * 60 * 1000, 'job'),
         windowsComposeCommand('verify-restart', 'verify', verifyCommand(), 'Verify Moodle configuration, off-web data, cron, socket, login, external marker, and restart recovery', ['initialize-moodle'], 300000, undefined, 'read')
-      ]),
+      ]), ROOT),
       revertCommands: foundation.revertCommands
     },
     verifyApplied: verifyCommand(false),

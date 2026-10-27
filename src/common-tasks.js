@@ -41,6 +41,7 @@ import { buildFreebsdGhostTask } from './freebsd-ghost-task.js'
 import { buildFreebsdOdooTask } from './freebsd-odoo-task.js'
 import { buildFreebsdHomeAssistantTask } from './freebsd-home-assistant-task.js'
 import { buildFreebsdMagentoTask } from './freebsd-magento-task.js'
+import { buildFreebsdPodmanApplicationTask, isVerifiedFreebsdPodmanApplication } from './freebsd-podman-application-task.js'
 import { buildMacosColimaBootstrapTask } from './macos-colima-bootstrap-task.js'
 import { buildMacosWordpressComposeTask } from './macos-wordpress-compose-task.js'
 import { buildMacosComposeTask } from './macos-compose-task.js'
@@ -50,6 +51,7 @@ import { applyApplicationDefaults } from './application-defaults.js'
 import { buildHostHealthTask } from './host-health-task.js'
 import { buildSystemUpdateTask } from './system-update-task.js'
 import { buildIntentAiOpsInstallTask } from './intent-ai-ops-install-task.js'
+import { withSoftwareSecurity } from './software-security-collector.js'
 
 const STATE_ROOT = '/var/lib/webminai/task-state'
 
@@ -259,7 +261,7 @@ const DEFINITIONS = [
   {
     id: 'podman-freebsd',
     label: 'Install Podman Suite and Compose on FreeBSD',
-    description: 'Reviewed FreeBSD 15+ non-jail Podman installation with jail/VFS preflight, package/path baseline, container verification, and rollback.',
+    description: 'Reviewed FreeBSD 14.4 or 15.1+ non-jail Podman installation with jail/VFS preflight, package/path baseline, container verification, and rollback.',
     category: 'application',
     platform: 'freebsd',
     prerequisite: true,
@@ -327,7 +329,7 @@ const DEFINITIONS = [
     description: 'Build the exact FreeBSD-port Jellyfin runtime with protected onboarding, isolated storage, nginx, health, and rollback on port 18113.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdJellyfinTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('jellyfin', buildFreebsdJellyfinTask, taskId, definition, options)
   },
   {
     id: 'mattermost-freebsd',
@@ -335,7 +337,7 @@ const DEFINITIONS = [
     description: 'Install the current FreeBSD Mattermost port with PostgreSQL 17, protected bootstrap credentials, nginx, health, and rollback on port 18111.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdMattermostTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('mattermost', buildFreebsdMattermostTask, taskId, definition, options)
   },
   {
     id: 'n8n-freebsd',
@@ -343,7 +345,7 @@ const DEFINITIONS = [
     description: 'Install exact n8n with FreeBSD Node.js 24, protected encryption state, SQLite persistence, rc.d, health, and rollback on port 18109.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdN8nTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('n8n', buildFreebsdN8nTask, taskId, definition, options)
   },
   {
     id: 'ghost-freebsd',
@@ -351,7 +353,7 @@ const DEFINITIONS = [
     description: 'Install exact Ghost with FreeBSD Node.js 22, isolated Oracle MySQL 8, protected database credentials, rc.d, nginx, health, and rollback on port 18110.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdGhostTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('ghost', buildFreebsdGhostTask, taskId, definition, options)
   },
   {
     id: 'odoo-freebsd',
@@ -359,7 +361,7 @@ const DEFINITIONS = [
     description: 'Install pinned Odoo Community 19 source with Python 3.12, isolated PostgreSQL 17, protected administrator credentials, rc.d, nginx, health, and rollback on port 18112.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdOdooTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('odoo', buildFreebsdOdooTask, taskId, definition, options)
   },
   {
     id: 'home-assistant-freebsd',
@@ -367,7 +369,7 @@ const DEFINITIONS = [
     description: 'Build pinned Home Assistant Core with Python 3.14, isolated configuration, protected onboarding credentials, rc.d, nginx, health, and rollback on port 18115.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdHomeAssistantTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('home-assistant', buildFreebsdHomeAssistantTask, taskId, definition, options)
   },
   {
     id: 'magento-freebsd',
@@ -375,7 +377,7 @@ const DEFINITIONS = [
     description: 'Build pinned Magento Open Source with PHP 8.4-FPM over a Unix socket, isolated MariaDB, OpenSearch, Valkey, protected administrator credentials, cron, nginx, health, and rollback on port 18108.',
     category: 'application',
     platform: 'freebsd',
-    build: (taskId, definition, options) => ({ ...buildFreebsdMagentoTask(taskId, options.freebsdExecution ?? options.inventory?.webminaiExecution), definition })
+    build: (taskId, definition, options) => buildFreebsdApplicationRoute('magento', buildFreebsdMagentoTask, taskId, definition, options)
   },
   {
     id: 'colima-macos',
@@ -604,10 +606,10 @@ const DEFINITIONS = [
   ...['linux', 'freebsd', 'macos', 'windows'].map(platform => ({
     id: `intent-ai-ops-${platform}`,
     label: `Install Intent AI Ops on ${platform}`,
-    description: 'Install the reviewed GitHub CLI package and bootstrap Node.js 24 only when Node is absent.',
+    description: platform === 'linux' ? 'Install the reviewed CLI with Node.js 24; use a private runtime for incompatible system Node on non-Alpine Linux.' : 'Install the reviewed GitHub CLI package and bootstrap Node.js 24 only when Node is absent.',
     category: 'application',
     platform,
-    build: (taskId, definition, options) => ({ ...buildIntentAiOpsInstallTask(taskId, platform, options.intentAiOpsInstallSource), definition })
+    build: (taskId, definition, options) => ({ ...buildIntentAiOpsInstallTask(taskId, platform, options.intentAiOpsInstallSource, options.linuxContext), definition })
   }))
 ]
 
@@ -658,7 +660,7 @@ export function commonTaskEligibility (catalogId, options = {}) {
     if (docker.preference === 'disabled') return { eligible: false, reason: 'container runtime disabled by host preference' }
     if (catalogId === 'docker-linux' && !docker.ready && (!docker.installSupported || !['official-apt', 'official-rpm', 'distribution-packages'].includes(docker.installMethod))) return { eligible: false, reason: 'no reviewed Docker installation route' }
     const freebsdExecution = options.freebsdExecution ?? options.inventory?.webminaiExecution
-    if (catalogId === 'podman-freebsd' && !docker.ready && freebsdExecution?.docker?.installSupported !== true && docker.installSupported !== true) return { eligible: false, reason: 'requires FreeBSD 15+ outside a jail' }
+    if (catalogId === 'podman-freebsd' && !docker.ready && freebsdExecution?.docker?.installSupported !== true && docker.installSupported !== true) return { eligible: false, reason: 'requires FreeBSD 14.4 or 15.1+ outside a jail' }
   }
 
   if (platform === 'windows' && !definition.prerequisite && !['brave-windows', 'intent-ai-ops-windows'].includes(catalogId) && !docker.ready) {
@@ -719,6 +721,16 @@ export function buildCandidatePlanningContext (catalogIds, taskId, options = {})
   })
 }
 
+function buildFreebsdApplicationRoute (application, nativeBuilder, taskId, definition, options) {
+  const execution = options.freebsdExecution ?? options.inventory?.webminaiExecution
+  const docker = options.docker ?? options.inventory?.webminaiDocker ?? {}
+  const preferPodman = docker.preference === 'enabled' || ((docker.preference ?? 'auto') === 'auto' && isVerifiedFreebsdPodmanApplication(application, execution))
+  const built = preferPodman
+    ? buildFreebsdPodmanApplicationTask(application, taskId, execution)
+    : nativeBuilder(taskId, execution)
+  return { ...built, definition }
+}
+
 export function buildCommonTask (catalogId, taskId, options = {}) {
   const { platform = 'linux' } = options
   if (!Number.isInteger(taskId) || taskId < 1) throw new TypeError('task id must be a positive integer')
@@ -730,7 +742,11 @@ export function buildCommonTask (catalogId, taskId, options = {}) {
     definition.build(taskId, definition, { ...options, platform }),
     options.applicationDefaults
   )
+  if (platform === 'freebsd' && definition.category === 'application' && (options.docker ?? options.inventory?.webminaiDocker)?.preference === 'disabled' && built.plan.commands.some(command => /\bpodman(?:-compose)?\s/u.test(command.command))) {
+    throw new Error('Podman is disabled by this host preference and this task has no native-only route')
+  }
   const diagnostic = definition.category === 'diagnostic'
+  if (definition.category === 'application') built.plan = withSoftwareSecurity(built.plan, { catalogId, platform })
   const foundationIds = catalogFoundationIds(catalogId, options)
   return {
     ...built,
@@ -752,6 +768,7 @@ export function commonTaskFoundationIds (catalogId, options = {}) {
 function catalogFoundationIds (catalogId, options) {
   const platform = options.platform ?? DEFINITIONS.find(item => item.id === catalogId)?.platform ?? 'linux'
   const common = ['host-generated-credentials', 'service-verification', 'safe-baseline-rollback']
+  if (catalogId === `intent-ai-ops-${platform}`) return [...(platform === 'linux' ? ['linux-baseline'] : []), 'service-verification', 'safe-baseline-rollback']
   if (catalogId === 'docker-linux') return ['linux-docker-readiness', 'safe-baseline-rollback']
   if (catalogId === 'docker-desktop-windows') return ['windows-docker-wsl-readiness', 'safe-baseline-rollback']
   if (catalogId === 'podman-freebsd') return ['freebsd-podman-readiness', 'safe-baseline-rollback']
@@ -766,6 +783,7 @@ function catalogFoundationIds (catalogId, options) {
   const planUsesDocker = options.docker?.preferred === true
   const phpApplications = new Set(['wordpress-linux', 'woocommerce-linux', 'joomla-linux', 'drupal-linux', 'prestashop-linux', 'moodle-linux', 'magento-linux'])
   if (planUsesDocker) return ['linux-baseline', 'linux-docker-readiness', 'linux-docker-compose', ...common]
+  if (catalogId === 'n8n-linux') return ['linux-baseline', ...common]
   const database = catalogId === 'mattermost-linux' || catalogId === 'odoo-linux' ? 'linux-postgresql' : 'linux-mariadb'
   return phpApplications.has(catalogId)
     ? ['linux-baseline', 'linux-nginx-site', 'linux-php-fpm-socket', database, ...common]
@@ -806,14 +824,14 @@ function packageTask (id, label, packageName, binaryPath) {
         ? `if rpm -q oracle-epel-release-el9 >/dev/null 2>&1; then : > ${quote(`${state}/oracle-epel-was-present`)}; else dnf -y install oracle-epel-release-el9; fi; dnf -y install ${quote(packageName)}`
         : packageInstall(packageName)
       const removeRepository = oracleEpel
-        ? `; if [ ! -e ${quote(`${state}/oracle-epel-was-present`)} ] && rpm -q oracle-epel-release-el9 >/dev/null 2>&1; then dnf -y remove oracle-epel-release-el9; fi`
+        ? `; if [ -d ${quote(state)} ] && [ ! -e ${quote(`${state}/oracle-epel-was-present`)} ] && rpm -q oracle-epel-release-el9 >/dev/null 2>&1; then dnf -y remove oracle-epel-release-el9; fi`
         : ''
       const repositoryProbe = oracleEpel ? `; ${packageStateProbe('oracle-epel-release-el9')}` : ''
       return {
         plan: {
           changeOverview: `Install ${packageName} while recording whether it existed before the task.`,
           modifiedFiles: [binaryPath, state],
-          commands: [command('capture-install', `set -eu; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${packageCapture(state, packageName)}; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${install}; fi; : > ${quote(`${state}/apply-complete`)}; fi`, `Install ${packageName} only when absent`, 'change', 300000)],
+          commands: [{ ...command('capture-install', `set -eu; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${packageCapture(state, packageName)}; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${install}; fi; : > ${quote(`${state}/apply-complete`)}; fi`, `Install ${packageName} only when absent`, 'change', 1800000), executionMode: 'job' }],
           revertCommands: [command('remove-if-added', `set -eu; if [ -d ${quote(state)} ] && [ ! -e ${quote(`${state}/was-present`)} ] && ${packagePresent(packageName)}; then ${packageRemove(packageName, state)}; fi${removeRepository}; rm -rf -- ${quote(state)}`, `Remove ${packageName} and dependencies introduced only by this task`, 'change', 300000)]
         },
         verifyApplied: `command -v ${packageName} >/dev/null 2>&1`,
@@ -863,15 +881,15 @@ function buildNginxSite (taskId, definition) {
   return {
     plan: {
       changeOverview: 'Install nginx if absent and deploy an isolated static website on port 18080.',
-      modifiedFiles: [root, config, alpineConfig, '/etc/nginx/nginx.conf', state],
+      modifiedFiles: [root, config, alpineConfig, '/etc/nginx/nginx.conf', '/run/nginx', state],
       commands: [
-        command('prepare-nginx', `set -eu; if [ ! -e ${quote(`${state}/prepare-complete`)} ]; then test ! -e ${quote(root)}; test ! -e ${quote(config)}; test ! -e ${quote(alpineConfig)}; ${packageCapture(state, 'nginx')}; if ${serviceIsActive('nginx')}; then : > ${quote(`${state}/was-active`)}; fi; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall('nginx')}; fi; : > ${quote(`${state}/prepare-complete`)}; fi`, 'Capture nginx state and install it only when absent', 'change', 300000),
-        command('write-site', `set -eu; config=${quote(config)}; if [ -d /etc/nginx/http.d ]; then config=${quote(alpineConfig)}; elif [ ! -d /etc/nginx/conf.d ]; then cp -a /etc/nginx/nginx.conf ${quote(`${state}/nginx-conf-before`)}; install -d -o root -g root -m 0755 /etc/nginx/conf.d; : > ${quote(`${state}/created-config-directory`)}; sed -i '$i\\    include /etc/nginx/conf.d/*.conf;' /etc/nginx/nginx.conf; fi; install -d -o root -g root -m 0755 ${quote(root)}; printf '%s\n' '<!doctype html><title>WebminAI test</title><h1>WebminAI nginx task</h1>' > ${quote(`${root}/index.html`)}; chmod 0644 ${quote(`${root}/index.html`)}; printf '%s\n' 'server {' '    listen 18080;' '    server_name _;' '    root /var/www/webminai-test-site;' '    location / { try_files $uri $uri/ =404; }' '}' > "$config"; chmod 0644 "$config"; printf '%s\n' "$config" > ${quote(`${state}/config-path`)}`, 'Write the website and nginx server block', 'change', 30000, ['prepare-nginx']),
+        { ...command('prepare-nginx', `set -eu; if [ ! -e ${quote(`${state}/prepare-complete`)} ]; then for path in ${[root, config, alpineConfig].map(quote).join(' ')}; do [ ! -e "$path" ] && [ ! -L "$path" ] || { printf 'task target already exists: %s\\n' "$path" >&2; exit 1; }; done; ${packageCapture(state, 'nginx')}; if ${serviceIsActive('nginx')}; then : > ${quote(`${state}/was-active`)}; fi; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall('nginx')}; fi; : > ${quote(`${state}/prepare-complete`)}; fi`, 'Capture nginx state and install it only when absent', 'change', 1800000), executionMode: 'job' },
+        command('write-site', `set -eu; config=${quote(config)}; if [ -d /etc/nginx/http.d ]; then config=${quote(alpineConfig)}; else if [ ! -d /etc/nginx/conf.d ]; then install -d -o root -g root -m 0755 /etc/nginx/conf.d; : > ${quote(`${state}/created-config-directory`)}; fi; if ! grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/conf[.]d/[*][.]conf[[:space:]]*;' /etc/nginx/nginx.conf; then [ -f ${quote(`${state}/nginx-conf-before`)} ] || cp -a /etc/nginx/nginx.conf ${quote(`${state}/nginx-conf-before`)}; sed -i '$i\\    include /etc/nginx/conf.d/*.conf;' /etc/nginx/nginx.conf; fi; fi; if [ ! -d /run/nginx ]; then install -d -o root -g root -m 0755 /run/nginx; : > ${quote(`${state}/created-runtime-directory`)}; fi; install -d -o root -g root -m 0755 ${quote(root)}; printf '%s\n' '<!doctype html><title>WebminAI test</title><h1>WebminAI nginx task</h1>' > ${quote(`${root}/index.html`)}; chmod 0644 ${quote(`${root}/index.html`)}; printf '%s\n' 'server {' '    listen 18080;' '    server_name _;' '    root /var/www/webminai-test-site;' '    location / { try_files $uri $uri/ =404; }' '}' > "$config"; chmod 0644 "$config"; printf '%s\n' "$config" > ${quote(`${state}/config-path`)}`, 'Write the website and nginx server block', 'change', 30000, ['prepare-nginx']),
         command('verify-nginx', `set -eu; nginx -t; ${serviceStartOrReload('nginx')}; curl --fail --silent --show-error --retry 5 --retry-connrefused --retry-delay 1 --max-time 10 http://127.0.0.1:18080/ | grep -q 'WebminAI nginx task'`, 'Load the nginx configuration and fetch the new website', 'change', 30000, ['write-site'])
       ],
       revertCommands: [
-        command('remove-site', `set -eu; rm -rf -- ${quote(root)}; rm -f -- ${quote(config)} ${quote(alpineConfig)}; if [ -f ${quote(`${state}/nginx-conf-before`)} ]; then cp -a ${quote(`${state}/nginx-conf-before`)} /etc/nginx/nginx.conf; fi; if [ -e ${quote(`${state}/created-config-directory`)} ]; then rmdir /etc/nginx/conf.d; fi`, 'Remove the test website and restore the nginx configuration', 'change', 30000),
-        command('restore-nginx', `set -eu; if [ -d ${quote(state)} ]; then if [ -e ${quote(`${state}/was-active`)} ]; then ${serviceReload('nginx')}; else ${serviceStop('nginx')}; fi; if [ ! -e ${quote(`${state}/was-present`)} ] && ${packagePresent('nginx')}; then ${packageRemove('nginx', state)}; fi; fi; rm -rf -- ${quote(state)}`, 'Restore nginx package, dependency, and service state', 'change', 300000, ['remove-site'])
+        command('remove-site', `set -eu; [ -d ${quote(state)} ] || exit 0; rm -rf -- ${quote(root)}; rm -f -- ${quote(config)} ${quote(alpineConfig)}; if [ -f ${quote(`${state}/nginx-conf-before`)} ]; then cp -a ${quote(`${state}/nginx-conf-before`)} /etc/nginx/nginx.conf; fi; if [ -e ${quote(`${state}/created-config-directory`)} ]; then rmdir /etc/nginx/conf.d; fi`, 'Remove the test website and restore the nginx configuration', 'change', 30000),
+        command('restore-nginx', `set -eu; if [ -d ${quote(state)} ]; then if [ -e ${quote(`${state}/was-active`)} ]; then ${serviceReload('nginx')}; else ${serviceStop('nginx')}; fi; if [ ! -e ${quote(`${state}/was-present`)} ] && ${packagePresent('nginx')}; then ${packageRemove('nginx', state)}; fi; if [ -e ${quote(`${state}/created-runtime-directory`)} ] && [ -d /run/nginx ]; then rmdir /run/nginx; fi; fi; rm -rf -- ${quote(state)}`, 'Restore nginx package, dependency, and service state', 'change', 300000, ['remove-site'])
       ]
     },
     verifyApplied: 'curl --fail --silent --max-time 10 http://127.0.0.1:18080/ | grep -q \'WebminAI nginx task\'',
@@ -905,7 +923,7 @@ function buildSystemUser (taskId, definition) {
     files: ['/etc/passwd', '/etc/shadow', '/etc/group', state],
     apply: `set -eu; install -d -m 0700 ${quote(state)}; if id ${user} >/dev/null 2>&1; then : > ${quote(`${state}/was-present`)}; elif command -v useradd >/dev/null 2>&1; then useradd --system --no-create-home --shell /usr/sbin/nologin ${user}; elif command -v adduser >/dev/null 2>&1; then adduser -S -D -H -s /sbin/nologin ${user}; else echo 'supported system-user tool not found' >&2; exit 2; fi`,
     applyPurpose: 'Capture user state and create the account when absent',
-    revert: `set -eu; if [ ! -e ${quote(`${state}/was-present`)} ] && id ${user} >/dev/null 2>&1; then if command -v userdel >/dev/null 2>&1; then userdel ${user}; else deluser ${user}; fi; fi; rm -rf -- ${quote(state)}`,
+    revert: `set -eu; [ -d ${quote(state)} ] || exit 0; if [ ! -e ${quote(`${state}/was-present`)} ] && id ${user} >/dev/null 2>&1; then if command -v userdel >/dev/null 2>&1; then userdel ${user}; else deluser ${user}; fi; fi; rm -rf -- ${quote(state)}`,
     revertPurpose: 'Remove only the account created by this task',
     verifyApplied: `id ${user} >/dev/null 2>&1`,
     verifyReverted: `test ! -e ${quote(state)}`,
@@ -935,7 +953,7 @@ function buildSystemdService (taskId, definition) {
   return simpleTask(definition, state, {
     overview: 'Install and run an isolated systemd oneshot service.',
     files: [unit, '/run/webminai-test-service', state],
-    apply: `set -eu; test ! -e ${quote(unit)}; install -d -m 0700 ${quote(state)}; printf '%s\n' '[Unit]' 'Description=Intent AI Ops reversible test service' '[Service]' 'Type=oneshot' 'ExecStart=/usr/bin/touch /run/webminai-test-service' 'RemainAfterExit=yes' > ${quote(unit)}; chmod 0644 ${quote(unit)}; systemctl daemon-reload; systemctl start webminai-test.service`,
+    apply: `set -eu; test ! -e ${quote(unit)}; test ! -e /run/webminai-test-service; install -d -m 0700 ${quote(state)}; printf '%s\n' '[Unit]' 'Description=Intent AI Ops reversible test service' '[Service]' 'Type=oneshot' 'ExecStart=/usr/bin/touch /run/webminai-test-service' 'RemainAfterExit=yes' > ${quote(unit)}; chmod 0644 ${quote(unit)}; systemctl daemon-reload; systemctl start webminai-test.service`,
     applyPurpose: 'Install and start the test service',
     revert: `set -eu; systemctl stop webminai-test.service 2>/dev/null || true; rm -f -- ${quote(unit)} /run/webminai-test-service; systemctl daemon-reload; systemctl reset-failed webminai-test.service 2>/dev/null || true; rm -rf -- ${quote(state)}`,
     revertPurpose: 'Stop and remove the test service',
@@ -952,7 +970,7 @@ function buildSystemdTimer (taskId, definition) {
   return simpleTask(definition, state, {
     overview: 'Install and enable an isolated systemd maintenance timer.',
     files: [service, timer, '/run/webminai-test-timer', state],
-    apply: `set -eu; test ! -e ${quote(service)}; test ! -e ${quote(timer)}; install -d -m 0700 ${quote(state)}; printf '%s\n' '[Service]' 'Type=oneshot' 'ExecStart=/usr/bin/touch /run/webminai-test-timer' > ${quote(service)}; printf '%s\n' '[Unit]' 'Description=Intent AI Ops reversible test timer' '[Timer]' 'OnActiveSec=1s' 'Unit=webminai-test-timer.service' '[Install]' 'WantedBy=timers.target' > ${quote(timer)}; chmod 0644 ${quote(service)} ${quote(timer)}; systemctl daemon-reload; systemctl enable --now webminai-test.timer`,
+    apply: `set -eu; test ! -e ${quote(service)}; test ! -e ${quote(timer)}; test ! -e /run/webminai-test-timer; install -d -m 0700 ${quote(state)}; printf '%s\n' '[Service]' 'Type=oneshot' 'ExecStart=/usr/bin/touch /run/webminai-test-timer' > ${quote(service)}; printf '%s\n' '[Unit]' 'Description=Intent AI Ops reversible test timer' '[Timer]' 'OnActiveSec=1s' 'Unit=webminai-test-timer.service' '[Install]' 'WantedBy=timers.target' > ${quote(timer)}; chmod 0644 ${quote(service)} ${quote(timer)}; systemctl daemon-reload; systemctl enable --now webminai-test.timer`,
     applyPurpose: 'Install and enable the test timer',
     revert: `set -eu; systemctl disable --now webminai-test.timer 2>/dev/null || true; rm -f -- ${quote(service)} ${quote(timer)} /run/webminai-test-timer; systemctl daemon-reload; systemctl reset-failed webminai-test-timer.service 2>/dev/null || true; rm -rf -- ${quote(state)}`,
     revertPurpose: 'Disable and remove the test timer',
@@ -970,7 +988,7 @@ function buildCronJob (taskId, definition, options) {
   const file = alpine ? '/etc/crontabs/root' : '/etc/cron.d/webminai-test'
   const apply = alpine
     ? `${packageCapture(state, packageName)}; if [ -f ${quote(file)} ]; then cp -a ${quote(file)} ${quote(`${state}/root-crontab-before`)}; else : > ${quote(`${state}/root-crontab-absent`)}; fi; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall(packageName)}; fi; grep -v 'WEBMINAI_TEST_CRON' ${quote(file)} > ${quote(`${state}/root-crontab-new`)} || true; printf '%s\n' '17 3 * * * /usr/bin/touch /tmp/webminai-cron-ran # WEBMINAI_TEST_CRON' >> ${quote(`${state}/root-crontab-new`)}; install -o root -g root -m 0600 ${quote(`${state}/root-crontab-new`)} ${quote(file)}`
-    : `${packageCapture(state, packageName)}; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall(packageName)}; fi; install -d -o root -g root -m 0755 /etc/cron.d; printf '%s\n' '17 3 * * * root /usr/bin/touch /tmp/webminai-cron-ran' > ${quote(file)}; chmod 0644 ${quote(file)}`
+    : `test ! -e ${quote(file)}; test ! -L ${quote(file)}; ${packageCapture(state, packageName)}; if [ ! -e ${quote(`${state}/was-present`)} ]; then ${packageInstall(packageName)}; fi; install -d -o root -g root -m 0755 /etc/cron.d; printf '%s\n' '17 3 * * * root /usr/bin/touch /tmp/webminai-cron-ran' > ${quote(file)}; chmod 0644 ${quote(file)}`
   const restore = alpine
     ? `if [ -f ${quote(`${state}/root-crontab-before`)} ]; then cp -a ${quote(`${state}/root-crontab-before`)} ${quote(file)}; elif [ -e ${quote(`${state}/root-crontab-absent`)} ]; then rm -f -- ${quote(file)}; fi`
     : `rm -f -- ${quote(file)}`
@@ -1026,8 +1044,8 @@ function simpleTask (definition, state, options) {
     plan: {
       changeOverview: options.overview,
       modifiedFiles: options.files,
-      commands: [command('apply', `set -eu; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${options.apply}; : > ${quote(`${state}/apply-complete`)}; fi`, options.applyPurpose, 'change', 300000)],
-      revertCommands: [command('revert', options.revert, options.revertPurpose, 'change', 300000)]
+      commands: [command('apply', `set -eu; for path in ${options.files.map(quote).join(' ')}; do test ! -L "$path"; done; if [ ! -e ${quote(`${state}/apply-complete`)} ]; then ${options.apply}; : > ${quote(`${state}/apply-complete`)}; chmod 0600 ${quote(`${state}/apply-complete`)}; fi`, options.applyPurpose, 'change', 300000)],
+      revertCommands: [command('revert', `set -eu; test ! -L ${quote(state)}; [ -d ${quote(state)} ] || exit 0; ${options.revert}`, options.revertPurpose, 'change', 300000)]
     },
     verifyApplied: options.verifyApplied,
     verifyReverted: options.verifyReverted,

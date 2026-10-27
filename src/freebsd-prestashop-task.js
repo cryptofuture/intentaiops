@@ -1,10 +1,9 @@
 import { prestaShopComposeAssets, prestaShopRelease } from './prestashop-task.js'
-import { buildFreebsdMariaDbImageCommand } from './freebsd-wordpress-task.js'
-import { buildFreebsdPhpRuntimeCommand, FREEBSD_PHP_IMAGE } from './freebsd-php-runtime.js'
+import { buildFreebsdMariaDbImageCommand, freebsdMariaDbReadyCommand } from './freebsd-wordpress-task.js'
+import { buildFreebsdPhpRuntimeCommand, freebsdContainerImages } from './freebsd-php-runtime.js'
 
 const RELEASE = prestaShopRelease()
 const ASSETS = prestaShopComposeAssets()
-const DATABASE_IMAGE = 'localhost/webminai-freebsd-mariadb:11.8'
 const SERVICE_ROOT = '/var/db/webminai/apps/prestashop'
 const BUILD_ROOT = '/var/db/webminai/image-builds/prestashop'
 const CREDENTIALS = '/root/prestashop_credentials'
@@ -16,19 +15,20 @@ export function buildFreebsdPrestaShopTask (taskId, freebsdExecution) {
   if (freebsdExecution?.platform !== 'freebsd') throw new Error('FreeBSD PrestaShop requires a FreeBSD execution inventory')
   if (!freebsdExecution.docker?.ready && !freebsdExecution.docker?.daemonReachable) throw new Error('FreeBSD PrestaShop requires the reviewed Podman Suite and podman-compose substrate')
   const state = `/var/lib/webminai/task-state/${taskId}-prestashop-freebsd`
+  const images = freebsdContainerImages(freebsdExecution)
   return {
     plan: {
       summary: 'Deploy a learned reversible native FreeBSD PrestaShop store',
       changeOverview: `Reuse shared FreeBSD runtimes and the reviewed phased installer to deploy digest-verified PrestaShop ${RELEASE.version} on port 18105.`,
       modifiedFiles: [state, BUILD_ROOT, SERVICE_ROOT, CREDENTIALS],
-      assumptions: ['FreeBSD 15.1 amd64 with the reviewed Podman jail substrate', `PrestaShop ${RELEASE.version}, PHP 8.4, nginx, and MariaDB 11.8 satisfy the resolved runtime matrix`],
+      assumptions: ['FreeBSD 14.4 or 15.1+ amd64 with the reviewed Podman jail substrate', `PrestaShop ${RELEASE.version}, PHP 8.4, nginx, and MariaDB 11.8 satisfy the resolved runtime matrix`],
       warnings: ['Only the isolated PrestaShop HTTP port is published.', 'The installation is deliberately minimal and does not configure payment, mail, tax, or shipping integrations.'],
       commands: [
         item('prepare-prestashop', prepare(state), 'Prepare protected credentials and task-owned directories'),
-        item('build-mariadb-runtime', buildFreebsdMariaDbImageCommand(BUILD_ROOT), 'Build the shared parameterized FreeBSD MariaDB runtime', ['prepare-prestashop'], 1200000, 'job'),
-        item('build-php-runtime', buildFreebsdPhpRuntimeCommand(BUILD_ROOT), 'Build the shared FreeBSD PHP 8.4 and nginx runtime', ['prepare-prestashop'], 1200000, 'job'),
+        item('build-mariadb-runtime', buildFreebsdMariaDbImageCommand(BUILD_ROOT, images), 'Build the shared parameterized FreeBSD MariaDB runtime', ['prepare-prestashop'], 1200000, 'job'),
+        item('build-php-runtime', buildFreebsdPhpRuntimeCommand(BUILD_ROOT, images), 'Build the shared FreeBSD PHP 8.4 and nginx runtime', ['prepare-prestashop'], 1200000, 'job'),
         item('acquire-prestashop', acquire(), `Acquire and verify the outer PrestaShop ${RELEASE.version} distribution`, ['prepare-prestashop'], 300000, 'job'),
-        item('start-prestashop', start(), 'Start the isolated MariaDB and PHP/nginx runtime and extract the verified inner distribution', ['build-mariadb-runtime', 'build-php-runtime', 'acquire-prestashop'], 600000, 'job'),
+        item('start-prestashop', start(images), 'Start the isolated MariaDB and PHP/nginx runtime and extract the verified inner distribution', ['build-mariadb-runtime', 'build-php-runtime', 'acquire-prestashop'], 600000, 'job'),
         item('initialize-prestashop-database', installStep('database'), 'Initialize the PrestaShop database using protected credential-file inputs', ['start-prestashop'], 1200000, 'job'),
         item('initialize-prestashop-modules', installStep('modules', 'ps_linklist'), 'Install the reviewed storefront module batch', ['initialize-prestashop-database'], 1200000, 'job'),
         item('initialize-prestashop-theme', installStep('theme,postInstall'), 'Install the classic theme and run its post-install phase', ['initialize-prestashop-modules'], 1200000, 'job'),
@@ -51,22 +51,22 @@ function acquire () {
   return `set -eu; archive=${quote(`${CREDENTIALS}/prestashop-${RELEASE.version}.zip`)}; if [ ! -f "$archive" ] || [ "$(sha256 -q "$archive" 2>/dev/null || true)" != ${quote(RELEASE.sha256)} ]; then fetch -qo "$archive.tmp" ${quote(RELEASE.url)}; [ "$(md5 -q "$archive.tmp")" = ${quote(RELEASE.md5)} ]; [ "$(sha256 -q "$archive.tmp")" = ${quote(RELEASE.sha256)} ]; mv -f -- "$archive.tmp" "$archive"; fi; chmod 0600 "$archive"`
 }
 
-function start () {
-  return `[ ! -f ${quote(`${SERVICE_ROOT}/www/.webminai-installed`)} ] || { cd ${quote(SERVICE_ROOT)}; podman-compose -p ${PROJECT} -f compose.yml up -d; database=; for attempt in $(jot 120); do podman exec ${PROJECT}_db_1 sh -c 'MYSQL_PWD=$(cat /run/secrets/db_root_password) mariadb -uroot -e "SELECT 1"' >/dev/null 2>&1 && { database=yes; break; }; sleep 2; done; [ "$database" = yes ]; exit 0; }; ${startFresh()}`
+function start (images) {
+  return `[ ! -f ${quote(`${SERVICE_ROOT}/www/.webminai-installed`)} ] || { cd ${quote(SERVICE_ROOT)}; podman-compose -p ${PROJECT} -f compose.yml up -d; ${freebsdMariaDbReadyCommand(PROJECT, DATABASE, '10.89.105.2')}; exit 0; }; ${startFresh(images)}`
 }
 
-function startFresh () {
+function startFresh (images) {
   const bootstrap = shellFile(ASSETS.installer, `${CREDENTIALS}/installer-argv.php`)
   return `set -eu; root=${quote(SERVICE_ROOT)}; ${bootstrap}; chmod 0600 ${quote(`${CREDENTIALS}/installer-argv.php`)}; podman network exists ${PROJECT} || podman network create --subnet 10.89.105.0/24 --gateway 10.89.105.1 ${PROJECT} >/dev/null; cat > "$root/compose.yml" <<'YAML'
 services:
   db:
-    image: ${DATABASE_IMAGE}
+    image: ${images.database}
     restart: always
     environment: { WEBMINAI_DB_NAME: ${DATABASE}, WEBMINAI_DB_USER: ${DATABASE} }
     networks: { default: { ipv4_address: 10.89.105.2 } }
     volumes: [ '${SERVICE_ROOT}/db:/var/db/mysql', '${CREDENTIALS}:/run/secrets:ro' ]
   prestashop:
-    image: ${FREEBSD_PHP_IMAGE}
+    image: ${images.php}
     restart: always
     depends_on: [ db ]
     networks: { default: { ipv4_address: 10.89.105.3 } }
@@ -75,7 +75,7 @@ services:
 networks:
   default: { external: true, name: ${PROJECT} }
 YAML
-chmod 0600 "$root/compose.yml"; cd "$root"; podman-compose -p ${PROJECT} -f compose.yml down >/dev/null 2>&1 || true; podman-compose -p ${PROJECT} -f compose.yml up -d; database=; for attempt in $(jot 120); do podman exec ${PROJECT}_db_1 sh -c 'MYSQL_PWD=$(cat /run/secrets/db_root_password) mariadb -uroot -e "SELECT 1"' >/dev/null 2>&1 && { database=yes; break; }; sleep 2; done; [ "$database" = yes ]; if [ ! -f "$root/www/index.php" ]; then podman exec ${PROJECT}_prestashop_1 php -r '$outer=new ZipArchive(); if ($outer->open("/run/secrets/prestashop-${RELEASE.version}.zip") !== true || !$outer->extractTo("/srv/app", ["prestashop.zip"])) { exit(1); } $outer->close(); if (hash_file("sha256", "/srv/app/prestashop.zip") !== "${RELEASE.innerSha256}") { exit(1); } $inner=new ZipArchive(); if ($inner->open("/srv/app/prestashop.zip") !== true || !$inner->extractTo("/srv/app")) { exit(1); } $inner->close(); unlink("/srv/app/prestashop.zip");'; fi; test -f "$root/www/index.php"; test -f "$root/www/install/index_cli.php"; find "$root/www" -type d -exec chmod 0755 {} +; find "$root/www" -type f -exec chmod 0644 {} +`
+chmod 0600 "$root/compose.yml"; cd "$root"; podman-compose -p ${PROJECT} -f compose.yml down >/dev/null 2>&1 || true; podman-compose -p ${PROJECT} -f compose.yml up -d; ${freebsdMariaDbReadyCommand(PROJECT, DATABASE, '10.89.105.2')}; if [ ! -f "$root/www/index.php" ]; then podman exec ${PROJECT}_prestashop_1 php -r '$outer=new ZipArchive(); if ($outer->open("/run/secrets/prestashop-${RELEASE.version}.zip") !== true || !$outer->extractTo("/srv/app", ["prestashop.zip"])) { exit(1); } $outer->close(); if (hash_file("sha256", "/srv/app/prestashop.zip") !== "${RELEASE.innerSha256}") { exit(1); } $inner=new ZipArchive(); if ($inner->open("/srv/app/prestashop.zip") !== true || !$inner->extractTo("/srv/app")) { exit(1); } $inner->close(); unlink("/srv/app/prestashop.zip");'; fi; test -f "$root/www/index.php"; test -f "$root/www/install/index_cli.php"; find "$root/www" -type d -exec chmod 0755 {} +; find "$root/www" -type f -exec chmod 0644 {} +`
 }
 
 function installStep (step, modules = null) {

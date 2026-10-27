@@ -1,10 +1,28 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const installer = fileURLToPath(new URL('../remote/webminai-stage2.sh', import.meta.url))
 const windowsInstaller = fileURLToPath(new URL('../remote/webminai-stage2-windows.ps1', import.meta.url))
+
+test('Windows command runner reads optional native status safely after strict-mode scripts', async () => {
+  const source = await readFile(new URL('../remote/webminai-command-runner-windows.ps1', import.meta.url), 'utf8')
+  assert.match(source, /Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue/u)
+  assert.match(source, /if \(\$nativeStatus -is \[int\] -and \$nativeStatus -ne 0\) \{ exit \$nativeStatus \}/u)
+  assert.doesNotMatch(source, /if \(\$LASTEXITCODE/u)
+})
+
+test('Windows native process statuses retain all DWORD bits in the existing signed result field', async () => {
+  const source = await readFile(new URL('../plugin/webminai.plugin.windows.c', import.meta.url), 'utf8')
+  assert.match(source, /result->exit_code = \(int32_t\)exit_code;/u)
+  assert.doesNotMatch(source, /exit_code <= INT_MAX \? \(int\)exit_code : 1/u)
+  assert.match(source, /int32_t exit_code;/u)
+})
 
 test('stage 2 installs a setuid root plugin and a root-only host token', async () => {
   const source = await readFile(installer, 'utf8')
@@ -43,10 +61,10 @@ test('stage 2 installs a setuid root plugin and a root-only host token', async (
   assert.match(source, /if \[ "\$status" = inactive \] && \[ "\$ownership" = managed \]; then/)
   assert.match(source, /plugin artifact platform mismatch/)
   assert.match(source, /"platform":"%s"/)
-  assert.match(source, /cancel_webminai_jobs\(\)/)
-  assert.match(source, /kill -TERM "-\$job_pid"/)
+  assert.match(source, /remove_completed_webminai_jobs\(\)/)
+  assert.doesNotMatch(source, /kill -TERM "-\$job_pid"/)
   assert.match(source, /rm -rf -- "\$job_root"/)
-  assert.match(source, /cancel_webminai_jobs\n {2}rm -f "\$KEY_FILE"/)
+  assert.match(source, /remove_completed_webminai_jobs\n {2}rm -f "\$KEY_FILE"/)
   assert.match(source, /NETDATA_ROOT_PLUGIN_DROPIN=\/etc\/systemd\/system\/netdata\.service\.d\/webminai-root-plugin\.conf/)
   assert.match(source, /configure_root_plugin_service\(\)/)
   assert.match(source, /CapabilityBoundingSet=~/)
@@ -55,10 +73,43 @@ test('stage 2 installs a setuid root plugin and a root-only host token', async (
   assert.doesNotMatch(source, /NOPASSWD:/)
 })
 
+test('POSIX deactivation preserves unfinished records and never signals reused completed-job PIDs', { skip: !existsSync('/bin/sh') }, async t => {
+  const source = await readFile(installer, 'utf8')
+  const cleanup = source.match(/remove_completed_webminai_jobs\(\) \{[\s\S]*?\n\}/u)[0]
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'intent-stage2-jobs-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'ignore' })
+  t.after(() => child.kill())
+  const job = path.join(directory, 'jobs', 'fixture-job')
+  await mkdir(job, { recursive: true })
+  await writeFile(path.join(job, 'pid'), String(child.pid))
+  await writeFile(path.join(job, 'controller.pid'), String(child.pid))
+  await writeFile(path.join(directory, 'action.key'), 'fixture-only')
+  const run = () => spawnSync('/bin/sh', ['-c', 'set -eu; STATE_DIR="$1"; ' + cleanup + '\nremove_completed_webminai_jobs', 'fixture', directory], { encoding: 'utf8' })
+  const unfinished = run()
+  assert.equal(unfinished.status, 1)
+  assert.match(unfinished.stderr, /reconcile its outcome/u)
+  await access(path.join(job, 'pid'))
+  await access(path.join(directory, 'action.key'))
+  await writeFile(path.join(job, 'result'), 'fixture-durable-result')
+  assert.equal(run().status, 0)
+  assert.equal(existsSync(path.join(directory, 'jobs')), false)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(child.exitCode, null)
+  assert.equal(child.signalCode, null)
+})
+
 test('Windows Stage 2 installs a LocalSystem plugin with guarded lifecycle state', async () => {
   const source = await readFile(windowsInstaller, 'utf8')
 
   assert.match(source, /netdata-x64\.msi/)
+  assert.match(source, /System32\\curl\.exe/)
+  assert.match(source, /Test-Path -LiteralPath \$curl -PathType Leaf/)
+  assert.match(source, /--fail --silent --show-error --location --connect-timeout 15 --max-time 600 --output \$msi \$NetdataDownload/)
+  assert.match(source, /if \(\$LASTEXITCODE -ne 0\) \{ throw "Netdata download failed/)
+  assert.match(source, /'\/i', \('"' \+ \$msi \+ '"'\), '\/norestart'/)
+  assert.match(source, /Invoke-WebRequest -UseBasicParsing -Uri \$NetdataDownload -OutFile \$msi -TimeoutSec 600 -ErrorAction Stop/)
+  assert.doesNotMatch(source, /--insecure/)
   assert.match(source, /Win32_Service/)
   assert.match(source, /StartName -notin @\('LocalSystem', 'Local System'\)/)
   assert.match(source, /S-1-5-18/)

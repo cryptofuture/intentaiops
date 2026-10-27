@@ -1,8 +1,31 @@
+import { redactDiagnosticText } from './error-details.js'
+
+export function sanitizeHealthResult (entry) {
+  if (!entry?.result) return entry
+  return {
+    ...entry,
+    result: {
+      ...entry.result,
+      stdout: redactHealthText(entry.result.stdout),
+      stderr: redactHealthText(entry.result.stderr)
+    }
+  }
+}
+
+export function redactHealthText (value) {
+  return redactDiagnosticText(String(value ?? ''))
+    .replace(/\b(password|passwd|token|secret|authorization|api[_-]?key)\s*[:=]\s*[^\s,;]+/giu, '$1=[redacted]')
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=-]+/giu, '$1 [redacted]')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@[^\s"'<>]+/giu, '[redacted-url]')
+    .replace(/\b(?:postgres(?:ql)?|mysql|mariadb|mongodb|redis):\/\/[^\s"']+/giu, '[redacted-service-url]')
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/giu, '[redacted-private-key]')
+}
+
 const PROFILES = {
   linux: {
     logSources: [
       'systemd journal: journalctl --since/--priority/--lines',
-      'traditional system log: /var/log/messages or /var/log/syslog',
+      'traditional system logs: withheld because authentication entries may be mixed in',
       'kernel log: journalctl -k or dmesg',
       'service state: systemctl --failed or OpenRC rc-status'
     ],
@@ -86,13 +109,13 @@ function linuxCollector () {
     "printf '%s\\n' '-- failed services --'",
     "if command -v systemctl >/dev/null 2>&1; then systemctl --failed --no-legend --plain 2>&1 | head -n 80; elif command -v rc-status >/dev/null 2>&1; then rc-status --crashed 2>&1 | head -n 80; else printf '%s\\n' 'service-manager-check: unavailable'; fi",
     "printf '%s\\n' '-- recent priority errors (authentication logs excluded) --'",
-    "if command -v journalctl >/dev/null 2>&1 && journalctl --list-boots >/dev/null 2>&1; then journalctl --since '-2 hours' --priority 0..3 --lines 120 --no-pager --output short-iso 2>&1; elif [ -r /var/log/messages ]; then tail -n 120 /var/log/messages; elif [ -r /var/log/syslog ]; then tail -n 120 /var/log/syslog; else printf '%s\\n' 'recent-system-log: unavailable'; fi",
+    "if command -v journalctl >/dev/null 2>&1 && journalctl --list-boots >/dev/null 2>&1; then journalctl --since '-2 hours' --priority 0..3 --lines 120 --no-pager --output short-iso 2>&1; else printf '%s\\n' 'recent-system-log: unavailable (unfiltered traditional logs withheld)'; fi",
     "printf '%s\\n' '-- recent kernel errors --'",
     "if command -v journalctl >/dev/null 2>&1 && journalctl --list-boots >/dev/null 2>&1; then journalctl -k -b --priority 0..3 --lines 80 --no-pager --output short-iso 2>&1; elif command -v dmesg >/dev/null 2>&1; then dmesg 2>&1 | tail -n 80; else printf '%s\\n' 'kernel-log: unavailable'; fi",
     "printf '%s\\n' '-- cached package updates and reboot state --'",
     "if command -v apt-get >/dev/null 2>&1; then apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null | sed -n 's/^Inst /update: /p' | head -n 120; [ -e /var/run/reboot-required ] && printf '%s\\n' 'reboot-required: yes' || printf '%s\\n' 'reboot-required: no'; elif command -v dnf >/dev/null 2>&1; then dnf --cacheonly -q check-update 2>&1 | head -n 120; elif command -v yum >/dev/null 2>&1; then yum -C -q check-update 2>&1 | head -n 120; elif command -v zypper >/dev/null 2>&1; then zypper --no-refresh --non-interactive list-updates 2>&1 | head -n 120; elif command -v apk >/dev/null 2>&1; then apk version -l '<' 2>&1 | head -n 120; elif command -v pacman >/dev/null 2>&1; then pacman -Qu 2>&1 | head -n 120; else printf '%s\\n' 'package-update-check: unavailable'; fi",
     "printf '%s\\n' '-- top processes snapshot --'",
-    'ps -eo pid,ppid,comm,%cpu,%mem --sort=-%cpu 2>/dev/null | head -n 16 || ps aux 2>/dev/null | head -n 16 || true',
+    "if ps -eo pid,ppid,comm,%cpu,%mem --sort=-%cpu >/dev/null 2>&1; then ps -eo pid,ppid,comm,%cpu,%mem --sort=-%cpu 2>/dev/null | head -n 16; elif ps -o pid,ppid,comm >/dev/null 2>&1; then ps -o pid,ppid,comm 2>/dev/null | head -n 16; else printf '%s\\n' 'process-snapshot: unavailable'; fi",
     "printf '%s\\n' '-- container service snapshot --'",
     "if command -v docker >/dev/null 2>&1; then docker ps --format 'docker {{.Names}} {{.Status}} {{.Image}}' 2>&1 | head -n 80; elif command -v podman >/dev/null 2>&1; then podman ps --format 'podman {{.Names}} {{.Status}} {{.Image}}' 2>&1 | head -n 80; else printf '%s\\n' 'container-runtime: unavailable'; fi"
   ]
@@ -214,16 +237,16 @@ function linuxDiagnosticProfile (context) {
     updateTools: [...PROFILES.linux.updateTools]
   }
   if (['debian', 'ubuntu'].includes(id)) {
-    profile.logSources = ['systemd journal', '/var/log/syslog when rsyslog is installed', 'kernel journal or dmesg']
+    profile.logSources = ['systemd journal', 'unfiltered traditional logs withheld', 'kernel journal or dmesg']
     profile.updateTools = ['apt/dpkg cached upgrade simulation', '/var/run/reboot-required']
   } else if (['almalinux', 'centos', 'fedora', 'ol', 'oracle', 'rhel', 'rocky'].includes(id)) {
-    profile.logSources = ['systemd journal', '/var/log/messages when rsyslog is installed', 'kernel journal or dmesg']
+    profile.logSources = ['systemd journal', 'unfiltered traditional logs withheld', 'kernel journal or dmesg']
     profile.updateTools = ['dnf/yum cached check-update', 'rpm package database']
   } else if (['opensuse', 'opensuse-leap', 'sles'].includes(id)) {
-    profile.logSources = ['systemd journal', '/var/log/messages when rsyslog is installed', 'kernel journal or dmesg']
+    profile.logSources = ['systemd journal', 'unfiltered traditional logs withheld', 'kernel journal or dmesg']
     profile.updateTools = ['zypper --no-refresh list-updates', 'rpm package database']
   } else if (id === 'alpine') {
-    profile.logSources = ['/var/log/messages when syslog is enabled', 'OpenRC rc-status', 'dmesg']
+    profile.logSources = ['unfiltered traditional logs withheld', 'OpenRC rc-status', 'dmesg']
     profile.updateTools = ['apk version against the installed repository index']
   } else if (id === 'arch') {
     profile.logSources = ['systemd journal', 'kernel journal or dmesg']

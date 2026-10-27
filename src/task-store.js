@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3'
 import { chmodSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { EXECUTION_EVENTS, journalMetadata, planFingerprint } from './execution-journal.js'
 import { resolveServerDirectory } from './server-id.js'
 
 const DATABASE_FILE = 'tasks.sqlite3'
@@ -125,7 +127,201 @@ export class TaskStore {
     return this.withDatabase(serverId, database => this.getFromDatabase(database, taskId))
   }
 
+  control (serverId, taskId) {
+    return this.withDatabase(serverId, database => {
+      this.getFromDatabase(database, taskId)
+      return database.prepare('SELECT version, action FROM task_controls WHERE task_id = ?').get(taskId) ?? { version: 0, action: 'run' }
+    })
+  }
+
+  setControl (serverId, taskId, action, expectedVersion) {
+    if (!['run', 'pause', 'abort'].includes(action)) throw new TypeError('invalid execution control')
+    return this.withDatabase(serverId, database => database.transaction(() => {
+      this.getFromDatabase(database, taskId)
+      const current = database.prepare('SELECT version FROM task_controls WHERE task_id = ?').get(taskId)?.version ?? 0
+      if (current !== expectedVersion) throw new Error('stale operator decision')
+      database.prepare('INSERT INTO task_controls (task_id, version, action) VALUES (?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET version = excluded.version, action = excluded.action').run(taskId, current + 1, action)
+      return { version: current + 1, action }
+    }).immediate())
+  }
+
+  stateVersion (serverId, taskId) {
+    return this.withDatabase(serverId, database => {
+      const task = this.getFromDatabase(database, taskId)
+      const event = database.prepare('SELECT max(id) AS id FROM execution_events WHERE task_id = ?').get(taskId).id ?? 0
+      const control = database.prepare('SELECT version FROM task_controls WHERE task_id = ?').get(taskId)?.version ?? 0
+      return `${planFingerprint({ hostId: serverId, taskId, plan: task.plan })}:${event}:${control}`
+    })
+  }
+
+  revisions (serverId, taskId) {
+    return this.withDatabase(serverId, database => database.prepare('SELECT id, parent_id AS parentId, state_version AS stateVersion, approved, plan_json AS planJson FROM plan_revisions WHERE task_id = ? ORDER BY id')
+      .all(taskId).map(row => ({ ...row, plan: JSON.parse(row.planJson) })))
+  }
+
+  proposeRevision (serverId, taskId, plan, expectedVersion) {
+    return this.withDatabase(serverId, database => database.transaction(() => {
+      const task = this.getFromDatabase(database, taskId)
+      if (this.stateVersion(serverId, taskId) !== expectedVersion) throw new Error('stale host execution state')
+      for (const command of plan.operatorRollback ? [] : this.executionState(serverId, taskId)) {
+        if (command.status !== 'completed') continue
+        const original = task.plan.commands.find(item => item.id === command.commandId)
+        const replacement = plan.commands.find(item => item.id === command.commandId)
+        if (!replacement || planFingerprint(original) !== planFingerprint(replacement)) throw new Error('completed command history is immutable')
+      }
+      if (database.prepare('SELECT 1 FROM execution_leases WHERE task_id = ? AND expires_at > ?').get(taskId, Date.now())) throw new Error('pause execution before revising')
+      if (!database.prepare('SELECT 1 FROM plan_revisions WHERE task_id = ?').get(taskId)) {
+        database.prepare('INSERT INTO plan_revisions (task_id, parent_id, state_version, approved, plan_json) VALUES (?, NULL, ?, 1, ?)').run(taskId, expectedVersion, JSON.stringify(task.plan))
+      }
+      const parent = database.prepare("SELECT id FROM plan_revisions WHERE task_id = ? AND approved = 1 AND coalesce(json_extract(plan_json, '$.operatorRollback'), 0) = 0 ORDER BY id DESC LIMIT 1").get(taskId).id
+      const result = database.prepare('INSERT INTO plan_revisions (task_id, parent_id, state_version, approved, plan_json) VALUES (?, ?, ?, 0, ?)').run(taskId, parent, expectedVersion, JSON.stringify(plan))
+      return Number(result.lastInsertRowid)
+    }).immediate())
+  }
+
+  approveRevision (serverId, taskId, revisionId, expectedVersion, fingerprint) {
+    return this.withDatabase(serverId, database => database.transaction(() => {
+      if (this.stateVersion(serverId, taskId) !== expectedVersion) throw new Error('stale operator decision')
+      if (database.prepare('SELECT 1 FROM execution_leases WHERE task_id = ? AND expires_at > ?').get(taskId, Date.now())) throw new Error('task is executing')
+      const revision = database.prepare('SELECT * FROM plan_revisions WHERE id = ? AND task_id = ? AND approved = 0').get(revisionId, taskId)
+      if (!revision || revision.state_version !== expectedVersion || planFingerprint(JSON.parse(revision.plan_json)) !== fingerprint) throw new Error('revision approval does not match proposal')
+      database.prepare('UPDATE plan_revisions SET approved = 1 WHERE id = ?').run(revisionId)
+      const plan = JSON.parse(revision.plan_json)
+      if (!plan.operatorRollback) database.prepare("UPDATE tasks SET plan_json = ?, status = 'planned', updated_at = unixepoch() WHERE id = ?").run(revision.plan_json, taskId)
+      if (!plan.operatorRollback) database.prepare("INSERT INTO task_controls (task_id, version, action) VALUES (?, 1, 'pause') ON CONFLICT(task_id) DO UPDATE SET version = version + 1, action = 'pause'").run(taskId)
+      const task = this.getFromDatabase(database, taskId)
+      database.prepare('INSERT INTO execution_events (task_id, run_id, revision, timestamp, type, metadata_json) VALUES (?, ?, ?, ?, ?, ?)').run(taskId, task.groupRunId, planFingerprint(task.plan), new Date().toISOString(), 'plan_revised', JSON.stringify({ revisionId, parentRevision: revision.parent_id, operation: plan.operatorRollback ? 'rollback' : 'apply' }))
+      return task
+    }).immediate())
+  }
+
+  interruptedTasks (serverId) {
+    return this.withDatabase(serverId, database => database.prepare("SELECT id FROM tasks WHERE status IN ('running', 'reverting') ORDER BY id")
+      .all().map(row => ({ ...this.getFromDatabase(database, row.id), execution: this.executionState(serverId, row.id) })))
+  }
+
+  executionEvents (serverId, taskId, { after = 0, limit = 1000 } = {}) {
+    if (!Number.isInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError('invalid execution event range')
+    return this.withDatabase(serverId, database => {
+      this.getFromDatabase(database, taskId)
+      return database.prepare('SELECT * FROM execution_events WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?')
+        .all(taskId, after, limit).map(row => executionEvent(serverId, row))
+    })
+  }
+
+  hostExecutionEvents (serverId, { after = 0, limit = 1000 } = {}) {
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError('invalid execution event range')
+    return this.withDatabase(serverId, database => database.prepare('SELECT * FROM execution_events WHERE id > ? ORDER BY id LIMIT ?')
+      .all(after, limit).map(row => executionEvent(serverId, row)))
+  }
+
+  allExecutionEvents (serverId, taskId) {
+    const events = []
+    let after = 0
+    for (;;) {
+      const page = this.executionEvents(serverId, taskId, { after })
+      events.push(...page)
+      if (page.length < 1000) return events
+      after = page.at(-1).id
+    }
+  }
+
+  acquireExecution (serverId, taskId, plan) {
+    const owner = randomUUID()
+    const fingerprint = planFingerprint(plan)
+    return this.withDatabase(serverId, database => database.transaction(() => {
+      const task = this.getFromDatabase(database, taskId)
+      if (!task.plan || planFingerprint(task.plan) !== fingerprint) throw new Error('execution plan differs from saved plan')
+      const ancestors = new Set([taskId])
+      let ancestor = task
+      while (ancestor.retryOfTaskId) {
+        if (ancestors.has(ancestor.retryOfTaskId) || ancestors.size >= 100) throw new Error('retry history is cyclic or exceeds the execution inspection limit')
+        ancestor = this.getFromDatabase(database, ancestor.retryOfTaskId)
+        ancestors.add(ancestor.id)
+        const uncertain = [...this.executionState(serverId, ancestor.id), ...this.rollbackState(serverId, ancestor.id)].some(command => command.status === 'uncertain')
+        const legacy = ancestor.plan?.commands?.length && ['running', 'reverting', 'partial', 'failed', 'revert_failed'].includes(ancestor.status) && !database.prepare('SELECT 1 FROM execution_events WHERE task_id = ? LIMIT 1').get(ancestor.id)
+        if (uncertain || legacy) throw new Error('retry ancestor requires operator reconciliation before execution; no commands were dispatched')
+      }
+      const related = database.prepare(`WITH RECURSIVE related(id) AS (
+        SELECT ? UNION SELECT tasks.id FROM tasks JOIN related ON tasks.retry_of_task_id = related.id LIMIT 1001
+      ) SELECT related.id, execution_leases.expires_at AS expiresAt FROM related LEFT JOIN execution_leases ON execution_leases.task_id = related.id`).all(ancestor.id)
+      if (related.length > 1000) throw new Error('retry family exceeds the execution inspection limit')
+      if (related.some(lease => lease.expiresAt > Date.now())) throw new Error('task or related retry execution is owned by another operator')
+      database.prepare('INSERT OR REPLACE INTO execution_leases (task_id, owner, fingerprint, expires_at) VALUES (?, ?, ?, ?)')
+        .run(taskId, owner, fingerprint, Date.now() + 30000)
+      return { owner, fingerprint }
+    }).immediate())
+  }
+
+  renewExecution (serverId, taskId, owner) {
+    return this.withDatabase(serverId, database => {
+      const updated = database.prepare('UPDATE execution_leases SET expires_at = ? WHERE task_id = ? AND owner = ? AND expires_at > ?')
+        .run(Date.now() + 30000, taskId, owner, Date.now())
+      if (!updated.changes) {
+        const lease = database.prepare('SELECT owner, expires_at FROM execution_leases WHERE task_id = ?').get(taskId)
+        const error = new Error('execution ownership expired or changed')
+        error.code = !lease ? 'EXECUTION_LEASE_MISSING' : lease.owner !== owner ? 'EXECUTION_LEASE_REPLACED' : 'EXECUTION_LEASE_EXPIRED'
+        throw error
+      }
+    })
+  }
+
+  releaseExecution (serverId, taskId, owner) {
+    return this.withDatabase(serverId, database => database.prepare('DELETE FROM execution_leases WHERE task_id = ? AND owner = ?').run(taskId, owner))
+  }
+
+  appendExecutionEvent (serverId, taskId, owner, { type, commandId = null, attemptId = null, metadata = {} }) {
+    if (!EXECUTION_EVENTS.has(type)) throw new TypeError('invalid execution event type')
+    if (commandId !== null && !/^[a-z0-9][a-z0-9_-]{0,62}$/u.test(commandId)) throw new TypeError('invalid journal command id')
+    if (attemptId !== null && !/^[a-z0-9-]{1,80}$/u.test(attemptId)) throw new TypeError('invalid execution attempt id')
+    return this.withDatabase(serverId, database => database.transaction(() => {
+      const task = this.getFromDatabase(database, taskId)
+      const lease = database.prepare('SELECT * FROM execution_leases WHERE task_id = ?').get(taskId)
+      if (!lease || lease.owner !== owner || lease.expires_at <= Date.now()) throw new Error('execution ownership expired or changed')
+      if (planFingerprint(task.plan) !== lease.fingerprint) throw new Error('approved execution plan changed')
+      const result = database.prepare('INSERT INTO execution_events (task_id, run_id, revision, command_id, attempt_id, timestamp, type, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(taskId, task.groupRunId, lease.fingerprint, commandId, attemptId, new Date().toISOString(), type, JSON.stringify(journalMetadata(metadata)))
+      return Number(result.lastInsertRowid)
+    }).immediate())
+  }
+
+  executionState (serverId, taskId) {
+    const task = this.get(serverId, taskId)
+    const events = this.allExecutionEvents(serverId, taskId)
+    const fingerprint = task.plan ? planFingerprint(task.plan) : null
+    const latest = new Map()
+    const jobs = new Map()
+    for (const event of events) {
+      if (!event.commandId || ['plan_approved', 'execution_recovery'].includes(event.type) || event.metadata.operation === 'rollback') continue
+      if (event.attemptId && event.metadata.jobId) jobs.set(`${event.commandId}:${event.attemptId}`, event.metadata.jobId)
+      if (event.revision !== fingerprint && event.type !== 'command_completed') continue
+      latest.set(event.commandId, event)
+    }
+    return (task.plan?.commands ?? []).map(item => {
+      const event = latest.get(item.id)
+      const status = !event || event.type === 'command_prepared'
+        ? 'pending'
+        : event.type === 'command_completed'
+          ? 'completed'
+          : event.type === 'command_failed' ? 'failed' : 'uncertain'
+      return { commandId: item.id, status, attemptId: event?.attemptId ?? null, jobId: jobs.get(`${item.id}:${event?.attemptId}`) ?? null }
+    })
+  }
+
+  rollbackState (serverId, taskId) {
+    const latest = new Map()
+    const jobs = new Map()
+    for (const event of this.allExecutionEvents(serverId, taskId)) {
+      if (event.metadata.operation !== 'rollback' || !event.commandId || ['plan_approved', 'execution_recovery'].includes(event.type)) continue
+      const key = `${event.metadata.rollbackRevision}:${event.commandId}`
+      latest.set(key, event)
+      if (event.attemptId && event.metadata.jobId) jobs.set(`${key}:${event.attemptId}`, event.metadata.jobId)
+    }
+    return [...latest.entries()].map(([key, event]) => ({ commandId: event.commandId, attemptId: event.attemptId, rollbackRevision: event.metadata.rollbackRevision, jobId: jobs.get(`${key}:${event.attemptId}`) ?? null, status: event.type === 'command_completed' ? 'completed' : event.type === 'command_failed' ? 'failed' : event.type === 'command_prepared' ? 'pending' : 'uncertain' }))
+  }
+
   savePlan (serverId, taskId, plan) {
+    if (this.executionEvents(serverId, taskId).length > 0) throw new Error('executed task plans are immutable; create a reviewed replacement task')
     return this.update(serverId, taskId, 'planned', {
       plan,
       changeOverview: plan.changeOverview,
@@ -191,7 +387,8 @@ export class TaskStore {
   }
 
   saveResults (serverId, taskId, results) {
-    const completed = Array.isArray(results) && results.length > 0 && results.every(result => result.status === 'completed')
+    const task = this.get(serverId, taskId)
+    const completed = Array.isArray(results) && results.length > 0 && results.every(result => result.status === 'completed') && (task.plan?.commands ?? []).every(command => results.some(result => result.id === command.id && result.status === 'completed'))
     return this.update(serverId, taskId, completed ? 'completed' : 'partial', { results })
   }
 
@@ -233,7 +430,8 @@ export class TaskStore {
   }
 
   saveRevertResults (serverId, taskId, results) {
-    const completed = Array.isArray(results) && results.length > 0 && results.every(result => result.status === 'completed')
+    const marker = this.withDatabase(serverId, database => database.prepare("SELECT metadata_json FROM execution_events WHERE task_id = ? AND type = 'rollback_completed' ORDER BY id DESC LIMIT 1").get(taskId))
+    const completed = Array.isArray(results) && results.length > 0 && results.every(result => result.status === 'completed') && (!marker || JSON.parse(marker.metadata_json).completed === true)
     return this.update(serverId, taskId, completed ? 'reverted' : 'revert_failed', {
       revertResults: results,
       revertedAt: completed ? Math.floor(Date.now() / 1000) : null
@@ -268,7 +466,8 @@ export class TaskStore {
     revertedAt
   } = {}) {
     if (!STATUSES.has(status)) throw new TypeError('invalid task status')
-    return this.withDatabase(serverId, database => {
+    return this.withDatabase(serverId, database => database.transaction(() => {
+      if (plan !== undefined && database.prepare('SELECT 1 FROM execution_events WHERE task_id = ? LIMIT 1').get(taskId)) throw new Error('executed task plans are immutable')
       const existing = this.getFromDatabase(database, taskId)
       database.prepare(`
         UPDATE tasks
@@ -292,7 +491,7 @@ export class TaskStore {
         taskId
       )
       return this.getFromDatabase(database, taskId)
-    })
+    }).immediate())
   }
 
   getFromDatabase (database, taskId) {
@@ -348,6 +547,21 @@ export class TaskStore {
       database.pragma('journal_mode = DELETE')
       database.pragma('synchronous = FULL')
       database.exec(`
+        CREATE TABLE IF NOT EXISTS task_controls (task_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, action TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS plan_revisions (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL, parent_id INTEGER, state_version TEXT NOT NULL, approved INTEGER NOT NULL, plan_json TEXT NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS revisions_no_plan_update BEFORE UPDATE OF plan_json, parent_id, state_version ON plan_revisions BEGIN SELECT RAISE(ABORT, 'revision history is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS revisions_no_delete BEFORE DELETE ON plan_revisions BEGIN SELECT RAISE(ABORT, 'revision history is immutable'); END;
+        CREATE TABLE IF NOT EXISTS execution_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, task_id INTEGER NOT NULL,
+          run_id INTEGER, revision TEXT NOT NULL, command_id TEXT, attempt_id TEXT,
+          timestamp TEXT NOT NULL, type TEXT NOT NULL, metadata_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS execution_events_task ON execution_events(task_id, id);
+        CREATE TRIGGER IF NOT EXISTS execution_events_no_update BEFORE UPDATE ON execution_events BEGIN SELECT RAISE(ABORT, 'execution journal is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS execution_events_no_delete BEFORE DELETE ON execution_events BEGIN SELECT RAISE(ABORT, 'execution journal is append-only'); END;
+        CREATE TABLE IF NOT EXISTS execution_leases (
+          task_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, fingerprint TEXT NOT NULL, expires_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tasks (
           id INTEGER PRIMARY KEY,
           request TEXT NOT NULL,
@@ -378,6 +592,7 @@ export class TaskStore {
       ensureColumn(database, 'kind', "TEXT NOT NULL DEFAULT 'ai'")
       ensureColumn(database, 'catalog_id', 'TEXT')
       ensureColumn(database, 'retry_of_task_id', 'INTEGER')
+      database.exec('CREATE INDEX IF NOT EXISTS tasks_retry_parent ON tasks(retry_of_task_id)')
       ensureColumn(database, 'retry_instructions', 'TEXT')
       ensureColumn(database, 'group_run_id', 'INTEGER')
       ensureColumn(database, 'consultation_ids_json', "TEXT NOT NULL DEFAULT '[]'")
@@ -410,6 +625,10 @@ function ensureColumn (database, name, definition) {
   if (!columns.some(column => column.name === name)) {
     database.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`)
   }
+}
+
+function executionEvent (serverId, row) {
+  return { version: 1, id: row.id, hostId: serverId, runId: row.run_id, taskId: row.task_id, revision: row.revision, commandId: row.command_id, attemptId: row.attempt_id, timestamp: row.timestamp, type: row.type, metadata: JSON.parse(row.metadata_json) }
 }
 
 function compactRow (row) {

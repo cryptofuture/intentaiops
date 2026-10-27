@@ -1,5 +1,15 @@
 const FAMILY_ORDER = ['debian', 'rpm', 'alpine', 'arch', 'suse']
 
+export function buildRolloutStages (hosts, { canaryHostId, batchSize = 2 } = {}) {
+  if (!Array.isArray(hosts) || !hosts.length || !Number.isInteger(batchSize) || batchSize < 1 || batchSize > 32) throw new TypeError('invalid rollout batch configuration')
+  const canary = hosts.find(host => host.serverId === canaryHostId)
+  if (!canary) throw new Error('select a participating canary host')
+  const remaining = hosts.filter(host => host !== canary)
+  const stages = [{ id: 'canary', hosts: [canary] }]
+  for (let index = 0; index < remaining.length; index += batchSize) stages.push({ id: `batch-${stages.length}`, hosts: remaining.slice(index, index + batchSize) })
+  return stages
+}
+
 export function buildValidationStages ({ hosts, applicationId, scorecard }) {
   if (!Array.isArray(hosts) || hosts.length === 0) throw new TypeError('validation scheduling requires hosts')
   if (new Set(hosts.map(host => host.serverId)).size !== hosts.length) throw new TypeError('validation hosts must be unique')

@@ -1,5 +1,8 @@
 import { detectPersistedPlatform } from './platform-identity.js'
 
+const COMPOSE_INVOCATION = /\b(?:docker\s+compose|docker-compose(?:\.exe)?)(?![A-Za-z0-9_.-])/iu
+const WINDOWS_COMPOSE_INVOCATION = /(?:\$(?:docker|dockerCli)|\bdocker\.exe['"]?)\s+compose(?![A-Za-z0-9_.-])/iu
+
 export function detectPlannerPlatform (inventory) {
   return detectPersistedPlatform(inventory) ?? 'unknown'
 }
@@ -22,7 +25,7 @@ export function validatePortablePlan (plan) {
   }
 }
 
-export function validateWindowsPlan (plan, inventory, request) {
+export function validateWindowsPlan (plan, inventory, request, { requireRevert = true, previousAttempts = [] } = {}) {
   const commands = inventory?.webminaiExecution?.commands ?? {}
   if (plan.modifiedFiles.some(file => !/^[A-Za-z]:[\\/]/u.test(file))) {
     throw new Error('Windows modifiedFiles must use native drive-letter paths such as C:\\ProgramData\\...')
@@ -48,12 +51,16 @@ export function validateWindowsPlan (plan, inventory, request) {
       throw new Error(`command ${item.id} requires an English Brave registry Publisher value, which can be localized; verify the executable Authenticode signer instead`)
     }
   }
-  if (!/\bbrave(?:\s+browser)?\b/iu.test(request)) return
-  const commandText = items.map(item => item.command).join('\n')
-  if (/Brave[^\s'";]*\.msi\b/iu.test(commandText) || plan.modifiedFiles.some(file => /Brave[^\\/]*\.msi$/iu.test(file))) {
+  if (!requireRevert || !/\bbrave(?:\s+browser)?\b/iu.test(request)) return
+  const commandText = plan.commands.map(item => item.command).join('\n')
+  const completedText = previousAttempts.flatMap(attempt => {
+    const completed = new Set((attempt.executionEvidence?.commands ?? []).filter(command => command.status === 'completed').map(command => command.commandId))
+    return (attempt.plan?.commands ?? []).filter(command => completed.has(command.id)).map(command => command.command)
+  }).join('\n')
+  if (items.some(item => /Brave[^\s'";]*\.msi\b/iu.test(item.command)) || plan.modifiedFiles.some(file => /Brave[^\\/]*\.msi$/iu.test(file))) {
     throw new Error('Brave Browser does not publish a BraveBrowser.msi; use its signed official standalone x64 EXE release asset')
   }
-  if (!/api\.github\.com\/repos\/brave\/brave-browser\/releases\/latest(?:[?'"\s]|$)/iu.test(commandText)) {
+  if (!/api\.github\.com\/repos\/brave\/brave-browser\/releases\/latest(?:[?'"\s]|$)/iu.test(commandText + '\n' + completedText)) {
     throw new Error('Brave installation must use the official releases/latest API endpoint so prerelease pagination cannot hide the stable release')
   }
   if (!/Get-AuthenticodeSignature/iu.test(commandText)) {
@@ -76,10 +83,18 @@ export function validateWindowsPlan (plan, inventory, request) {
 }
 
 export function validateDockerAndSecrets (plan, inventory) {
-  const items = [...plan.commands, ...plan.revertCommands]
+  const macos = detectPlannerPlatform(inventory) === 'macos'
+  const windows = detectPlannerPlatform(inventory) === 'windows'
+  const observedHome = inventory?.webminaiExecution?.runtimeHome
+  const home = /^\/Users\/[a-z_][a-z0-9_-]{0,31}$/u.test(observedHome ?? '') ? observedHome : null
+  const originalItems = [...plan.commands, ...plan.revertCommands]
+  const items = macos ? macosPolicyItems(originalItems, home) : originalItems
   const commandText = items.map(item => item.command).join('\n')
+  const composeText = windows ? commandText.replace(/(['"])\^Docker Compose version \1/giu, "''") : commandText
+  const hasCompose = text => COMPOSE_INVOCATION.test(text) || (windows && WINDOWS_COMPOSE_INVOCATION.test(text))
+  const configuredComposeText = windows ? composeText.replace(/(?:\$(?:docker|dockerCli)|\bdocker(?:\.exe)?['"]?|\bdocker-compose(?:\.exe)?['"]?)[ \t]+(?:compose[ \t]+)?(?:version|--version)\b/giu, '') : composeText
   const docker = inventory?.webminaiDocker
-  const usesDocker = /\bdocker(?:-compose|\s+compose|\s+run)\b/iu.test(commandText)
+  const usesDocker = hasCompose(composeText) || /\bdocker\s+run\b/iu.test(commandText)
   if (usesDocker && docker?.preferred !== true) {
     throw new Error(`Docker is not enabled by this host's effective Docker preference: ${docker?.reason ?? 'unavailable'}`)
   }
@@ -92,22 +107,47 @@ export function validateDockerAndSecrets (plan, inventory) {
   if (items.some(item => enablesShellTracing(item.command))) {
     throw new Error('commands that may handle credentials must not enable shell tracing')
   }
-  if (/\bcat\s+(?:--\s+)?['"]?\/root\/[^\s'"]*_credentials(?:\/[^\s'"]*)?/iu.test(commandText)) {
-    throw new Error('commands must not print root-only service credential files')
+  if (items.some(item => {
+    const visible = withoutPrivateCredentialWrites(item.command)
+    if (/\bcat\s+(?:--\s+)?['"]?\/root\/[^\s'"]*_credentials(?:\/[^\s'"]*)?/iu.test(visible)) return true
+    return /\bcat[ \t]+(?:(?:[A-Za-z0-9_./=+,:@%-]+|'[^'\r\n]*'|"[^"\r\n]*")[ \t]+)*(?:<[ \t]*)?['"]?\/root\/[^\s'"]*_credentials(?:\/|\b)/iu.test(visible)
+  })) {
+    throw new Error('commands must not print protected service credential files')
   }
-  if (/\b(?:password|passwd|token|secret|api[_-]?key|username|login)\s*[:=]\s*['"]?(?!['"$%<{(])[^\s'";]{6,}/iu.test(commandText) || /--(?:password|token|secret|api-key)\s+['"]?(?!['"$<{])[^\s'"]{6,}/iu.test(commandText)) {
+  const literals = commandText.matchAll(/\b(?:password|passwd|token|secret|api[_-]?key|username|login)\s*[:=]\s*['"]?(?!['"$%<{(])[^\s'";]{6,}/giu)
+  const hasPrivateLiteral = [...literals].some(match => {
+    const publicJoomlaLogin = match[0] === 'username=webminai_admin' && /(?:^|\s)--admin-$/u.test(commandText.slice(0, match.index)) && /^(?:\s|$)/u.test(commandText.slice(match.index + match[0].length))
+    return !publicJoomlaLogin
+  })
+  if (hasPrivateLiteral || /--(?:password|token|secret|api-key)\s+['"]?(?!['"$<{])[^\s'"]{6,}/iu.test(commandText)) {
     throw new Error('plans must not contain literal login or secret values; generate them only during remote execution')
   }
   const generatesSecret = /openssl\s+rand|\/dev\/(?:u?random)\b/iu.test(commandText)
   if (generatesSecret && !/\/root\/[A-Za-z0-9_.-]+_credentials(?:\/|\b)/u.test(commandText)) {
-    throw new Error('generated service credentials must be stored under /root/<service>_credentials')
+    throw new Error(macos ? 'generated macOS service credentials must use the verified runtime home under .webminai/credentials/<service>' : 'generated service credentials must be stored under /root/<service>_credentials')
   }
   if (generatesSecret && !/\bumask\s+0?77\b/u.test(commandText)) {
     throw new Error('credential generation must set umask 077')
   }
-  if (/\b(?:docker\s+compose|docker-compose)\b/iu.test(commandText) && !plan.modifiedFiles.some(file => /^\/opt\/webminai\/services\/[^/]+\/(?:compose\.ya?ml|docker-compose\.ya?ml)$/u.test(file))) {
-    throw new Error('Docker Compose service plans must list /opt/webminai/services/<service>/compose.yaml in modifiedFiles')
+  const configListed = macos
+    ? home && plan.modifiedFiles.some(file => file.startsWith(`${home}/.webminai/services/`) && /^[A-Za-z0-9][A-Za-z0-9_-]*\/(?:compose\.ya?ml|docker-compose\.ya?ml)$/u.test(file.slice(`${home}/.webminai/services/`.length)))
+    : windows
+      ? plan.modifiedFiles.some(file => /^C:[\\/]ProgramData[\\/]WebminAI[\\/]Services[\\/][A-Za-z0-9][A-Za-z0-9_-]*[\\/](?:compose\.ya?ml|docker-compose\.ya?ml)$/iu.test(file))
+      : plan.modifiedFiles.some(file => /^\/opt\/webminai\/services\/[^/]+\/(?:compose\.ya?ml|docker-compose\.ya?ml)$/u.test(file))
+  if (hasCompose(configuredComposeText) && !configListed) {
+    throw new Error(macos ? 'macOS Compose plans must list the service compose.yaml under the verified runtime home in .webminai/services' : windows ? 'Windows Compose service plans must list C:\\ProgramData\\WebminAI\\Services\\<service>\\compose.yaml in modifiedFiles' : 'Docker Compose service plans must list /opt/webminai/services/<service>/compose.yaml in modifiedFiles')
   }
+}
+
+function macosPolicyItems (items, home) {
+  const prefix = home ? new RegExp(`${home}/\\.webminai/credentials/([A-Za-z0-9_-]+)(?=/|['"\\s]|$)`, 'gu') : null
+  return items.map(item => {
+    if (/\/root\/[A-Za-z0-9_.-]+_credentials(?:\/|\b)/u.test(item.command)) throw new Error('macOS service credentials must use the verified runtime owner, not Linux root paths')
+    // Reuse credential checks on an inspection copy, never rewrite executable plans.
+    const command = prefix ? item.command.replace(prefix, '/root/$1_credentials') : item.command
+    if (command.includes('/.webminai/credentials/')) throw new Error('macOS credential paths must match the verified runtime owner and a fixed service name')
+    return { ...item, command }
+  })
 }
 
 export function validateNetdataFunctions (plan, inventory) {
@@ -139,4 +179,17 @@ export function validateNetdataFunctions (plan, inventory) {
 function enablesShellTracing (command) {
   return /\bset\s+-[A-Za-z]*x[A-Za-z]*\b/u.test(command) ||
     /\bset[^;\r\n]*\s-o\s+xtrace\b/u.test(command)
+}
+
+function withoutPrivateCredentialWrites (command) {
+  const variables = []
+  const handoff = /(^|[;\r\n])\s*(?<variable>[A-Za-z_][A-Za-z0-9_]*)=\$\(cat\s+'\/root\/(?<service>[A-Za-z0-9_.-]+)_credentials\/[A-Za-z0-9][A-Za-z0-9_.-]*'\);\s*umask\s+0?77;\s*printf\s+'(?<format>[^'\r\n]*)'\s+"\$\k<variable>"\s*>\s*'\/root\/\k<service>_credentials\/[A-Za-z0-9][A-Za-z0-9_.-]*'(?=\s*(?:[;\r\n]|$))/gu
+  const stripped = command.replace(handoff, (...match) => {
+    const groups = match.at(-1)
+    if (!/^(?:[A-Za-z0-9_][A-Za-z0-9_.:= -]*)?%s(?:\\n)?$/u.test(groups.format)) return match[0]
+    variables.push(groups.variable)
+    return match[1]
+  })
+  if (variables.some(variable => new RegExp(`\\b${variable}\\b`, 'u').test(stripped))) return command
+  return stripped
 }

@@ -7,6 +7,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { installedWebSmoke } from './installed-web-smoke.js'
 
 const projectRoot = path.resolve(import.meta.dirname, '..')
 const temporary = mkdtempSync(path.join(os.tmpdir(), 'intentaiops-package-'))
@@ -27,6 +28,8 @@ try {
   const help = run(executable, ['--help'], temporary)
   assert.match(help.stdout, /^Usage: intentaiops/mu)
   assert.match(help.stdout, /https:\/\/intentaiops\.top/u)
+  assert.match(help.stdout, /console \[--console-actions\]/u)
+  assert.match(help.stdout, /--web \[--console-actions\]/u)
 
   const modules = run(npm, ['root', '--global', '--prefix', prefix], temporary).stdout.trim()
   const packageRoot = path.join(modules, 'intent-ai-ops')
@@ -37,6 +40,8 @@ try {
   assert.equal(installedPackage.scripts?.['verify:sqlite'], 'node scripts/install-better-sqlite3.js')
   assert.equal(existsSync(path.join(packageRoot, 'dist', 'intent-ai-ops.tgz')), false)
   assert.equal(existsSync(path.join(packageRoot, 'dist', 'intent-ai-ops.tgz.sha256')), false)
+  assert.equal(existsSync(path.join(packageRoot, 'remote', 'windows-cli-recovery-baseline.ps1')), true)
+  for (const asset of ['operator-controller.js', 'operator-console.js', 'operator-console.html', 'operator-console-browser.js']) assert.equal(existsSync(path.join(packageRoot, 'src', asset)), true, asset)
   for (const artifact of [
     'webminai.plugin',
     'webminai.plugin-freebsd-amd64',
@@ -49,6 +54,11 @@ try {
   const databaseRoot = path.join(temporary, 'database')
   const smoke = `import { TaskStore } from ${JSON.stringify(storeModule)}; const store = new TaskStore(${JSON.stringify(databaseRoot)}); const task = store.create('package-smoke', 'Validate installed SQLite'); if (task.status !== 'planning') process.exit(1); store.cancel('package-smoke', task.id); if (store.get('package-smoke', task.id).status !== 'cancelled') process.exit(1)`
   run(process.execPath, ['--input-type=module', '--eval', smoke], temporary)
+  run(process.execPath, ['--input-type=module', '--eval', installedWebSmoke(packageRoot, databaseRoot)], temporary)
+  if (process.platform === 'linux') {
+    const ptySmoke = `import {createRequire} from 'node:module'; const require=createRequire(${JSON.stringify(path.join(packageRoot, 'package.json'))}); const pty=require('node-pty');const child=pty.spawn(process.execPath,['-e','process.stdout.write("PTY_SMOKE_OK")'],{name:'xterm-256color',cols:80,rows:24,env:{PATH:process.env.PATH}});let output='';const timer=setTimeout(()=>{child.kill();process.exitCode=1},5000);child.onData(data=>{output+=data});child.onExit(result=>{clearTimeout(timer);if(result.exitCode!==0||!output.includes('PTY_SMOKE_OK'))process.exitCode=1})`
+    run(process.execPath, ['--input-type=module', '--eval', ptySmoke], temporary)
+  }
   process.stdout.write(`PASS: installed dist/intent-ai-ops.tgz on ${process.platform}/${process.arch}\n`)
 } finally {
   rmSync(temporary, { recursive: true, force: true })

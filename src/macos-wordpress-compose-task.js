@@ -23,6 +23,7 @@ export function buildMacosWordpressComposeTask (taskId, execution = {}, docker =
   for (const item of [...built.plan.commands, ...built.plan.revertCommands]) {
     item.command = adaptCommand(item.command, taskId, home)
   }
+  for (const item of built.plan.commands) if (['start-compose', 'initialize-wordpress', 'verify-compose'].includes(item.id)) item.diagnostic = { kind: 'compose', target: serviceRoot }
   replaceCommand(built.plan.commands, 'capture-baseline', baselineCommand({ state, serviceRoot, credentials, home }))
   replaceCommand(built.plan.commands, 'prepare-docker', dockerReadyCommand(state, home))
   const credentialCommand = built.plan.commands.find(item => item.id === 'generate-credentials')
@@ -74,7 +75,7 @@ function adaptCommand (command, taskId, home) {
 }
 
 function withDocker (command, home) {
-  const prefix = `export HOME=${quote(home)} PATH='/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin' DOCKER_HOST=${quote(`unix://${home}/.colima/default/docker.sock`)}`
+  const prefix = `unset DOCKER_CONTEXT; export HOME=${quote(home)} PATH='/usr/local/bin:/usr/local/sbin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin' DOCKER_HOST=${quote(`unix://${home}/.colima/default/docker.sock`)}`
   return command.startsWith(`${prefix}; `) ? command : `${prefix}; ${command}`
 }
 

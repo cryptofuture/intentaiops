@@ -38,6 +38,7 @@ build() {
   # intentionally split into compiler arguments here.
   # shellcheck disable=SC2046
   "$compiler" -O2 -Wall -Wextra -Werror -Wno-deprecated-declarations -std=c17 -static \
+    -I"$project_root/artifacts/native" \
     $platform_define \
     -DWEBMINAI_PLUGIN_VERSION=\"$version\" \
     -o "$output" "$source_file" $(crypto_flags)
@@ -117,20 +118,18 @@ case "$target" in
     esac
     output="$project_root/dist/webminai.plugin-macos-$architecture"
     mkdir -p "$(dirname "$output")"
-    # macOS does not support fully static executables; link against the
-    # platform's OpenSSL installation and keep the plugin self-contained at
-    # the application level.
-    # shellcheck disable=SC2046
+    # CommonCrypto is provided by macOS; no Homebrew OpenSSL dependency is needed.
     "$compiler" -O2 -Wall -Wextra -Werror -Wno-deprecated-declarations -std=c17 \
       -DWEBMINAI_TARGET_MACOS=1 \
       -DWEBMINAI_PLUGIN_VERSION=\"$version\" \
-      -o "$output" "$source_file" $(crypto_flags)
+      -o "$output" "$source_file"
     if [ "$($output --platform)" != macos ]; then
       echo 'macOS plugin platform metadata is invalid' >&2
       exit 1
     fi
     ;;
   kubernetes)
+    node "$project_root/scripts/build-recovery-helper.js"
     if [ "$(uname -s)" != Linux ]; then
       echo 'the Kubernetes gateway plugin must be built on Linux' >&2
       exit 1

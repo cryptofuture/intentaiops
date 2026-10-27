@@ -3,6 +3,8 @@ import test from 'node:test'
 import { buildCommonTask, listCommonTasks } from '../src/common-tasks.js'
 import { rootExecutionPolicy } from '../src/execution-policy.js'
 import { validateCommandPlan } from '../src/plan-validator.js'
+import { validateWindowsPlan } from '../src/planner-platform-policy.js'
+import { windowsDockerPowerShellAdapter } from '../src/windows-compose-foundation.js'
 
 const windowsExecution = {
   platform: 'windows',
@@ -24,6 +26,28 @@ const docker = {
   ready: true,
   reason: 'Docker Compose is available on a non-container host'
 }
+
+test('Windows Docker adapter retains native status and never infers success from output', () => {
+  const command = windowsDockerPowerShellAdapter(10000)
+  assert.ok(command.indexOf('$null=$process.Handle') < command.indexOf('$process.WaitForExit'))
+  assert.match(command, /if\(\$null -eq \$exitCode\)\{throw/u)
+  assert.match(command, /\$global:LASTEXITCODE=\[int\]\$exitCode/u)
+  assert.doesNotMatch(command, /elseif\(\$stderrText/u)
+})
+
+test('Windows cold image pulls use the advertised durable timeout and shared native adapter', () => {
+  for (const id of ['wordpress-windows', 'woocommerce-windows', 'joomla-windows', 'drupal-windows', 'prestashop-windows', 'n8n-windows', 'ghost-windows', 'mattermost-windows', 'odoo-windows', 'jellyfin-windows', 'home-assistant-windows']) {
+    const { plan } = buildCommonTask(id, 901, { platform: 'windows', windowsExecution, docker })
+    const pull = plan.commands.find(command => command.id === 'pull-images')
+    assert.equal(pull.executionMode, 'job')
+    assert.equal(pull.timeoutMs, 3600000)
+    assert.match(pull.command, /WaitForExit\(3600000\)/u)
+    assert.match(pull.command, /\$null=\$process\.Handle/u)
+    const start = plan.commands.find(command => command.id === 'start-compose')
+    assert.deepEqual(start.dependsOn, ['pull-images'])
+    assert.doesNotMatch(start.command, /compose -p '[^']+' pull/u)
+  }
+})
 
 test('Windows catalog exposes reviewed software, Docker bootstrap, WordPress, and WooCommerce tasks', () => {
   assert.deepEqual(listCommonTasks({ category: 'application', platform: 'windows' }).map(task => task.id), [
@@ -65,6 +89,10 @@ test('Windows application routes prepare WSL and Docker before deploying Compose
     assert.match(built.plan.commands.find(item => item.id === 'verify-wsl-installer').command, /a611ddacee689d2fb1fb5319e58af7f3998864d86cdce632eadd8e61614a0f9d/u)
     assert.deepEqual(built.plan.commands.find(item => item.id === 'wait-wsl-download').retry, { attempts: 120, intervalMs: 5000, exitCodes: [75] })
     assert.match(built.plan.commands.find(item => item.id === 'install-wsl-runtime').command, /msiexec\.exe/u)
+    assert.equal(built.plan.commands.find(item => item.id === 'install-wsl-runtime').executionMode, 'job')
+    assert.equal(built.plan.commands.find(item => item.id === 'install-docker-desktop').executionMode, 'job')
+    assert.equal(built.plan.revertCommands.find(item => item.id === 'uninstall-task-owned-wsl').executionMode, 'job')
+    assert.equal(built.plan.revertCommands.find(item => item.id === 'uninstall-task-owned-docker').executionMode, 'job')
     assert.match(built.plan.commands.find(item => item.id === 'start-docker-download').command, /DockerDesktop\.msi/u)
     assert.match(built.plan.commands.find(item => item.id === 'verify-docker-installer').command, /b80a2e8d0b33b752b74f31c82019f62bb0335e6960722af934a7186a0e921682/u)
     assert.match(built.plan.commands.find(item => item.id === 'install-docker-desktop').command, /ENGINE=wsl/u)
@@ -76,6 +104,8 @@ test('Windows application routes prepare WSL and Docker before deploying Compose
     assert.match(built.plan.commands.find(item => item.id === 'start-docker-desktop').command, /WINDOWS_INTERACTIVE_USER_REQUIRED/u)
     assert.deepEqual(built.plan.commands.find(item => item.id === 'wait-docker-ready').retry, { attempts: 120, intervalMs: 5000, exitCodes: [75] })
     assert.match(built.plan.commands.find(item => item.id === 'wait-docker-ready').command, /Docker Compose version/u)
+    const ready = built.plan.commands.find(item => item.id === 'wait-docker-ready').command
+    assert.ok(ready.indexOf('if($progress.rebootRequired)') < ready.indexOf('Docker CLI is missing'))
     assert.match(built.plan.commands.find(item => item.id === 'schedule-required-reboot').command, /WEBMINAI_REBOOT_SCHEDULED_30_SECONDS/u)
     assert.match(built.plan.commands.find(item => item.id === 'schedule-required-reboot').command, /Register-ScheduledTask/u)
     assert.match(built.plan.commands.find(item => item.id === 'schedule-required-reboot').command, /DeleteExpiredTaskAfter/u)
@@ -92,17 +122,56 @@ test('Windows application routes prepare WSL and Docker before deploying Compose
 })
 
 test('reviewed Windows Brave and Docker bootstrap plans are reversible', () => {
+  const bootstrap = buildCommonTask('docker-desktop-windows', 36, { platform: 'windows', windowsExecution, docker })
+  assert.match(bootstrap.plan.commands.find(item => item.id === 'preflight').command, /Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop\|Measure-Object Capacity -Sum/u)
+  assert.match(bootstrap.plan.commands.find(item => item.id === 'preflight').command, /if\(\$installed -lt 8GB\)/u)
+  for (const id of ['wait-wsl-download', 'wait-docker-download']) {
+    const command = bootstrap.plan.commands.find(item => item.id === id).command
+    assert.ok(command.indexOf('if($progress.rebootRequired)') >= 0)
+    assert.ok(command.indexOf('if($progress.rebootRequired)') < command.indexOf('Get-BitsTransfer'))
+  }
   for (const catalogId of ['brave-windows', 'docker-desktop-windows']) {
     const built = buildCommonTask(catalogId, 36, { platform: 'windows', windowsExecution, docker })
     assert.equal(validateCommandPlan(built.plan, rootExecutionPolicy({})), built.plan)
     assert.ok(built.plan.revertCommands.length > 0)
   }
   const dockerBootstrap = buildCommonTask('docker-desktop-windows', 38, { platform: 'windows', windowsExecution, docker })
+  assert.match(dockerBootstrap.plan.commands.find(item => item.id === 'preflight').command, /dockerPathPresent=\[bool\]\$pathPresent/u)
+  const uninstall = dockerBootstrap.plan.revertCommands[0].command
+  assert.ok(uninstall.indexOf('Docker PATH ownership baseline is unavailable') < uninstall.indexOf('Start-Process'))
+  assert.match(uninstall, /if\(-not \$baseline\.dockerPathPresent\)/u)
+  assert.match(uninstall, /Duplicate Docker PATH entries require operator review/u)
   assert.ok(dockerBootstrap.plan.revertCommands.some(item => item.id === 'uninstall-task-owned-wsl'))
   const brave = buildCommonTask('brave-windows', 37, { platform: 'windows', windowsExecution, docker })
+  assert.doesNotThrow(() => validateWindowsPlan(brave.plan, { webminaiExecution: windowsExecution }, 'install Brave'))
+  assert.match(brave.plan.revertCommands[0].command, /\$process\.ExitCode -notin @\(0,19\)/u)
+  assert.match(brave.plan.revertCommands[0].command, /Brave remains installed after uninstall/u)
   assert.match(brave.plan.commands[0].command, /releases\/latest/u)
   assert.match(brave.plan.commands[0].command, /BraveBrowserStandaloneSetup\.exe\.sha256/u)
-  assert.match(brave.plan.commands[0].command, /Get-AuthenticodeSignature/u)
+  const installBrave = brave.plan.commands.find(item => item.id === 'install-brave')
+  assert.match(installBrave.command, /Get-AuthenticodeSignature/u)
+  assert.match(brave.plan.commands[0].command, /if\(Test-Path -LiteralPath \$curl -PathType Leaf\)/u)
+  assert.match(brave.plan.commands[0].command, /Start-BitsTransfer.*-Asynchronous/u)
+  assert.match(brave.plan.commands[0].command, /else\{Invoke-WebRequest[^}]+-TimeoutSec 30 -ErrorAction Stop\}/u)
+  const waitBrave = brave.plan.commands.find(item => item.id === 'wait-brave-download')
+  assert.deepEqual(waitBrave.retry.exitCodes, [75])
+  assert.match(waitBrave.command, /Complete-BitsTransfer/u)
+  assert.doesNotMatch(waitBrave.command, /Start-BitsTransfer/u)
+  assert.deepEqual(installBrave.dependsOn, ['wait-brave-download'])
+  assert.doesNotMatch(brave.plan.commands[0].command, /--insecure/u)
+  assert.equal(brave.plan.commands[0].executionMode, 'job')
+  assert.equal(brave.plan.revertCommands[0].executionMode, 'job')
+  assert.match(brave.plan.revertCommands[0].command, /Get-AuthenticodeSignature -LiteralPath \$file/u)
+  assert.match(brave.plan.revertCommands[0].command, /--force-uninstall/u)
+  assert.match(brave.plan.revertCommands[0].command, /must preserve user profiles/u)
+  const verify = brave.plan.commands.find(item => item.id === 'verify-brave')
+  assert.deepEqual(verify.dependsOn, ['install-brave'])
+  assert.equal(verify.risk, 'read')
+  assert.match(verify.command, /Get-AuthenticodeSignature -LiteralPath \$file/u)
+  assert.match(verify.command, /FileVersionInfo/u)
+  assert.match(verify.command, /ProgramFiles\(x86\)/u)
+  assert.match(brave.stateProbe, /entries=\$entries;taskState=Test-Path/u)
+  assert.doesNotMatch(brave.stateProbe, /throw 'Brave is absent/u)
 })
 
 test('Windows WordPress task requires Linux-container Docker and protects credentials', () => {
@@ -177,8 +246,8 @@ test('Windows Moodle task uses protected inputs and durable jobs for long phases
   const built = buildCommonTask('moodle-windows', 52, { platform: 'windows', windowsExecution, docker })
   assert.equal(validateCommandPlan(built.plan, rootExecutionPolicy({})), built.plan)
   const commands = built.plan.commands.map(item => item.command).join('\n')
-  assert.match(commands, /webminai\/moodle:5\.2\.1-php8\.4-fpm-r2/u)
-  assert.match(commands, /php:8\.4\.23-fpm-bookworm/u)
+  assert.match(commands, /webminai\/moodle:5\.2\.1-php8\.4-fpm-r3/u)
+  assert.match(commands, /php:8\.4\.27-fpm-bookworm@sha256:[a-f0-9]{64}/u)
   assert.match(commands, /fastcgi_pass unix:\/run\/php-fpm\/webminai\.sock/u)
   assert.match(commands, /WEBMINAI_DB_PASS_FILE=\/run\/webminai\/db_password/u)
   assert.match(commands, /WEBMINAI_MOODLE_OK/u)
@@ -196,6 +265,11 @@ test('Windows Magento task uses the promoted digest matrix and durable lifecycle
   assert.match(commands, /valkey\/valkey@sha256:/u)
   assert.match(commands, /fastcgi_backend \{ server unix:\/run\/php-fpm\/webminai\.sock/u)
   assert.match(commands, /WEBMINAI_DB_PASSWORD_FILE=\/run\/webminai\/db_password/u)
+  const verify = built.plan.commands.find(item => item.id === 'verify-restart').command
+  assert.match(verify, /foreach\(\$service in @\('db','opensearch','valkey'\)\)/u)
+  assert.match(verify, /\$attempt-lt 120/u)
+  assert.ok(verify.indexOf('Magento dependency health did not recover.') < verify.indexOf('OpenSearch health failed.'))
+  assert.match(verify, /\$LASTEXITCODE-ne 0-or\$pong-ne'PONG'/u)
   for (const id of ['pull-images', 'prepare-code', 'start-dependencies', 'initialize-magento', 'compile-magento', 'finalize-magento', 'verify-restart']) {
     assert.equal(built.plan.commands.find(item => item.id === id).executionMode, 'job')
   }
@@ -210,6 +284,13 @@ test('Windows n8n task protects its encryption key and persists SQLite', () => {
   assert.match(commands, /encryption_key/u)
   assert.match(commands, /database\.sqlite/u)
   assert.match(commands, /WEBMINAI_N8N_OK/u)
+  assert.match(commands, /proxy_pass http:\/\/n8n:5678/u)
+  assert.match(built.verifyApplied, /\$probe-lt 60/u)
+  assert.match(built.verifyApplied, /n8n application UI and proxied health did not become ready/u)
+  assert.match(commands, /location = \/webminai-health/u)
+  assert.match(commands, /proxy_set_header Upgrade \$http_upgrade/u)
+  assert.match(commands, /N8N_PROXY_HOPS: "1"/u)
+  assert.match(built.verifyApplied, /\/healthz/u)
   assert.doesNotMatch(commands, /N8N_ENCRYPTION_KEY=[a-f0-9]{64}/u)
 })
 
@@ -232,6 +313,12 @@ test('Windows Mattermost task reuses ismet images and does not embed database cr
   assert.match(commands, /postgres@sha256:/u)
   assert.match(commands, /WEBMINAI_MATTERMOST_OK/u)
   assert.match(commands, /credentials\\mattermost\\credentials\.env/u)
+  assert.match(commands, /map \$http_upgrade \$connection_upgrade/u)
+  assert.match(commands, /proxy_set_header Connection \$connection_upgrade/u)
+  assert.doesNotMatch(commands, /location \/api\//u)
+  assert.match(built.verifyApplied, /ws:\/\/127\.0\.0\.1:18111\/api\/v4\/websocket/u)
+  assert.match(built.verifyApplied, /CancellationTokenSource\]::new\(10000\)/u)
+  assert.match(built.verifyApplied, /finally\{\$socket\.Abort\(\);\$socket\.Dispose\(\);\$deadline\.Dispose\(\)\}/u)
   assert.doesNotMatch(commands, /POSTGRES_PASSWORD=[A-Za-z0-9_-]{32}/u)
 })
 
@@ -274,4 +361,18 @@ test('Windows application tasks reject Windows-container mode and disabled Docke
     () => buildCommonTask('wordpress-windows', 44, { platform: 'windows', windowsExecution, docker: { ...docker, preference: 'disabled', preferred: false } }),
     /disabled/u
   )
+})
+
+test('Windows application proxies publish the real UI separately from compatibility markers', () => {
+  for (const app of ['n8n', 'mattermost', 'odoo', 'jellyfin', 'home-assistant']) {
+    const built = buildCommonTask(`${app}-windows`, 901, { platform: 'windows', windowsExecution, docker })
+    const configure = built.plan.commands.find(command => command.id === 'write-compose').command
+    assert.match(configure, /location = \/webminai-health/u)
+    assert.match(configure, /location \/ \{ proxy_pass http:\/\//u)
+    assert.match(configure, /proxy_set_header Host \$http_host/u)
+    assert.doesNotMatch(configure, /location = \/ \{[^}]*return 200/u)
+    assert.match(built.verifyApplied, /application UI|Application UI/u)
+    assert.match(built.verifyApplied, /doctype/u)
+    assert.match(built.verifyApplied, /\/webminai-health/u)
+  }
 })

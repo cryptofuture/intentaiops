@@ -17,7 +17,6 @@
   "license": "Apache-2.0",
   "files": [
     "LICENSE",
-    "NOTICE",
     "bin",
     "dist/SHA256SUMS",
     "dist/webminai.plugin",
@@ -27,12 +26,23 @@
     "schemas",
     "scripts/install-better-sqlite3.js",
     "src",
+    "web/themes",
+    "docs/web-workspace.md",
+    "docs/execution-milestones.md",
+    "docs/execution-diagnostics.md",
+    "docs/remote-common-task-recovery.md",
+    "docs/ssh-connection-reuse.md",
+    "docs/magento-opensearch-images.md",
+    "docs/ghost-mysql-images.md",
+    "docs/software-security.md",
     "README.md"
   ],
   "engines": {
     "node": ">=24.7.0"
   },
   "scripts": {
+    "build:web": "vite build --config web/vite.config.js",
+    "test:web": "playwright test --config web/playwright.config.js",
     "build:plugin": "sh scripts/build-native-plugin.sh linux",
     "build:plugin:freebsd": "sh scripts/build-native-plugin.sh freebsd",
     "build:plugin:macos": "sh scripts/build-native-plugin.sh macos",
@@ -41,6 +51,10 @@
     "build:checksums": "sh scripts/dist-checksums.sh write",
     "build:package": "node scripts/build-package-tarball.js",
     "benchmark:vault-kdf": "node scripts/benchmark-vault-kdf.js",
+    "benchmark:ssh": "node scripts/benchmark-ssh.js",
+    "audit:software": "node scripts/audit-common-software-security.js",
+    "test:ssh": "node --test test/system-ssh.test.js test/host-session-factory.test.js test/ssh-session-manager.test.js test/ssh-integration.test.js",
+    "test:linux-reliability": "node --test test/linux-reliability.integration.test.js",
     "check:checksums": "sh scripts/dist-checksums.sh verify",
     "check:plugin:freebsd": "sh scripts/build-native-plugin.sh freebsd-compat",
     "cli": "node bin/intentaiops.js",
@@ -65,15 +79,27 @@
     "verify:sqlite": "node scripts/install-better-sqlite3.js"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@preact/preset-vite": "^2.10.6",
     "@types/node": "^24.13.3",
     "standard": "^17.1.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4"
   },
   "dependencies": {
     "better-sqlite3": "13.0.3",
-    "js-yaml": "^4.3.1"
+    "ghostty-web": "^0.4.0",
+    "js-yaml": "^4.3.1",
+    "lucide-preact": "^1.59.0",
+    "preact": "^11.0.1"
+  },
+  "standard": {
+    "ignore": [
+      "src/operator-web/**"
+    ]
   },
   "optionalDependencies": {
-    "@node-rs/argon2": "^2.1.0"
+    "@node-rs/argon2": "^2.1.0",
+    "node-pty": "^1.1.0"
   }
 }

@@ -1,12 +1,13 @@
+import { mariadbComposeBootstrap } from './mariadb-compose-bootstrap.js'
 import { deploymentBlueprint, validateApplicationDeltaPlan } from './application-delta.js'
-import { buildLinuxPhpApplicationFoundation, linuxPhpApplicationProfile } from './linux-php-foundation.js'
+import { buildLinuxPhpApplicationFoundation, httpMarkerCheck, linuxPhpApplicationProfile } from './linux-php-foundation.js'
 
 const VERSION = '5.2.1'
 const SOURCE_COMMIT = '63e16b757ca8fee05b672a27c23ee27cc8f9fabb'
 const ARCHIVE_URL = `https://codeload.github.com/moodle/moodle/tar.gz/${SOURCE_COMMIT}`
 const ARCHIVE_SHA256 = 'cbbd7176c9e88a33e577666347566b557cb97ef8c48d0e40da7a980c43fd16ab'
-const PHP_IMAGE = 'php:8.4.23-fpm-bookworm'
-const MOODLE_IMAGE = 'webminai/moodle:5.2.1-php8.4-fpm-r2'
+const PHP_IMAGE = 'php:8.4.27-fpm-bookworm@sha256:df5a5113e1179ddf4560cd15727eb3812f6457829756d2a96c6c11bb4c250089'
+const MOODLE_IMAGE = 'webminai/moodle:5.2.1-php8.4-fpm-r3'
 const NGINX_IMAGE = 'nginx:1.30.4-alpine'
 const DATABASE_IMAGE = 'mariadb:11.8.8'
 const PORT = 18106
@@ -22,8 +23,8 @@ const PROJECT = 'webminai-moodle-18106'
 const SWAP_FILE = `/var/lib/webminai/${SITE}.swap`
 const EPEL_RELEASE_URL = 'https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm'
 const EPEL_RELEASE_SHA256 = 'b434245bffd8b40ea486157e72363d08b36e38145c8f917c5c00adfca3f2101b'
-const REMI_EL9_RELEASE_URL = 'https://rpms.remirepo.net/enterprise/remi-release-9.rpm'
-const REMI_EL9_RELEASE_SHA256 = '3bb04ace9b538920d785d25202c48e96ad2148d98c58eb76324901c9b36034b9'
+const REMI_EL9_RELEASE_URL = 'https://rpms.remirepo.net/enterprise/9/remi/x86_64/remi-release-9.8-1.el9.remi.noarch.rpm'
+const REMI_EL9_RELEASE_SHA256 = '21100d93098f5821ff21d7ed511c99d874ba895438c2b78d8c73937133158d73'
 const REMI_FEDORA44_RELEASE_URL = 'https://rpms.remirepo.net/fedora/remi-release-44.rpm'
 const REMI_FEDORA44_RELEASE_SHA256 = '33ec50be86b32e78fdb0b948a2c39b657c51c1391d3203972426c055c8e4860f'
 
@@ -73,26 +74,33 @@ export function moodleComposeAssets () {
 function configureNativePlan (built, taskId, linuxContext) {
   const profile = taskProfile(linuxPhpApplicationProfile(linuxContext, applicationContract()))
   const state = `/var/lib/webminai/task-state/${taskId}-moodle-linux`
+  const cronPaths = profile.phpFpmService.endsWith('.service')
+    ? [`/etc/systemd/system/${SITE}-cron.service`, cronPath(profile)]
+    : [cronPath(profile)]
+  const baseline = built.plan.commands.find(item => item.id === 'capture-baseline')
+  baseline.command = baseline.command.replace('for path in ', `for path in ${[DATA_ROOT, ...cronPaths].map(quote).join(' ')} `)
   if (linuxContext.management.family === 'rhel') {
-    const baseline = built.plan.commands.find(item => item.id === 'capture-baseline')
-    baseline.command = rhelDatabaseBaselineCommand(baseline.command, state)
+    if (requiresEl9Streams(linuxContext)) baseline.command = rhelDatabaseBaselineCommand(baseline.command, state)
     const packages = built.plan.commands.find(item => item.id === 'install-packages')
     packages.command = rhelSclRepositoryCommand(packages.command, linuxContext, state)
     extendRhelKeyOwnership(built.plan, state)
-    extendRhelDatabaseRestore(built.plan, state)
+    if (requiresEl9Streams(linuxContext)) extendRhelDatabaseRestore(built.plan, state)
   }
   replaceCommand(built.plan, 'configure-php-fpm', nativeFpmCommand(built.plan.commands.find(item => item.id === 'configure-php-fpm').command), 'Configure Moodle PHP limits on the task-owned Unix socket pool')
   replaceCommand(built.plan, 'configure-nginx', nativeNginxCommand(built.plan.commands.find(item => item.id === 'configure-nginx').command), 'Serve only Moodle public/ through nginx and the task-owned PHP-FPM Unix socket')
   replaceCommand(built.plan, 'verify-artifacts', artifactCommand(), 'Acquire and verify the exact Moodle source commit archive')
+  const acquisition = built.plan.commands.find(item => item.id === 'verify-artifacts')
+  acquisition.executionMode = 'job'
+  acquisition.timeoutMs = 60 * 60 * 1000
   renameCommand(built.plan, 'extract-application', 'extract-moodle', extractCommand(profile), 'Extract the verified Moodle release and create off-web-root data storage')
   renameCommand(built.plan, 'install-application', 'install-moodle', installCommand(profile, state), 'Install Moodle through its official CLI using protected credential-file indirection')
   renameCommand(built.plan, 'verify-application', 'verify-moodle')
   insertNativeCron(built.plan, profile, state, taskId)
   replaceCommand(built.plan, 'verify-moodle', nativeVerifyCommand(profile), 'Verify Moodle, database state, writable data, cron, socket, login, and the external marker')
   extendNativeRevert(built.plan, profile, state, taskId)
-  built.plan.modifiedFiles.push(`${ARTIFACTS}/moodle.tar.gz`, `${WEB_ROOT}/.webminai-installer-argv.php`, `${WEB_ROOT}/config.php`, cronPath(profile))
-  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/config.php`)} && test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)} && test -S ${quote(profile.phpFpmListener)} && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/ | grep -Fq ${MARKER}`
-  built.verifyReverted = `test ! -e ${quote(WEB_ROOT)} && test ! -e ${quote(DATA_ROOT)} && test ! -e ${quote(ARTIFACTS)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && test ! -e ${quote(cronPath(profile))}`
+  built.plan.modifiedFiles.push(`${ARTIFACTS}/moodle.tar.gz`, `${WEB_ROOT}/.webminai-installer-argv.php`, `${WEB_ROOT}/config.php`, ...cronPaths)
+  built.verifyApplied = `test -f ${quote(`${WEB_ROOT}/.webminai-installed`)} && test -f ${quote(`${WEB_ROOT}/config.php`)} && test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)} && test -S ${quote(profile.phpFpmListener)} && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/`, MARKER)}`
+  built.verifyReverted = [WEB_ROOT, DATA_ROOT, ARTIFACTS, CREDENTIALS, state, ...cronPaths].map(path => `test ! -e ${quote(path)} && test ! -L ${quote(path)}`).join(' && ')
 }
 
 function configureComposePlan (built, taskId, linuxContext) {
@@ -102,7 +110,7 @@ function configureComposePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'pull-images', buildImagesCommand(state, taskId), 'Build the digest-verified Moodle PHP-FPM image with task-scoped BuildKit state and pull pinned nginx and MariaDB images')
   const pullImages = built.plan.commands.find(item => item.id === 'pull-images')
   pullImages.executionMode = 'job'
-  pullImages.timeoutMs = 45 * 60 * 1000
+  pullImages.timeoutMs = 60 * 60 * 1000
   delete pullImages.retry
   extendComposeBuilderCleanup(built.plan, builder)
   insertComposeSwap(built.plan, state)
@@ -114,7 +122,7 @@ function configureComposePlan (built, taskId, linuxContext) {
   replaceCommand(built.plan, 'verify-compose', composeVerifyCommand(linuxContext), 'Verify Compose health, data isolation, cron, socket, login, and the Moodle marker')
   built.plan.modifiedFiles.push(`${SERVICE_ROOT}/compose.yaml`, `${SERVICE_ROOT}/Dockerfile`, `${SERVICE_ROOT}/docker-entrypoint.sh`, `${SERVICE_ROOT}/php-fpm.conf`, `${SERVICE_ROOT}/php.ini`, `${SERVICE_ROOT}/nginx.conf`, `${SERVICE_ROOT}/installer-argv.php`, SWAP_FILE)
   built.plan.modifiedFiles.push('/var/www/html/public/webminai-health.txt')
-  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq moodle && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq cron && docker compose -p ${quote(PROJECT)} exec -T moodle test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok && curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/webminai-health.txt | grep -Fq ${MARKER}`
+  built.verifyApplied = `cd ${quote(SERVICE_ROOT)} && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq moodle && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq nginx && docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq cron && docker compose -p ${quote(PROJECT)} exec -T moodle test -S /run/php-fpm/webminai.sock && docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/.webminai-installed && docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok && ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 http://127.0.0.1:${PORT}/webminai-health.txt`, MARKER)}`
   built.verifyReverted = `test ! -e ${quote(SERVICE_ROOT)} && test ! -e ${quote(CREDENTIALS)} && test ! -e ${quote(state)} && test ! -e ${quote(SWAP_FILE)} && { ! command -v docker >/dev/null 2>&1 || { ! docker ps -aq --filter label=com.docker.compose.project=${quote(PROJECT)} | grep -q . && ! docker buildx inspect ${quote(builder)} >/dev/null 2>&1; }; }`
 }
 
@@ -195,9 +203,13 @@ function rhelSclRepositoryCommand (foundation, linuxContext, state) {
   const remiRpm = `${ARTIFACTS}/remi-release.rpm`
   const epelRpm = `${ARTIFACTS}/epel-release.rpm`
   const setup = [
-    `mariadb_stream=$(sed -n 1p ${quote(`${state}/mariadb-stream.before`)})`,
-    '[ -z "$mariadb_stream" ] || [ "$mariadb_stream" = 10.11 ] || [ "$mariadb_stream" = 11.8 ] || { printf \'%s\\n\' "unsupported pre-existing MariaDB module stream: $mariadb_stream" >&2; exit 1; }',
-    `[ -n "$mariadb_stream" ] || { dnf -y module enable mariadb:10.11; : > ${quote(`${state}/mariadb-stream.changed`)}; }`,
+    ...(fedora
+      ? []
+      : [
+      `mariadb_stream=$(sed -n 1p ${quote(`${state}/mariadb-stream.before`)})`,
+      '[ -z "$mariadb_stream" ] || [ "$mariadb_stream" = 10.11 ] || [ "$mariadb_stream" = 11.8 ] || { printf \'%s\\n\' "unsupported pre-existing MariaDB module stream: $mariadb_stream" >&2; exit 1; }',
+      `[ -n "$mariadb_stream" ] || { dnf -y module enable mariadb:10.11; : > ${quote(`${state}/mariadb-stream.changed`)}; }`
+        ]),
     `install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}`,
     fedora ? ':' : verifiedRepositoryRpm(EPEL_RELEASE_URL, EPEL_RELEASE_SHA256, epelRpm),
     verifiedRepositoryRpm(remiUrl, remiSha256, remiRpm),
@@ -268,10 +280,14 @@ function artifactCommand () {
     'set -eu',
     `install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}`,
     `if [ -s ${quote(archive)} ] && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(archive)} | sha256sum -c - >/dev/null 2>&1; then printf '%s\n' artifact-already-verified; exit 0; fi`,
-    `curl --fail --location --silent --show-error --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)}`,
-    `printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(`${archive}.tmp`)} | sha256sum -c - >/dev/null`,
+    'deadline=$(($(date +%s) + 3300))',
+    'http1=',
+    'for attempt in 1 2 3; do remaining=$((deadline - $(date +%s))); [ "$remaining" -gt 0 ] || break; [ "$remaining" -le 3300 ] || remaining=3300',
+    `if curl $http1 --fail --location --silent --show-error --connect-timeout 15 --max-time "$remaining" --output ${quote(`${archive}.tmp`)} ${quote(ARCHIVE_URL)} && printf '%s  %s\n' ${quote(ARCHIVE_SHA256)} ${quote(`${archive}.tmp`)} | sha256sum -c - >/dev/null; then :`,
     `mv -f -- ${quote(`${archive}.tmp`)} ${quote(archive)}`,
-    "printf '%s\n' artifact-verified"
+    "printf '%s\n' artifact-verified; exit 0",
+    'fi; http1=--http1.1; done',
+    "printf '%s\n' ARTIFACT_DOWNLOAD_FAILED >&2; exit 1"
   ].join('; ')
 }
 
@@ -413,12 +429,12 @@ function nativeCronCommand (profile, state) {
     const owned = `${state}/cron-owned`
     const serviceLines = ['[Unit]', 'Description=Intent AI Ops Moodle cron', '[Service]', 'Type=oneshot', `User=${profile.phpFpmUser}`, `Group=${profile.phpFpmGroup}`, `ExecStart=/bin/sh -c ${quote(execution)}`]
     const timerLines = ['[Unit]', 'Description=Run Intent AI Ops Moodle cron every minute', '[Timer]', 'OnBootSec=1min', 'OnUnitActiveSec=1min', `Unit=${SITE}-cron.service`, '[Install]', 'WantedBy=timers.target']
-    return `set -eu; if [ ! -e ${quote(owned)} ]; then test ! -e ${quote(service)}; test ! -e ${quote(timer)}; : > ${quote(owned)}; fi; ${writeCandidate(service, serviceLines, '0644')}; ${writeCandidate(timer, timerLines, '0644')}; systemctl daemon-reload; systemctl enable --now ${quote(`${SITE}-cron.timer`)} >/dev/null; systemctl start ${quote(`${SITE}-cron.service`)}; test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)}; printf '%s\n' cron-ready`
+    return `set -eu; if [ ! -e ${quote(owned)} ]; then test ! -e ${quote(service)}; test ! -L ${quote(service)}; test ! -e ${quote(timer)}; test ! -L ${quote(timer)}; : > ${quote(owned)}; fi; ${writeCandidate(service, serviceLines, '0644')}; ${writeCandidate(timer, timerLines, '0644')}; systemctl daemon-reload; systemctl enable --now ${quote(`${SITE}-cron.timer`)} >/dev/null; systemctl start ${quote(`${SITE}-cron.service`)}; test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)}; printf '%s\n' cron-ready`
   }
   const periodic = cronPath(profile)
   const owned = `${state}/cron-owned`
   const lines = ['#!/bin/sh', `su -s /bin/sh -c ${quote(execution)} ${quote(profile.phpFpmUser)}`]
-  return `set -eu; if [ ! -e ${quote(owned)} ]; then if rc-service crond status >/dev/null 2>&1; then : > ${quote(`${state}/crond-active.before`)}; fi; if rc-update show default 2>/dev/null | grep -Eq '^[[:space:]]*crond([[:space:]]|$)'; then : > ${quote(`${state}/crond-enabled.before`)}; fi; test ! -e ${quote(periodic)}; : > ${quote(owned)}; fi; printf '%s\n' ${lines.map(quote).join(' ')} > ${quote(periodic)}; chmod 0755 ${quote(periodic)}; rc-update add crond default >/dev/null; rc-service crond start >/dev/null 2>&1 || true; ${quote(periodic)}; test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)}; printf '%s\n' cron-ready`
+  return `set -eu; if [ ! -e ${quote(owned)} ]; then if rc-service crond status >/dev/null 2>&1; then : > ${quote(`${state}/crond-active.before`)}; fi; if rc-update show default 2>/dev/null | grep -Eq '^[[:space:]]*crond([[:space:]]|$)'; then : > ${quote(`${state}/crond-enabled.before`)}; fi; test ! -e ${quote(periodic)}; test ! -L ${quote(periodic)}; : > ${quote(owned)}; fi; printf '%s\n' ${lines.map(quote).join(' ')} > ${quote(periodic)}; chmod 0755 ${quote(periodic)}; rc-update add crond default >/dev/null; rc-service crond start >/dev/null 2>&1 || true; ${quote(periodic)}; test -f ${quote(`${DATA_ROOT}/.webminai-cron-ok`)}; printf '%s\n' cron-ready`
 }
 
 function nativeVerifyCommand (profile) {
@@ -433,8 +449,8 @@ function nativeVerifyCommand (profile) {
     `if command -v setpriv >/dev/null 2>&1 && setpriv --help 2>&1 | grep -q -- --reuid; then setpriv --reuid=${quote(profile.phpFpmUser)} --regid=${quote(profile.phpFpmGroup)} --init-groups /bin/sh -c ${quote(`test -w ${DATA_ROOT}`)}; else su -s /bin/sh -c ${quote(`test -w ${DATA_ROOT}`)} ${quote(profile.phpFpmUser)}; fi`,
     `address=$(${profile.primaryAddressCommand})`,
     '[ -n "$address" ] || { printf \'%s\\n\' HOST_ADDRESS_UNAVAILABLE >&2; exit 1; }',
-    `curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 "http://$address:${PORT}/" | grep -Fq ${MARKER} || { printf '%s\n' APP_HTTP_MARKER_NOT_READY >&2; exit 1; }`,
-    `curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/login/index.php" | grep -Fq login`,
+    `${httpMarkerCheck(`curl --fail --location --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 10 "http://$address:${PORT}/"`, MARKER)} || { printf '%s\n' APP_HTTP_MARKER_NOT_READY >&2; exit 1; }`,
+    `${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 10 "http://$address:${PORT}/login/index.php"`, 'login')}`,
     "printf '%s\n' verification-passed"
   ].join('; ')
 }
@@ -453,13 +469,18 @@ function extendNativeRevert (plan, profile, state, taskId) {
   const files = plan.revertCommands.find(command => command.id === 'remove-application-files')
   if (!files) throw new Error('Moodle foundation is missing remove-application-files')
   files.command = files.command.replace(`rm -rf -- ${quote(WEB_ROOT)}`, `rm -rf -- ${quote(WEB_ROOT)} ${quote(DATA_ROOT)}`)
+  files.command = files.command.replace('for path in ', `for path in ${quote(DATA_ROOT)} `)
 }
 
 function nativeCronRevertCommand (profile, state, taskId) {
+  const paths = (profile.phpFpmService.endsWith('.service') ? [`/etc/systemd/system/${SITE}-cron.service`, cronPath(profile)] : [cronPath(profile)]).map(quote).join(' ')
+  const absent = `for path in ${paths}; do [ ! -e "$path" ] && [ ! -L "$path" ] || { printf '%s\n' 'MOODLE_CRON_OWNERSHIP_UNCONFIRMED: preserve units and request operator review' >&2; exit 1; }; done`
+  const ownership = `set -eu; if [ ! -d ${quote(state)} ]; then ${absent}; exit 0; fi; owned=; if [ -e ${quote(`${state}/cron-owned`)} ] || [ -L ${quote(`${state}/cron-owned`)} ]; then test -f ${quote(`${state}/cron-owned`)}; test ! -L ${quote(`${state}/cron-owned`)}; owned=yes; else ${absent}; fi`
   if (profile.phpFpmService.endsWith('.service')) {
-    return `set +e; systemctl stop ${quote(`webminai-moodle-install-${taskId}.service`)} >/dev/null 2>&1; systemctl reset-failed ${quote(`webminai-moodle-install-${taskId}.service`)} >/dev/null 2>&1; systemctl disable --now ${quote(`${SITE}-cron.timer`)} >/dev/null 2>&1; rm -f -- ${quote(`/etc/systemd/system/${SITE}-cron.service`)} ${quote(`/etc/systemd/system/${SITE}-cron.timer`)}; systemctl daemon-reload; exit 0`
+    const unit = quote(`webminai-moodle-install-${taskId}.service`)
+    return `${ownership}; load=$(systemctl show ${unit} --property=LoadState --value); if [ -n "$load" ] && [ "$load" != not-found ]; then systemctl stop ${unit}; fi; if [ "$owned" = yes ]; then systemctl disable --now ${quote(`${SITE}-cron.timer`)}; systemctl stop ${quote(`${SITE}-cron.service`)}; rm -f -- ${paths}; systemctl daemon-reload; fi`
   }
-  return `set +e; if [ -s ${quote(`${state}/install-moodle-database.pid`)} ]; then kill "$(sed -n 1p ${quote(`${state}/install-moodle-database.pid`)})" >/dev/null 2>&1; fi; rm -f -- ${quote(cronPath(profile))}; if [ -d ${quote(state)} ]; then if [ ! -e ${quote(`${state}/crond-active.before`)} ]; then rc-service crond stop >/dev/null 2>&1; fi; if [ ! -e ${quote(`${state}/crond-enabled.before`)} ]; then rc-update del crond default >/dev/null 2>&1; fi; fi; exit 0`
+  return `${ownership}; if [ -s ${quote(`${state}/install-moodle-database.pid`)} ]; then pid=$(sed -n 1p ${quote(`${state}/install-moodle-database.pid`)}); case "$pid" in ''|*[!0-9]*|0|1) printf '%s\n' MOODLE_INSTALLER_PID_UNCONFIRMED >&2; exit 1;; esac; if [ -d "/proc/$pid" ] || kill -0 "$pid" 2>/dev/null; then printf '%s\n' 'MOODLE_INSTALLER_PID_UNCONFIRMED: inspect the live process before cleanup; no signal was sent' >&2; exit 1; fi; fi; if [ "$owned" = yes ]; then rm -f -- ${paths}; if [ ! -e ${quote(`${state}/crond-active.before`)} ] && rc-service crond status >/dev/null 2>&1; then rc-service crond stop; fi; if [ ! -e ${quote(`${state}/crond-enabled.before`)} ]; then rc-update del crond default; fi; fi`
 }
 
 function cronPath (profile) {
@@ -472,12 +493,12 @@ function composeCommand (returnAssets = false) {
     '  db:',
     `    image: ${DATABASE_IMAGE}`,
     '    restart: unless-stopped',
+    ...mariadbComposeBootstrap(['--character-set-server=utf8mb4', '--collation-server=utf8mb4_unicode_ci']),
     '    environment:',
     `      MARIADB_DATABASE: ${DATABASE}`,
     `      MARIADB_USER: ${DATABASE}`,
     '      MARIADB_PASSWORD_FILE: /run/secrets/db_password',
     '      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password',
-    '    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]',
     '    secrets: [db_password, db_root_password]',
     '    volumes: [db_data:/var/lib/mysql]',
     '    healthcheck:',
@@ -544,7 +565,7 @@ function composeCommand (returnAssets = false) {
       dockerfile: [...dockerfile],
       entrypoint: [...entrypoint],
       fpm: fpmSocketConfig(),
-      phpIni: ['max_input_vars=5000', 'memory_limit=256M', 'upload_max_filesize=64M', 'post_max_size=64M'],
+      phpIni: ['max_input_vars=5000', 'memory_limit=256M', 'upload_max_filesize=64M', 'post_max_size=64M', 'session.upload_progress.enabled=0'],
       nginx: nginxConfig(),
       installer: installerBootstrapLines()
     }
@@ -556,7 +577,7 @@ function composeCommand (returnAssets = false) {
     writeCandidate(`${SERVICE_ROOT}/Dockerfile`, dockerfile, '0444'),
     writeCandidate(`${SERVICE_ROOT}/docker-entrypoint.sh`, entrypoint, '0555'),
     writeCandidate(`${SERVICE_ROOT}/php-fpm.conf`, fpmSocketConfig(), '0444'),
-    writeCandidate(`${SERVICE_ROOT}/php.ini`, ['max_input_vars=5000', 'memory_limit=256M', 'upload_max_filesize=64M', 'post_max_size=64M'], '0444'),
+    writeCandidate(`${SERVICE_ROOT}/php.ini`, ['max_input_vars=5000', 'memory_limit=256M', 'upload_max_filesize=64M', 'post_max_size=64M', 'session.upload_progress.enabled=0'], '0444'),
     writeCandidate(`${SERVICE_ROOT}/nginx.conf`, nginxConfig(), '0444'),
     writeCandidate(`${SERVICE_ROOT}/installer-argv.php`, installerBootstrapLines(), '0444'),
     `grep -Fq 'fastcgi_pass unix:/run/php-fpm/webminai.sock' ${quote(`${SERVICE_ROOT}/nginx.conf`)}`,
@@ -638,7 +659,7 @@ function composeInitializeCommand (linuxContext) {
     `docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/config.php`,
     `docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok`,
     `docker compose -p ${quote(PROJECT)} exec -T moodle /bin/sh -c ${quote(`printf '%s\n' ${MARKER} > /var/www/html/public/webminai-health.txt && chown www-data:www-data /var/www/html/public/webminai-health.txt && chmod 0644 /var/www/html/public/webminai-health.txt`)}`,
-    `ready=; for attempt in $(seq 1 60); do if curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/webminai-health.txt" 2>/dev/null | grep -Fq ${MARKER}; then ready=yes; break; fi; sleep 2; done`,
+    `ready=; for attempt in $(seq 1 60); do if ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 5 "http://$address:${PORT}/webminai-health.txt" 2>/dev/null`, MARKER)}; then ready=yes; break; fi; sleep 2; done`,
     '[ "$ready" = yes ]',
     "printf '%s\n' moodle-installed"
   ].join('; ')
@@ -646,7 +667,7 @@ function composeInitializeCommand (linuxContext) {
 
 function composeVerifyCommand (linuxContext) {
   const addressCommand = linuxContext?.applications?.wordpress?.primaryAddressCommand ?? "ip -4 -o route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i == \"src\") {print $(i+1); exit}}'"
-  return `set -eu; cd ${quote(SERVICE_ROOT)}; for service in moodle nginx cron; do docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq "$service"; done; docker compose -p ${quote(PROJECT)} exec -T moodle test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/config.php; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok; docker compose -p ${quote(PROJECT)} exec -T --user www-data moodle test -w /var/moodledata; address=$(${addressCommand}); [ -n "$address" ]; curl --fail --location --silent --show-error --max-time 20 "http://$address:${PORT}/webminai-health.txt" | grep -Fq ${MARKER}; curl --fail --silent --show-error --max-time 20 "http://$address:${PORT}/login/index.php" | grep -Eiq '<!DOCTYPE html|<html'; printf '%s\n' verification-passed`
+  return `set -eu; cd ${quote(SERVICE_ROOT)}; for service in moodle nginx cron; do docker compose -p ${quote(PROJECT)} ps --status running --services | grep -Fxq "$service"; done; docker compose -p ${quote(PROJECT)} exec -T moodle test -S /run/php-fpm/webminai.sock; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/.webminai-installed; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/www/html/config.php; docker compose -p ${quote(PROJECT)} exec -T moodle test -f /var/moodledata/.webminai-cron-ok; docker compose -p ${quote(PROJECT)} exec -T --user www-data moodle test -w /var/moodledata; address=$(${addressCommand}); [ -n "$address" ]; ${httpMarkerCheck(`curl --fail --location --silent --show-error --max-time 20 "http://$address:${PORT}/webminai-health.txt"`, MARKER)}; ${httpMarkerCheck(`curl --fail --silent --show-error --max-time 20 "http://$address:${PORT}/login/index.php"`, '<!DOCTYPE html|<html', '-Ei')}; printf '%s\n' verification-passed`
 }
 
 function fpmSocketConfig () {

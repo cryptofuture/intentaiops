@@ -6,6 +6,26 @@ import test from 'node:test'
 import { AdminService } from '../src/admin-service.js'
 import { TaskStore } from '../src/task-store.js'
 
+test('a completed rollback prefix cannot override an incomplete execution-journal marker', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-rollback-prefix-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new TaskStore(root)
+  const task = store.create('lab', 'Review rollback')
+  const plan = { commands: [], revertCommands: [{ id: 'first', command: 'true' }, { id: 'second', command: 'true' }] }
+  store.savePlan('lab', task.id, plan)
+  store.markReverting('lab', task.id)
+  const lease = store.acquireExecution('lab', task.id, plan)
+  try {
+    store.appendExecutionEvent('lab', task.id, lease.owner, { type: 'rollback_completed', metadata: { completed: false } })
+    store.saveRevertResults('lab', task.id, [{ id: 'first', status: 'completed' }])
+    assert.equal(store.get('lab', task.id).status, 'revert_failed')
+    assert.equal(store.get('lab', task.id).revertedAt, null)
+    store.appendExecutionEvent('lab', task.id, lease.owner, { type: 'rollback_completed', metadata: { completed: true } })
+    store.saveRevertResults('lab', task.id, [{ id: 'first', status: 'completed' }, { id: 'second', status: 'completed' }])
+    assert.equal(store.get('lab', task.id).status, 'reverted')
+  } finally { store.releaseExecution('lab', task.id, lease.owner) }
+})
+
 test('task store persists per-server planning history and outcomes in SQLite', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'webminai-tasks-test-'))
   t.after(() => rm(root, { recursive: true, force: true }))

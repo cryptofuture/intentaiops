@@ -8,6 +8,7 @@ export async function runProcess (command, args, options = {}) {
     spawnImpl = spawn,
     cwd,
     env,
+    signal,
     onStdout,
     onStderr
   } = options
@@ -16,6 +17,7 @@ export async function runProcess (command, args, options = {}) {
     const child = spawnImpl(command, args, {
       cwd,
       env,
+      ...(signal ? { signal } : {}),
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe']
     })
@@ -24,10 +26,14 @@ export async function runProcess (command, args, options = {}) {
     let stdoutBytes = 0
     let stderrBytes = 0
     let settled = false
+    let timedOut = false
+    let killTimeout
 
     const timeout = setTimeout(() => {
+      timedOut = true
       child.kill('SIGTERM')
-      setTimeout(() => child.kill('SIGKILL'), 1000).unref()
+      killTimeout = setTimeout(() => child.kill('SIGKILL'), 1000)
+      killTimeout.unref()
     }, timeoutMs)
 
     child.stdout.on('data', chunk => {
@@ -50,15 +56,18 @@ export async function runProcess (command, args, options = {}) {
       if (settled) return
       settled = true
       clearTimeout(timeout)
+      clearTimeout(killTimeout)
       reject(error)
     })
     child.once('close', (code, signal) => {
       if (settled) return
       settled = true
       clearTimeout(timeout)
+      clearTimeout(killTimeout)
       resolve({
         code,
         signal,
+        ...(timedOut ? { timedOut: true, terminationRequested: 'timeout' } : {}),
         stdout: Buffer.concat(stdout).toString('utf8'),
         stderr: Buffer.concat(stderr).toString('utf8'),
         stdoutTruncated: stdoutBytes >= maxOutputBytes,
@@ -75,10 +84,12 @@ export async function runProcess (command, args, options = {}) {
 }
 
 export async function runInteractiveProcess (command, args, options = {}) {
-  const { cwd, spawnImpl = spawn } = options
+  const { cwd, env, signal, spawnImpl = spawn } = options
   return new Promise((resolve, reject) => {
     const child = spawnImpl(command, args, {
       cwd,
+      env,
+      ...(signal ? { signal } : {}),
       shell: false,
       stdio: 'inherit'
     })

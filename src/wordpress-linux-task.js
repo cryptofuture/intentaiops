@@ -1,3 +1,6 @@
+import { applicationFileOwnershipGuard, mariadbDataPreflight, wordpressArtifactCommand } from './linux-php-foundation.js'
+import { applicationDatabaseCommand } from './linux-application-database.js'
+
 const SITE = 'webminai-wordpress-18101'
 const WEB_ROOT = `/srv/${SITE}`
 const ARTIFACTS = `/var/lib/webminai/${SITE}`
@@ -27,18 +30,22 @@ export function buildWordpressLinuxTask (taskId, linuxContext) {
   const commands = [
     command('capture-baseline', baselineCommand({ state, family, profile, services }), 'Capture package, service, database, and path state before changing the host'),
     command('install-packages', installPackagesCommand({ state, family, profile }), 'Install the reviewed distro-specific native WordPress stack', ['capture-baseline']),
-    command('verify-artifacts', artifactCommand(), 'Download and verify official WordPress and WP-CLI artifacts', ['install-packages']),
+    command('verify-artifacts', wordpressArtifactCommand(ARTIFACTS), 'Download and verify official WordPress and WP-CLI artifacts', ['install-packages']),
     command('generate-credentials', credentialsCommand(), 'Generate protected task-owned database and administrator credentials on the host', ['capture-baseline']),
-    command('prepare-database', databaseCommand({ family, profile }), 'Initialize MariaDB, wait for readiness, and create only the task-owned database identity', ['install-packages', 'generate-credentials']),
+    command('prepare-database', databaseCommand({ state, family, profile }), 'Initialize MariaDB, wait for readiness, and create only the task-owned database identity', ['install-packages', 'generate-credentials']),
     command('extract-wordpress', extractCommand(profile), 'Extract verified WordPress core with explicit application ownership and permissions', ['verify-artifacts']),
     command('configure-php-fpm', phpFpmCommand(profile), 'Create the reviewed PHP-FPM pool and start its task-owned Unix socket', ['install-packages', 'extract-wordpress']),
     command('configure-nginx', nginxCommand({ state, profile }), 'Create and load the reviewed nginx virtual host on port 18101', ['configure-php-fpm']),
     command('install-wordpress', wordpressCommand(profile), 'Configure and install WordPress using protected stdin prompts', ['prepare-database', 'configure-nginx']),
     command('publish-and-verify', publishCommand(profile), 'Publish the marker page and verify database, HTTP, and restart persistence', ['install-wordpress'])
   ]
+  for (const step of commands.filter(item => ['install-packages', 'verify-artifacts'].includes(item.id))) {
+    step.executionMode = 'job'
+    step.timeoutMs = 1800000
+  }
   const revertCommands = [
-    command('remove-wordpress-database', removeDatabaseCommand(state), 'Drop only the task-owned WordPress database and local users'),
-    command('remove-wordpress-files', removeFilesCommand({ state, profile }), 'Remove task-owned site, credentials, artifacts, and configuration, restoring nginx main configuration', ['remove-wordpress-database']),
+    command('remove-wordpress-database', applicationDatabaseCommand({ state, database: DATABASE, host: profile.databaseHost, rollback: true }), 'Drop only the task-owned WordPress database and local user after verifying ownership'),
+    command('remove-wordpress-files', removeFilesCommand({ state, profile, modifiedFiles }), 'Remove task-owned site, credentials, artifacts, and configuration, restoring nginx main configuration', ['remove-wordpress-database']),
     command('restore-packages-services', restoreCommand({ state, family, profile, services }), 'Restore service activity, package state, and database data-directory baseline', ['remove-wordpress-files'])
   ]
   return {
@@ -66,9 +73,10 @@ function baselineCommand ({ state, family, profile, services }) {
   const targets = [WEB_ROOT, ARTIFACTS, CREDENTIALS, profile.phpFpmRuntimeDirectory, profile.phpFpmPool, profile.nginxVhost, ...(profile.phpExtensionConfig ? [profile.phpExtensionConfig] : [])]
   return [
     'set -eu',
+    mariadbDataPreflight(),
     `state=${quote(state)}`,
     'if [ ! -s "$state/packages.before" ]; then :',
-    `for path in ${targets.map(quote).join(' ')}; do [ ! -e "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`,
+    `for path in ${targets.map(quote).join(' ')}; do [ ! -e "$path" ] && [ ! -L "$path" ] || { printf 'task target already exists: %s\n' "$path" >&2; exit 1; }; done`,
     'install -d -o root -g root -m 0700 "$state"',
     packageSnapshot(family, '"$state/packages.before"'),
     ...services.map((service, index) => `${serviceActive(service)} && : > "$state/service-${index}.active" || true`),
@@ -89,33 +97,11 @@ function installPackagesCommand ({ state, family, profile }) {
   ].join('; ')
 }
 
-function artifactCommand () {
-  return [
-    'set -eu',
-    `install -d -o root -g root -m 0755 ${quote(ARTIFACTS)}`,
-    `if [ -s ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} ] && [ -s ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)} ] && [ -s ${quote(`${ARTIFACTS}/wp-cli.phar`)} ] && [ -s ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)} ]; then wp_expected=$(tr -d '\r\n' < ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)}); wp_actual=$(sha1sum ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} | awk '{print $1}'); cli_expected=$(tr -d '\r\n' < ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)}); cli_actual=$(sha512sum ${quote(`${ARTIFACTS}/wp-cli.phar`)} | awk '{print $1}'); if [ "$wp_actual" = "$wp_expected" ] && [ "$cli_actual" = "$cli_expected" ]; then printf '%s\n' artifacts-already-verified; exit 0; fi; fi`,
-    `curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} https://wordpress.org/latest.tar.gz`,
-    `curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)} https://wordpress.org/latest.tar.gz.sha1`,
-    `expected=$(tr -d '\\r\\n' < ${quote(`${ARTIFACTS}/wordpress.tar.gz.sha1`)})`,
-    'printf \'%s\' "$expected" | grep -Eq \'^[0-9A-Fa-f]{40}$\'',
-    `actual=$(sha1sum ${quote(`${ARTIFACTS}/wordpress.tar.gz`)} | awk '{print $1}')`,
-    '[ "$actual" = "$expected" ]',
-    `curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wp-cli.phar`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar`,
-    `curl --fail --location --silent --show-error --output ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)} https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar.sha512`,
-    `expected=$(tr -d '\\r\\n' < ${quote(`${ARTIFACTS}/wp-cli.phar.sha512`)})`,
-    'printf \'%s\' "$expected" | grep -Eq \'^[0-9A-Fa-f]{128}$\'',
-    `actual=$(sha512sum ${quote(`${ARTIFACTS}/wp-cli.phar`)} | awk '{print $1}')`,
-    '[ "$actual" = "$expected" ]',
-    `chmod 0755 ${quote(`${ARTIFACTS}/wp-cli.phar`)}`,
-    'printf \'%s\n\' artifacts-verified'
-  ].join('; ')
-}
-
 function credentialsCommand () {
   return `set -eu; umask 077; install -d -o root -g root -m 0700 ${quote(CREDENTIALS)}; [ -s ${quote(`${CREDENTIALS}/db_password`)} ] || openssl rand -hex 32 > ${quote(`${CREDENTIALS}/db_password`)}; [ -s ${quote(`${CREDENTIALS}/admin_password`)} ] || openssl rand -hex 32 > ${quote(`${CREDENTIALS}/admin_password`)}; chmod 0600 ${quote(`${CREDENTIALS}/db_password`)} ${quote(`${CREDENTIALS}/admin_password`)}; printf '%s\n' credentials-ready`
 }
 
-function databaseCommand ({ family, profile }) {
+function databaseCommand ({ state, family, profile }) {
   const databaseHost = profile.databaseHost
   return [
     'set -eu',
@@ -123,9 +109,7 @@ function databaseCommand ({ family, profile }) {
     'install -d -o mysql -g mysql -m 0755 /run/mariadb /run/mysqld',
     `if [ -n "$initialized" ] || ! ${serviceActive(profile.mariadbService)}; then ${serviceRestart(profile.mariadbService, family)}; fi`,
     "ready=; for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if mariadb --protocol=socket -uroot -e 'SELECT 1' >/dev/null 2>&1; then ready=yes; break; fi; sleep 1; done; [ \"$ready\" = yes ]",
-    `dbpass=$(sed -n 1p ${quote(`${CREDENTIALS}/db_password`)})`,
-    `printf "CREATE DATABASE IF NOT EXISTS ${DATABASE} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS '${DATABASE}'@'${databaseHost}' IDENTIFIED BY '%s'; ALTER USER '${DATABASE}'@'${databaseHost}' IDENTIFIED BY '%s'; GRANT ALL PRIVILEGES ON ${DATABASE}.* TO '${DATABASE}'@'${databaseHost}'; FLUSH PRIVILEGES;\n" "$dbpass" "$dbpass" | mariadb --protocol=socket -uroot >/dev/null 2>&1`,
-    'printf \'%s\n\' database-ready'
+    applicationDatabaseCommand({ state, database: DATABASE, host: databaseHost, credentials: CREDENTIALS })
   ].join('; ')
 }
 
@@ -227,13 +211,10 @@ function publishCommand (profile) {
   ].join('; ')
 }
 
-function removeDatabaseCommand (state) {
-  return `set +e; [ -d ${quote(state)} ] || exit 0; if command -v mariadb >/dev/null 2>&1; then printf "DROP DATABASE IF EXISTS ${DATABASE}; DROP USER IF EXISTS '${DATABASE}'@'localhost'; DROP USER IF EXISTS '${DATABASE}'@'127.0.0.1'; FLUSH PRIVILEGES;\n" | mariadb --protocol=socket -uroot >/dev/null 2>&1 || true; fi; exit 0`
-}
-
-function removeFilesCommand ({ state, profile }) {
+function removeFilesCommand ({ state, profile, modifiedFiles }) {
   return [
     'set -eu',
+    applicationFileOwnershipGuard(state, modifiedFiles.filter(path => path !== state && path !== profile.nginxMainConfig)),
     `rm -rf -- ${quote(WEB_ROOT)} ${quote(ARTIFACTS)} ${quote(CREDENTIALS)} ${quote(profile.phpFpmRuntimeDirectory)}`,
     `rm -f -- ${quote(profile.phpFpmPool)} ${quote(profile.nginxVhost)}`,
     profile.phpExtensionConfig ? `rm -f -- ${quote(profile.phpExtensionConfig)}` : ':',
@@ -246,7 +227,7 @@ function removeFilesCommand ({ state, profile }) {
 function restoreCommand ({ state, family, profile, services }) {
   const restoreServices = services.map((service, index) => `if [ -e ${quote(`${state}/service-${index}.active`)} ]; then ${serviceRestart(service, family)}; else ${serviceStop(service, family)}; fi`).join('; ')
   return [
-    'set +e',
+    'set -eu',
     `[ -d ${quote(state)} ] || exit 0`,
     restoreServices,
     removeAddedPackages(family, state),
@@ -265,10 +246,10 @@ function packageSnapshot (family, destination) {
 
 function installPackages (family, packages) {
   const list = packages.map(quote).join(' ')
-  if (family === 'debian') return `env DEBIAN_FRONTEND=noninteractive apt-get update; env DEBIAN_FRONTEND=noninteractive apt-get install -y ${list}`
+  if (family === 'debian') return `env DEBIAN_FRONTEND=noninteractive apt-get update; env DEBIAN_FRONTEND=noninteractive apt-get install --no-upgrade -y ${list}`
   if (family === 'alpine') return `apk add --no-cache ${list}`
   if (family === 'arch') return `pacman -Sy --noconfirm --needed ${list}`
-  if (family === 'suse') return `zypper --non-interactive refresh --force; zypper --non-interactive install --no-recommends ${list}`
+  if (family === 'suse') return `zypper --non-interactive refresh; zypper --non-interactive install --no-recommends ${list}`
   return `dnf -y install ${list}`
 }
 

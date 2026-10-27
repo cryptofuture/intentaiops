@@ -22,13 +22,13 @@ export function buildWindowsDockerBootstrapTask (taskId, windowsExecution, docke
     item('preflight', preflightCommand(state), 'Validate the supported Windows, memory, and SLAT baseline before mutation', ['validate-virtualization']),
     item('enable-wsl', enableWslCommand(state), 'Enable WSL and VirtualMachinePlatform only when absent and record whether Windows requires a reboot', ['preflight']),
     item('start-wsl-download', startWslDownloadCommand(state, wslInstaller, wslDownloadName), `Start the durable BITS download for Microsoft WSL ${WSL_VERSION}`, ['enable-wsl']),
-    pollItem('wait-wsl-download', waitDownloadCommand(wslInstaller, wslDownloadName, 'C:\\Program Files\\WSL\\wsl.exe'), 'Poll and complete the Microsoft WSL BITS transfer through short Stage 2 requests', ['start-wsl-download']),
+    pollItem('wait-wsl-download', waitDownloadCommand(state, wslInstaller, wslDownloadName, 'C:\\Program Files\\WSL\\wsl.exe'), 'Poll and complete the Microsoft WSL BITS transfer through short Stage 2 requests', ['start-wsl-download']),
     item('verify-wsl-installer', verifyWslCommand(state, wslInstaller), `Verify the SHA-256 and Authenticode signature for Microsoft WSL ${WSL_VERSION}`, ['wait-wsl-download']),
-    item('install-wsl-runtime', installWslCommand(state, wslInstaller), `Install Microsoft WSL ${WSL_VERSION} unattended through Windows Installer`, ['verify-wsl-installer']),
+    item('install-wsl-runtime', installWslCommand(state, wslInstaller), `Install Microsoft WSL ${WSL_VERSION} unattended through Windows Installer`, ['verify-wsl-installer'], 900000, 'job'),
     item('start-docker-download', startDockerDownloadCommand(state, installer, dockerDownloadName), `Start the durable BITS download for Docker Desktop ${DOCKER_DESKTOP_VERSION}`, ['install-wsl-runtime']),
-    pollItem('wait-docker-download', waitDownloadCommand(installer, dockerDownloadName, 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'), 'Poll and complete the Docker Desktop BITS transfer through short Stage 2 requests', ['start-docker-download']),
+    pollItem('wait-docker-download', waitDownloadCommand(state, installer, dockerDownloadName, 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'), 'Poll and complete the Docker Desktop BITS transfer through short Stage 2 requests', ['start-docker-download']),
     item('verify-docker-installer', verifyDockerCommand(state, installer), `Verify the published checksum and Authenticode signature for Docker Desktop ${DOCKER_DESKTOP_VERSION}`, ['wait-docker-download']),
-    item('install-docker-desktop', installDockerCommand(state, installer), `Install Docker Desktop ${DOCKER_DESKTOP_VERSION} for all users with the WSL 2 backend`, ['verify-docker-installer']),
+    item('install-docker-desktop', installDockerCommand(state, installer), `Install Docker Desktop ${DOCKER_DESKTOP_VERSION} for all users with the WSL 2 backend`, ['verify-docker-installer'], 1800000, 'job'),
     item('start-docker-desktop', startDockerCommand(state, dockerStartTaskName), 'Start Docker Desktop with the active Windows console user token outside the bounded Stage 2 process job', ['install-docker-desktop']),
     pollItem('wait-docker-ready', waitDockerCommand(state, dockerStartTaskName), 'Poll for the Docker Linux engine and Compose with short bounded CLI probes', ['start-docker-desktop']),
     item('schedule-required-reboot', rebootCommand(state, taskId), 'Schedule a self-removing LocalSystem reboot job with a 30-second delay only when an approved prerequisite phase recorded that Windows requires one', ['wait-docker-ready'])
@@ -49,14 +49,16 @@ export function buildWindowsDockerBootstrapTask (taskId, windowsExecution, docke
       ],
       warnings: [
         'Enabling virtualization features and installing Docker Desktop are machine-wide changes.',
+        'Rollback removes a Docker machine PATH entry only when its protected baseline proves the entry was absent before installation.',
+        'Docker Desktop may retain user data and caches after MSI removal; rollback does not automatically erase those directories.',
         `Docker Desktop ${DOCKER_DESKTOP_VERSION} is pinned to Docker's official Windows MSI build, locally pinned SHA-256, and Authenticode publisher.`,
         continuationText.trim()
       ],
       requiresConfirmation: true,
       commands,
       revertCommands: [
-        item('uninstall-task-owned-docker', uninstallDockerCommand(state), 'Uninstall Docker Desktop only when this task proved it introduced the installation', [], 300000, undefined, 'destructive'),
-        item('uninstall-task-owned-wsl', uninstallWslCommand(state, wslInstaller), 'Uninstall the WSL runtime only when this task proved it introduced the MSI', ['uninstall-task-owned-docker'], 300000, undefined, 'destructive'),
+        item('uninstall-task-owned-docker', uninstallDockerCommand(state), 'Uninstall Docker Desktop only when this task proved it introduced the installation', [], 1800000, 'job', 'destructive'),
+        item('uninstall-task-owned-wsl', uninstallWslCommand(state, wslInstaller), 'Uninstall the WSL runtime only when this task proved it introduced the MSI', ['uninstall-task-owned-docker'], 900000, 'job', 'destructive'),
         item('restore-task-owned-features', restoreFeaturesCommand(state), 'Disable only Windows features that this task changed from the disabled baseline', ['uninstall-task-owned-wsl'], 300000, undefined, 'destructive'),
         item('remove-bootstrap-state', cleanupCommand(state, [wslDownloadName, dockerDownloadName], [dockerStartTaskName]), 'Cancel task-owned transfers/startup jobs and remove the task-owned installers and bootstrap metadata after rollback', ['restore-task-owned-features'], 30000, undefined, 'destructive')
       ]
@@ -75,11 +77,12 @@ function preflightCommand (state) {
     '$cpu=Get-CimInstance Win32_Processor|Select-Object -First 1',
     "if($os.ProductType -ne 1 -or [int]$os.BuildNumber -lt 22631){throw 'UNSUPPORTED_WINDOWS_VERSION: Docker Desktop requires a supported Windows 11 client build.'}",
     "if(-not [Environment]::Is64BitOperatingSystem){throw 'UNSUPPORTED_ARCHITECTURE: x64 Windows is required.'}",
-    "if($computer.TotalPhysicalMemory -lt 8GB){throw 'INSUFFICIENT_MEMORY: Docker Desktop requires at least 8 GiB RAM.'}",
+    "if($computer.TotalPhysicalMemory -lt 8GB){$installed=(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop|Measure-Object Capacity -Sum).Sum;if($installed -lt 8GB){throw 'INSUFFICIENT_MEMORY: Docker Desktop requires at least 8 GiB installed RAM.'}}",
     "if(-not $computer.HypervisorPresent -and -not $cpu.SecondLevelAddressTranslationExtensions){throw 'SLAT_UNAVAILABLE: the processor does not expose second-level address translation and no running Windows hypervisor proves that capability.'}",
     `$statePath='${quote(state)}'`,
     '$baseline=Join-Path $statePath \'baseline.json\'',
-    "if(-not(Test-Path -LiteralPath $baseline)){if(Test-Path -LiteralPath $statePath){throw 'Bootstrap state exists without a valid baseline.'};New-Item -Path $statePath -ItemType Directory -Force|Out-Null;$features=@{};foreach($name in @('Microsoft-Windows-Subsystem-Linux','VirtualMachinePlatform')){$feature=Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction Stop;$features[$name]=[string]$feature.State};$docker=Test-Path -LiteralPath 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe' -PathType Leaf;$wsl=Test-Path -LiteralPath 'C:\\Program Files\\WSL\\wsl.exe' -PathType Leaf;[ordered]@{features=$features;dockerExisted=[bool]$docker;wslRuntimeExisted=[bool]$wsl;capturedAtUtc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json -Depth 4|Set-Content -LiteralPath $baseline -Encoding UTF8}",
+    dockerPathMatcher(),
+    "if(-not(Test-Path -LiteralPath $baseline)){if(Test-Path -LiteralPath $statePath){throw 'Bootstrap state exists without a valid baseline.'};$key=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment');try{$raw=$key.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);if($raw-isnot[string]){throw 'Machine PATH baseline is unavailable.'};$bin=Join-Path $env:ProgramFiles 'Docker\\Docker\\resources\\bin';$pathPresent=@($raw.Split([char]59)|Where-Object {Test-DockerPath $_ $bin}).Count-gt 0}finally{$key.Close()};New-Item -Path $statePath -ItemType Directory -Force|Out-Null;$features=@{};foreach($name in @('Microsoft-Windows-Subsystem-Linux','VirtualMachinePlatform')){$feature=Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction Stop;$features[$name]=[string]$feature.State};$docker=Test-Path -LiteralPath 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe' -PathType Leaf;$wsl=Test-Path -LiteralPath 'C:\\Program Files\\WSL\\wsl.exe' -PathType Leaf;[ordered]@{version=2;features=$features;dockerExisted=[bool]$docker;dockerPathPresent=[bool]$pathPresent;wslRuntimeExisted=[bool]$wsl;capturedAtUtc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json -Depth 4|Set-Content -LiteralPath $baseline -Encoding UTF8}",
     "Write-Output 'windows-docker-preflight-passed'"
   ])
 }
@@ -179,9 +182,8 @@ function verifyDockerCommand (state, installer) {
   ])
 }
 
-function waitDownloadCommand (installer, downloadName, installedPath) {
-  return ps([
-    "$ErrorActionPreference='Stop'",
+function waitDownloadCommand (state, installer, downloadName, installedPath) {
+  return guarded(state, [
     `if(Test-Path -LiteralPath '${quote(installedPath)}' -PathType Leaf){Write-Output 'runtime-already-installed';exit 0}`,
     `if(Test-Path -LiteralPath '${quote(installer)}' -PathType Leaf){Write-Output 'download-present';exit 0}`,
     'Import-Module BitsTransfer -ErrorAction Stop',
@@ -228,8 +230,7 @@ function startDockerCommand (state, taskName) {
 }
 
 function waitDockerCommand (state, taskName) {
-  return ps([
-    "$ErrorActionPreference='Stop'",
+  return guarded(state, [
     "$docker='C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'",
     `if(-not(Test-Path -LiteralPath $docker -PathType Leaf)){throw 'Docker CLI is missing after installation.'};$taskName='${quote(taskName)}'`,
     `$out='${quote(state)}\\docker-readiness.out';$err='${quote(state)}\\docker-readiness.err'`,
@@ -255,9 +256,17 @@ function uninstallDockerCommand (state) {
   return ps([
     "$ErrorActionPreference='Stop'",
     `$progressPath='${quote(state)}\\progress.json'`,
-    `if(Test-Path -LiteralPath $progressPath){$progress=Get-Content -LiteralPath $progressPath -Raw|ConvertFrom-Json;if($progress.dockerInstalledByTask){$installer='${quote(state)}\\DockerDesktop.msi';if(-not(Test-Path -LiteralPath $installer -PathType Leaf)){throw 'Task-owned Docker Desktop MSI is unavailable for rollback.'};$log='${quote(state)}\\docker-msi-uninstall.log';$process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\msiexec.exe') -ArgumentList @('/x',$installer,'/L*V',$log,'/qn','/norestart') -Wait -PassThru;if($process.ExitCode -notin @(0,1605,3010)){throw ('Docker Desktop MSI uninstall failed with exit code '+$process.ExitCode)}}}`,
+    `if(Test-Path -LiteralPath $progressPath){$progress=Get-Content -LiteralPath $progressPath -Raw|ConvertFrom-Json;if($progress.dockerInstalledByTask){$baseline=Get-Content -LiteralPath '${quote(state)}\\baseline.json' -Raw|ConvertFrom-Json;if($baseline.dockerPathPresent-isnot[bool]){throw 'Docker PATH ownership baseline is unavailable; operator review required.'};$installer='${quote(state)}\\DockerDesktop.msi';if(-not(Test-Path -LiteralPath $installer -PathType Leaf)){throw 'Task-owned Docker Desktop MSI is unavailable for rollback.'};$log='${quote(state)}\\docker-msi-uninstall.log';$process=Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\msiexec.exe') -ArgumentList @('/x',$installer,'/L*V',$log,'/qn','/norestart') -Wait -PassThru;if($process.ExitCode -notin @(0,1605,3010)){throw ('Docker Desktop MSI uninstall failed with exit code '+$process.ExitCode)};if(Test-Path -LiteralPath 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe' -PathType Leaf){throw 'Task-owned Docker Desktop remains installed.'};if(-not $baseline.dockerPathPresent){${windowsDockerPathCleanup()}}}}`,
     "Write-Output 'task-owned-docker-removed'"
   ])
+}
+
+function dockerPathMatcher () {
+  return 'function Test-DockerPath([string]$value,[string]$expected){return [string]::Equals([Environment]::ExpandEnvironmentVariables($value.Trim().Trim([char]34)).TrimEnd([char]92),$expected.TrimEnd([char]92),[StringComparison]::OrdinalIgnoreCase)}'
+}
+
+export function windowsDockerPathCleanup () {
+  return `${dockerPathMatcher()};$pathKey=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment',$true);try{$raw=$pathKey.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);if($raw-isnot[string]){throw 'Machine PATH is unavailable.'};$parts=$raw.Split([char]59);$bin=Join-Path $env:ProgramFiles 'Docker\\Docker\\resources\\bin';$indices=@();for($i=0;$i-lt $parts.Count;$i++){if(Test-DockerPath $parts[$i] $bin){$indices+=@($i)}};if($indices.Count-gt 1){throw 'Duplicate Docker PATH entries require operator review.'};if($indices.Count-eq 1){$kind=$pathKey.GetValueKind('Path');if($kind-notin @([Microsoft.Win32.RegistryValueKind]::String,[Microsoft.Win32.RegistryValueKind]::ExpandString)){throw 'Unexpected Machine PATH registry type.'};$kept=@(for($i=0;$i-lt $parts.Count;$i++){if($i-ne $indices[0]){$parts[$i]}});$candidate=$kept-join';';if($pathKey.GetValueKind('Path')-ne$kind-or$pathKey.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)-cne$raw){throw 'Machine PATH changed; review before cleanup.'};$pathKey.SetValue('Path',$candidate,$kind)}}finally{$pathKey.Close()}`
 }
 
 function uninstallWslCommand (state, installer) {
