@@ -43,6 +43,31 @@ Multi-host tasks occupy some of the same territory as Ansible or Salt: one opera
 - [Intent AI Презентация на русском языке](https://docs.google.com/presentation/d/19EOd5NY-RosAMdxKdQyixe5fQwog5mgVfUKYOnqRZfQ/edit?usp=sharing)
 - [Intent AI Ops 演示文稿 — 中文（自动翻译）](https://docs.google.com/presentation/d/1GRATW06DB4FvynuFRn2-7-Tvwa7JVW9hquM9e3prIBk/edit?usp=sharing)
 
+## New capabilities since plugin v0.8.0
+
+Update Intent AI Ops for the CLI/browser features below; remote plugins are updated separately through their host or cluster actions. Plugin and application versions are independent.
+
+Everything above remains available, including CLI multi-host tasks, parallel execution, Netdata monitoring and reviewed reverts. This branch adds more ways to work:
+
+- **Local browser workspace:** manage hosts, follow live resource measurements and arrange tasks side by side. CLI and browser share history and review rules. Choose from 27 themes without changing your workflow.
+- **Safer interruption recovery:** reconnect to an existing recorded job, inspect what finished and review continuation without repeating confirmed completed commands. Unknown outcomes are not automatically replayed.
+- **More control over multi-host work:** review each host's plan, try a canary before larger batches and continue selected hosts without rerunning successful ones. Existing parallel CLI execution remains available.
+- **Security checks and reviewed updates:** tracked PHP and Next.js/React Server Components checks save recommendations. Use **Patch detected security issues** to prepare actual updates for review, not just advice. Native repairs prefer vendor updates; container repairs update or rebuild images. Missing evidence stays unknown. See [security coverage and limits](docs/software-security.md).
+- **Recovery from a fresh installation:** discover signed remote common-task records and generate a new reviewed recovery plan for supported task families. This does not run scripts saved on the remote host or make every application eligible for recovery.
+- **Expanded platform routes:** qualified FreeBSD Podman application routes and CPU-aware Ghost/MySQL and Magento/OpenSearch image selection on Linux. Existing native routes remain available where supported; platform and runtime checks still decide eligibility.
+- **Flexible model selection:** choose models and their supported reasoning levels from your installed Codex CLI. New configurations default to `gpt-6.1-sol` with `low` reasoning; saved choices are preserved.
+
+To try the browser workspace:
+
+```sh
+intentaiops --web                     # read-only
+intentaiops --web --console-actions   # reviewed host and task controls
+```
+
+Unlock the vault in the launch terminal and open the private URL printed there. Keep that terminal open for SSH prompts. The workspace listens only on `127.0.0.1`; opening or refreshing a page does not approve or restart tasks. For manual access, open a host's **terminal** tab and approve **Open SSH shell**. This is separate from managed plan validation and rollback.
+
+The installer URLs below use `main`. To try an unmerged branch, use its source checkout and run `npm run build:web` before `npm link`. See [browser instructions](docs/web-workspace.md) and [execution recovery](#execution-recovery-and-operator-console) for the full workflows.
+
 ## Current verified common tasks
 
 Application routes currently in the catalog:

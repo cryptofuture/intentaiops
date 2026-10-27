@@ -33,7 +33,7 @@ test('native plugin handles health, signed commands, and replay rejection', asyn
   assert.match(output, /SET active = 1/)
   assert.match(output, /FUNCTION GLOBAL "webminai:health"/)
   assert.match(output, /FUNCTION_RESULT_BEGIN health-tx 200/)
-  assert.match(output, /"version":"0\.7\.2"/)
+  assert.match(output, /"version":"0\.8\.0"/)
   assert.match(output, /"platform":"linux"/)
   assert.match(output, /"effectiveUid":\d+/)
   assert.match(output, /FUNCTION_RESULT_BEGIN command-tx 200/)
@@ -68,7 +68,7 @@ test('native plugin reports its independent release version', async () => {
   const version = await new Promise((resolve, reject) => {
     execFile(plugin, ['--version'], { encoding: 'utf8' }, (error, stdout) => error ? reject(error) : resolve(stdout.trim()))
   })
-  assert.equal(version, '0.7.2')
+  assert.equal(version, '0.8.0')
 })
 
 test('native plugin returns when an approved shell detaches a pipe-inheriting child', async t => {
