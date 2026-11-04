@@ -264,6 +264,18 @@ Task history is the per-host audit trail of requests, Codex progress, plans, com
 
 Retries create new records and never overwrite the original task. Multi-host runs group separate per-host tasks, allowing failed hosts to be cleaned up and retried without rerunning successful hosts.
 
+### Download a backup to your computer
+
+Ask, for example:
+
+```text
+Download /var/lib/webminai/task-state/3/applications-backup.tar.gz to my local home folder, verify it, then remove the remote archive.
+```
+
+The plan shows both paths and whether remote deletion is requested. “Local home” means the home of the user running Intent AI Ops, including inside a devcontainer, not the managed host or browser computer. After approval, Intent AI Ops uses the existing SSH connection for SCP, verifies SHA-256, saves a private local file without overwriting anything, and only then removes the unchanged source if requested. Root-only files are staged through signed Stage 2 execution; credentials and archive contents never go to AI.
+
+Downloads currently support Linux, FreeBSD, and macOS SSH targets. Choose an existing, non-hidden directory within your local home; symlinks and existing destination files are rejected. Windows targets and Kubernetes transfers are not supported. Interrupted transfers require inspection, never automatic replay. If cleanup is uncertain, keep the verified local file and inspect the remote source before continuing. Deleted sources have no automatic rollback.
+
 ## Execution recovery and operator console
 
 Intent AI Ops records execution progress so you can inspect interrupted work and continue without repeating confirmed completed commands. You stay in control: AI suggestions never execute without your approval.

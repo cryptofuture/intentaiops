@@ -7,12 +7,26 @@ import test from 'node:test'
 import { CodexPlanner as ProductionCodexPlanner } from '../src/codex-planner.js'
 import { listCommonTasks } from '../src/common-tasks.js'
 import { runProcess } from '../src/process-runner.js'
+import { fileTransferDescription } from '../src/local-file-transfer.js'
 
 class CodexPlanner extends ProductionCodexPlanner {
   constructor (options = {}) {
     super({ configurationRunner: async () => ({ code: 0, stdout: '[]' }), ...options })
   }
 }
+
+test('planner exposes the current local home and prepares reviewed transfers instead of remote SCP shell commands', async () => {
+  const transfer = { remotePath: '/var/lib/webminai/task-state/3/applications-backup.tar.gz', localPath: path.join(os.homedir(), 'applications-backup.tar.gz'), removeSource: true }
+  const planner = new CodexPlanner()
+  planner.runStructured = async options => {
+    assert.ok(options.prompt.includes(JSON.stringify(os.homedir())))
+    assert.match(options.prompt, /authenticated SCP over the existing host connection/u)
+    return JSON.stringify({ summary: 'Download backup', changeOverview: 'Copy and verify before cleanup', modifiedFiles: [transfer.localPath, transfer.remotePath], requiresConfirmation: true, commands: [{ id: 'download', command: 'download', purpose: 'Save archive locally', risk: 'destructive', timeoutMs: 300000, executionMode: 'download', fileTransfer: transfer, requiresSudo: true, diagnostic: null, retry: null, dependsOn: [] }], revertCommands: [] })
+  }
+  const plan = await planner.plan({ request: 'scp the archive to my local home, then remove the remote archive', inventory: { os: 'linux' }, policy: { executionIdentity: 'root' } })
+  assert.equal(plan.commands[0].command, fileTransferDescription(transfer))
+  assert.deepEqual(plan.commands[0].fileTransfer, transfer)
+})
 
 for (const home of ['/Users/mac', null]) {
   test(`macOS planning uses root Stage 2 and verified Colima context: home=${home}`, async () => {
@@ -197,7 +211,7 @@ test('AI plans expose durable jobs while normal commands keep their timeout limi
   const schema = JSON.parse(await readFile(new URL('../schemas/command-plan.schema.json', import.meta.url), 'utf8'))
   for (const graph of ['commands', 'revertCommands']) {
     assert.ok(schema.properties[graph].items.required.includes('executionMode'))
-    assert.deepEqual(schema.properties[graph].items.properties.executionMode.enum, ['job', null])
+    assert.deepEqual(schema.properties[graph].items.properties.executionMode.enum, ['job', 'download', null])
     assert.equal(schema.properties[graph].items.properties.timeoutMs.maximum, 3600000)
   }
   for (const [mode, timeout, accepted] of [['job', 1800000, true], [null, 300000, true], [null, 1800000, false], ['job', 3600001, false]]) {

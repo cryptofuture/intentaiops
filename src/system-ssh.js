@@ -118,13 +118,24 @@ export class SystemSsh {
     if (!SAFE_UNIX_REMOTE_COPY_PATH.test(remotePath) && !SAFE_WINDOWS_REMOTE_COPY_PATH.test(remotePath)) {
       throw new TypeError('SCP destination must be inside a webminai temporary directory')
     }
+    return this.scpTransfer(connectionUrl, localPath, remotePath, options, false)
+  }
+
+  async download (connectionUrl, remotePath, localPath, options = {}) {
+    if (!SAFE_UNIX_REMOTE_COPY_PATH.test(remotePath)) throw new TypeError('SCP source must be inside a webminai temporary directory')
+    return this.scpTransfer(connectionUrl, localPath, remotePath, options, true)
+  }
+
+  async scpTransfer (connectionUrl, localPath, remotePath, options, download) {
     const connection = parseSshConnection(connectionUrl)
     await this.beforeChannel(options.onRecovery, connectionUrl)
     const prompting = !this.controlPath && (this.credential !== null || this.promptAuthentication)
     const transport = { ...this.transport, batchMode: prompting ? 'no' : 'yes' }
     const args = scpArguments(connection, this.controlPath, { transport })
     if (prompting) args.push(...authenticationArguments(this.authentication))
-    args.push(localPath, `${sshTarget(connection)}:${remotePath}`)
+    const endpoints = [localPath, `${sshTarget(connection)}:${remotePath}`]
+    if (download) endpoints.reverse()
+    args.push(...endpoints)
 
     this.onDiagnostic({ type: 'channel', kind: 'scp' })
     const run = args => this.credential !== null && !this.controlPath ? this.runWithAskpass(this.scpBinary, args, this.credential, options) : this.runner(this.scpBinary, args, options)
@@ -132,7 +143,7 @@ export class SystemSsh {
     if (result.code !== 0) {
       const legacyArgs = scpArguments(connection, this.controlPath, { legacy: true, transport })
       if (prompting) legacyArgs.push(...authenticationArguments(this.authentication))
-      legacyArgs.push(localPath, `${sshTarget(connection)}:${remotePath}`)
+      legacyArgs.push(...endpoints)
       result = await run(legacyArgs)
       if (result.code !== 0) {
         throw new SshCommandError(`SCP failed with exit code ${result.code}`, result)

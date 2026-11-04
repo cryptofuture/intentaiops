@@ -11,7 +11,7 @@
  */
 
 /** @typedef {'read' | 'change' | 'destructive'} CommandRisk */
-/** @typedef {'job'} CommandExecutionMode */
+/** @typedef {'job'|'download'} CommandExecutionMode */
 
 /**
  * @typedef {object} ExecutionObservation
@@ -51,6 +51,7 @@
  * @property {boolean} requiresSudo
  * @property {string[]} dependsOn
  * @property {CommandExecutionMode} [executionMode]
+ * @property {{remotePath: string, localPath: string, removeSource: boolean}} [fileTransfer]
  * @property {string | null} [phase]
  * @property {CommandRetry} [retry]
  * @property {object} [diagnostic]

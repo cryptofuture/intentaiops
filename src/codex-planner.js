@@ -8,6 +8,7 @@ import { validateApplicationDeltaPlan } from './application-delta.js'
 import { validateCommandPlan } from './plan-validator.js'
 import { normalizeApplicationDefaults } from './application-defaults.js'
 import { buildCommonTask } from './common-tasks.js'
+import { fileTransferDescription } from './local-file-transfer.js'
 import {
   detectPlannerPlatform,
   validateDockerAndSecrets,
@@ -116,6 +117,8 @@ export class CodexPlanner {
         for (const command of [...(proposed.commands ?? []), ...(proposed.revertCommands ?? [])]) {
           command.command = disableShellTracing(command.command)
           if (command.executionMode === null) delete command.executionMode
+          if (command.fileTransfer === null) delete command.fileTransfer
+          if (command.executionMode === 'download') command.command = fileTransferDescription(command.fileTransfer)
           if (command.retry === null) delete command.retry
           if (command.retry?.states === null) delete command.retry.states
         }
@@ -372,6 +375,8 @@ function buildPrompt (request, taskId, inventory, { catalogId, previousAttempts,
       ? 'Commands execute as LocalSystem. Never include sudo or elevation wrappers. Set requiresSudo true only as metadata when an operation requires administrator privileges.'
       : 'Commands execute as root. Never include sudo. Set requiresSudo true only as metadata when an operation requires root.',
     'Each command is executed separately by another process after explicit approval.',
+    `The local application runs on ${process.platform}; the current local user home is ${JSON.stringify(os.homedir())}. This is NOT a path on the managed host.`,
+    'For downloading a remote backup/file to the local user, use executionMode "download" and fileTransfer {remotePath: absolute Unix source path, localPath: absolute destination FILE path within the local user home, removeSource: boolean}. Set command to "download"; Intent AI Ops replaces it with a canonical review description. Set risk to "change", or "destructive" when removeSource is true. Set retry and diagnostic to null. Other commands must set fileTransfer null. The application performs authenticated SCP over the existing host connection, including staging root-only files through signed Stage 2, and verifies SHA-256 before optional source deletion. Do not invent local execution, reverse SSH credentials, remote-to-local shell SCP, or verification-only substitutes when a download is requested. No arbitrary local shell commands are supported. Download actions currently support Linux, FreeBSD and macOS SSH targets, not Windows targets or Kubernetes. The local destination directory must already exist; existing files, hidden paths, and symlink paths are rejected, never overwritten. Use the requested filename in the detected local home when the operator says "home". Do not invent a destructive rollback for a download or restore a deleted source by executing local code. Clearly disclose source deletion as irreversible. Mixed plans still need rollback for their other changing remote commands.',
     'Set retry to null by default. Preserve explicitly reviewed bounded retry policies when reusing commands. Retries apply only to recorded failure exit codes, never lost acknowledgments or uncertain outcomes; prefer read-only readiness probes over repeating mutations. Set retry.states to null unless a native failed/timed_out state restriction is required.',
     'Classify risk across every execution path, including error handlers. A read command must never stop services, terminate processes, write files, or change policy on failure; put those actions in an explicitly changing command with reviewed rollback.',
     ...(defaults.adminEmail

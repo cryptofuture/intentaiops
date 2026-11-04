@@ -7,6 +7,20 @@ import test from 'node:test'
 import { parseSshConnection } from '../src/connection.js'
 import { SystemSsh } from '../src/system-ssh.js'
 
+test('SCP downloads reuse the authenticated socket and preserve strict verification and legacy fallback', async () => {
+  const calls = []
+  const ssh = new SystemSsh({ controlPath: '/tmp/control', transport: { compression: true }, runner: async (binary, args) => { calls.push({ binary, args }); return { code: calls.length === 1 ? 1 : 0 } } })
+  await ssh.download('ssh://user@host.example:2200', '/tmp/webminai.Safe/payload', '/home/local/backup.tar.gz', { timeoutMs: 5000 })
+  assert.equal(calls.length, 2)
+  for (const call of calls) {
+    assert.equal(call.binary, 'scp')
+    assert.deepEqual(call.args.slice(-2), ['user@host.example:/tmp/webminai.Safe/payload', '/home/local/backup.tar.gz'])
+    for (const option of ['StrictHostKeyChecking=yes', 'ControlPath=/tmp/control', 'Compression=yes']) assert.ok(call.args.includes(option))
+  }
+  assert.ok(calls[1].args.includes('-O'))
+  await assert.rejects(ssh.download('ssh://host', '/etc/passwd', '/home/local/file'), /temporary directory/u)
+})
+
 test('system SSH uses argument arrays and strict non-interactive options', async () => {
   const calls = []
   const ssh = new SystemSsh({

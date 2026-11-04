@@ -2,6 +2,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "$defs": {
+    "fileTransfer": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["remotePath", "localPath", "removeSource"],
+          "properties": {
+            "remotePath": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "localPath": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "removeSource": { "type": "boolean" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
     "retry": {
       "anyOf": [
         {
@@ -79,14 +94,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "command", "purpose", "risk", "timeoutMs", "executionMode", "requiresSudo", "phase", "diagnostic", "dependsOn", "retry"],
+        "required": ["id", "command", "purpose", "risk", "timeoutMs", "executionMode", "fileTransfer", "requiresSudo", "phase", "diagnostic", "dependsOn", "retry"],
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
           "command": { "type": "string", "minLength": 1, "maxLength": 32768 },
           "purpose": { "type": "string", "minLength": 1 },
           "risk": { "enum": ["read", "change", "destructive"] },
           "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
-          "executionMode": { "enum": ["job", null] },
+          "executionMode": { "enum": ["job", "download", null] },
+          "fileTransfer": { "$ref": "#/$defs/fileTransfer" },
           "retry": { "$ref": "#/$defs/retry" },
           "requiresSudo": { "type": "boolean" },
           "phase": { "anyOf": [{ "type": "string", "enum": ["preflight", "baseline", "acquire", "packages", "secrets", "database", "configure", "initialize", "services", "health", "verify", "cleanup"] }, { "type": "null" }] },
@@ -104,14 +120,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "command", "purpose", "risk", "timeoutMs", "executionMode", "requiresSudo", "phase", "diagnostic", "dependsOn", "retry"],
+        "required": ["id", "command", "purpose", "risk", "timeoutMs", "executionMode", "fileTransfer", "requiresSudo", "phase", "diagnostic", "dependsOn", "retry"],
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
           "command": { "type": "string", "minLength": 1, "maxLength": 32768 },
           "purpose": { "type": "string", "minLength": 1 },
           "risk": { "enum": ["read", "change", "destructive"] },
           "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 },
-          "executionMode": { "enum": ["job", null] },
+          "executionMode": { "enum": ["job", "download", null] },
+          "fileTransfer": { "$ref": "#/$defs/fileTransfer" },
           "retry": { "$ref": "#/$defs/retry" },
           "requiresSudo": { "type": "boolean" },
           "phase": { "anyOf": [{ "type": "string", "enum": ["preflight", "baseline", "acquire", "packages", "secrets", "database", "configure", "initialize", "services", "health", "verify", "cleanup"] }, { "type": "null" }] },

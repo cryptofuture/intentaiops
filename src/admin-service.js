@@ -22,6 +22,7 @@ import { inspectRecoveryBaseline } from './remote-recovery-baseline.js'
 import { startExecutionHeartbeat } from './execution-heartbeat.js'
 import { guardAdminMutations } from './host-mutation-ownership.js'
 import { recordApplicationSecurity } from './software-security.js'
+import { downloadRemoteFile } from './local-file-transfer.js'
 
 const REMOTE_RECOVERY_EXECUTION = Symbol('reviewed remote common-task recovery')
 
@@ -354,7 +355,8 @@ export class AdminService {
   async execute ({ settings, passphrase, serverId, taskId, plan, approve, onResult, onProgress, beforeCommand, requireRevert = true, executionObserver, recoveryAuthorization }) {
     const server = await this.serverSecrets({ settings, passphrase, serverId })
     const rules = await this.workspace.loadRules(serverId)
-    if (taskId === undefined) return executeApprovedPlan({ plan, policy: rules.policy, netdata: this.netdata(server), approve, onResult, onProgress, requireRevert })
+    const download = item => downloadRemoteFile({ ssh: this.ssh, netdata: this.netdata(server), connectionUrl: server.connectionUrl, item })
+    if (taskId === undefined) return executeApprovedPlan({ plan, policy: rules.policy, netdata: this.netdata(server), download, approve, onResult, onProgress, requireRevert })
     const recoveryState = this.remoteRecovery.get(settings.servers?.[serverId]?.hostFingerprint, taskId)
     if (recoveryState?.manifest.recoveryId && recoveryAuthorization !== REMOTE_RECOVERY_EXECUTION) throw new Error('Use remote common-task recovery to recheck the source head, baseline and ownership before execution')
     const lease = this.tasks.acquireExecution(serverId, taskId, plan)
@@ -388,6 +390,7 @@ export class AdminService {
       if (this.tasks.executionEvents(serverId, taskId).length) await recordExecutionEvent({ type: 'execution_resumed' })
       const results = await executeApprovedPlan({
         plan,
+        download,
         policy: rules.policy,
         netdata: this.netdata(server),
         approve,

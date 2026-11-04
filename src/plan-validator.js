@@ -3,6 +3,7 @@ import { classifyFailure } from './failure-signature.js'
 import { randomUUID } from 'node:crypto'
 import { executionDiagnostics, diagnosticSummary } from './execution-diagnostics.js'
 import { captureExecutionEvidence } from './host-execution-evidence.js'
+import { fileTransferDescription } from './local-file-transfer.js'
 
 const RISK = new Set(['read', 'change', 'destructive'])
 
@@ -30,6 +31,7 @@ export function validateCommandPlan (plan, policy = {}, { requireRevert = true }
     throw new TypeError('plan modified files must be absolute paths')
   }
   if (new Set(candidate.modifiedFiles).size !== candidate.modifiedFiles.length) throw new Error('plan contains duplicate modified files')
+  if (candidate.commands.some(item => item?.executionMode === 'download') && candidate.requiresConfirmation !== true) throw new Error('local downloads require explicit confirmation')
 
   const maxCommands = policy.maxCommands ?? 20
   const maxTimeoutMs = policy.maxTimeoutMs ?? 300000
@@ -40,7 +42,7 @@ export function validateCommandPlan (plan, policy = {}, { requireRevert = true }
   }
   validateCommandItems(candidate.commands, { policy, maxTimeoutMs, maxJobTimeoutMs, deniedPatterns, graph: 'commands' })
   validateCommandItems(candidate.revertCommands, { policy, maxTimeoutMs, maxJobTimeoutMs, deniedPatterns, graph: 'revertCommands' })
-  if (requireRevert && candidate.commands.some(item => item.risk !== 'read') && candidate.revertCommands.length === 0) {
+  if (requireRevert && candidate.commands.some(item => item.risk !== 'read' && item.executionMode !== 'download') && candidate.revertCommands.length === 0) {
     throw new Error('a changing plan requires revert commands')
   }
 
@@ -79,9 +81,12 @@ function validateCommandItems (commands, { policy, maxTimeoutMs, maxJobTimeoutMs
       throw new Error(`command ${item.id} requires root but policy forbids it`)
     }
     if (!RISK.has(item.risk)) throw new TypeError(`command ${item.id} has an invalid risk`)
-    if (item.executionMode !== undefined && item.executionMode !== 'job') {
+    if (item.executionMode !== undefined && !['job', 'download'].includes(item.executionMode)) {
       throw new TypeError(`command ${item.id} has an invalid execution mode`)
     }
+    if (item.executionMode === 'download') {
+      if (graph !== 'commands' || item.command !== fileTransferDescription(item.fileTransfer) || item.requiresSudo !== true || item.risk !== (item.fileTransfer.removeSource ? 'destructive' : 'change') || item.retry || item.diagnostic) throw new Error(`command ${item.id} has invalid download semantics`)
+    } else if (item.fileTransfer !== undefined && item.fileTransfer !== null) throw new Error(`command ${item.id} has transfer data without download execution`)
     if (item.phase !== undefined && item.phase !== null && !isDeploymentPhase(item.phase)) throw new TypeError(`command ${item.id} has an invalid deployment phase`)
     validateCommandSource(item.source, item.id)
     try {
@@ -91,7 +96,7 @@ function validateCommandItems (commands, { policy, maxTimeoutMs, maxJobTimeoutMs
       const target = typeof item.diagnostic?.target === 'string' ? JSON.stringify(item.diagnostic.target) : 'undefined'
       throw new TypeError(`command ${item.id} has invalid ${kind} diagnostic target ${target}: ${error.message}`, { cause: error })
     }
-    const timeoutLimit = item.executionMode === 'job' ? maxJobTimeoutMs : maxTimeoutMs
+    const timeoutLimit = ['job', 'download'].includes(item.executionMode) ? maxJobTimeoutMs : maxTimeoutMs
     if (!Number.isInteger(item.timeoutMs) || item.timeoutMs < 1000 || item.timeoutMs > timeoutLimit) {
       throw new TypeError(`command ${item.id} has an invalid timeout`)
     }
@@ -148,6 +153,7 @@ export async function executeApprovedPlan ({
   plan,
   policy,
   netdata,
+  download,
   approve,
   onResult = _entry => {},
   onExecutionEvent,
@@ -182,7 +188,7 @@ export async function executeApprovedPlan ({
 
     const startedAt = Date.now()
     await onExecutionEvent?.({ type: 'plan_approved', commandId: item.id })
-    const execution = await runCommandWithRetry(item, netdata, onExecutionEvent, onProgress, beforeCommand)
+    const execution = await runCommandWithRetry(item, netdata, onExecutionEvent, onProgress, beforeCommand, download)
     if (execution.paused) break
     const { rawResult, executionError, attempts, recoveryRequired, diagnostics } = execution
     const result = redactSensitiveResult(item.command, rawResult)
@@ -217,7 +223,7 @@ function validateRetry (item) {
   if (states !== undefined && (!Array.isArray(states) || states.length < 1 || states.length > 2 || states.some(state => !['failed', 'timed_out'].includes(state)) || new Set(states).size !== states.length)) throw new TypeError(`command ${item.id} has invalid retry states`)
 }
 
-async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress, beforeCommand) {
+async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress, beforeCommand, download) {
   const retry = item.retry ?? { attempts: 1, intervalMs: 0, exitCodes: [] }
   let rawResult
   let executionError
@@ -252,7 +258,7 @@ async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress,
     await event('command_dispatched')
     executionError = undefined
     try {
-      const execute = item.executionMode === 'job' ? netdata.runJob?.bind(netdata) : netdata.runCommand?.bind(netdata)
+      const execute = item.executionMode === 'download' ? download && (() => download(item)) : item.executionMode === 'job' ? netdata.runJob?.bind(netdata) : netdata.runCommand?.bind(netdata)
       if (!execute) throw new Error(`Netdata client does not support ${item.executionMode === 'job' ? 'job' : 'command'} execution`)
       rawResult = await execute(item.command, {
         timeoutSeconds: Math.ceil(item.timeoutMs / 1000),
@@ -275,7 +281,7 @@ async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress,
       : await captureExecutionEvidence(netdata, { item, before })
     diagnostics = executionDiagnostics({ item, result: rawResult, error: executionError, before, after })
     const completed = rawResult.exitCode === 0 && !rawResult.timedOut && !['failed', 'timed_out', 'cancelled', 'unknown'].includes(rawResult.state)
-    await event(executionError || rawResult.exitCode === null || rawResult.state === 'unknown' ? 'command_outcome_unknown' : completed ? 'command_completed' : 'command_failed', { exitCode: rawResult.exitCode, ...(after ? { evidenceAfter: after } : {}), ...(diagnostics.length ? { diagnostics } : {}) })
+    await event(executionError || rawResult.exitCode === null || rawResult.state === 'unknown' ? 'command_outcome_unknown' : completed ? 'command_completed' : 'command_failed', { exitCode: rawResult.exitCode, ...(rawResult.transfer ? { transfer: rawResult.transfer } : {}), ...(after ? { evidenceAfter: after } : {}), ...(diagnostics.length ? { diagnostics } : {}) })
     if (recoveryRequired) {
       await recovery({ state: 'operator_review_required' })
       await onExecutionEvent?.({ type: 'execution_paused', metadata: { reason: 'recovery_requires_approval' } })
