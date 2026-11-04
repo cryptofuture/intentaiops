@@ -28,7 +28,7 @@ export async function withHostMutation ({ dataRoot, identity, before }, operatio
 }
 
 export function guardAdminMutations (admin) {
-  for (const name of ['execute', 'revertTask', 'executeRemoteCommonTaskRecovery', 'activate', 'deactivate']) {
+  for (const name of ['execute', 'revertTask', 'executeRemoteCommonTaskRecovery', 'activate', 'deactivate', 'removeTaskArtifacts']) {
     const method = admin[name].bind(admin)
     admin[name] = options => withHostMutation({
       dataRoot: admin.dataRoot,

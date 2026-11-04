@@ -258,7 +258,7 @@ async function runCommandWithRetry (item, netdata, onExecutionEvent, onProgress,
     await event('command_dispatched')
     executionError = undefined
     try {
-      const execute = item.executionMode === 'download' ? download && (() => download(item)) : item.executionMode === 'job' ? netdata.runJob?.bind(netdata) : netdata.runCommand?.bind(netdata)
+      const execute = item.executionMode === 'download' ? download && (() => download(item, { onProgress })) : item.executionMode === 'job' ? netdata.runJob?.bind(netdata) : netdata.runCommand?.bind(netdata)
       if (!execute) throw new Error(`Netdata client does not support ${item.executionMode === 'job' ? 'job' : 'command'} execution`)
       rawResult = await execute(item.command, {
         timeoutSeconds: Math.ceil(item.timeoutMs / 1000),

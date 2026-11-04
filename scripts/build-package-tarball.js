@@ -48,6 +48,7 @@ try {
     'web/themes/palettes.js',
     'src/catalog-plan-revision.js',
     'src/local-file-transfer.js',
+    'src/remote-task-artifacts.js',
     'src/remote-common-task-recovery.js',
     'src/remote-recovery-record.js',
     'remote/recovery-store.sh',

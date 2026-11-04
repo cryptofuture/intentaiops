@@ -141,6 +141,7 @@ export async function startOperatorConsole ({ controller, port = 0, actions = fa
       if (request.method === 'GET' && url.pathname === '/cluster-recovery' && workspace) return json(200, await controller.kubernetesTasks.remoteHistory(url.searchParams.get('cluster')))
       if (request.method === 'GET' && url.pathname === '/metrics' && workspace) return json(200, await workspace.metrics.get(url.searchParams.get('host')))
       if (request.method === 'GET' && url.pathname === '/inventory' && workspace) return json(200, await controller.withAdmin(url.searchParams.get('host'), admin => admin.refreshInventory({ settings: controller.settings, passphrase: controller.passphrase, serverId: url.searchParams.get('host') })))
+      if (request.method === 'GET' && url.pathname === '/task-artifacts') return json(200, await controller.taskArtifacts(url.searchParams.get('host'), Number(url.searchParams.get('task'))))
       if (request.method === 'POST' && url.pathname === '/operation' && workspace) {
         if (!actions) return json(403, { error: 'console is read-only' })
         if (!equal(request.headers['x-intent-csrf'], csrf)) return json(403, { error: 'CSRF check failed' })

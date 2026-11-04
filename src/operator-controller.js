@@ -74,7 +74,24 @@ export class OperatorController {
     const rollbackCommands = this.tasks.rollbackState(hostId, taskId).map(command => ({ ...this.sanitize(command), rollbackRevision: command.rollbackRevision }))
     const publicRevisions = revisions.map(revision => ({ ...this.sanitize(revision), fingerprint: planFingerprint(revision.plan), differences: planDifferences(task.plan, revision.plan) }))
     const security = parseSecurityEvidence(task.results)
-    return { ...this.sanitize({ version: 1, hostId, task, control: this.tasks.control(hostId, taskId), commands: this.tasks.executionState(hostId, taskId), rollbackAvailable: Boolean(task.plan?.revertCommands?.length || rollback) }), securityRemediationAvailable: task.status === 'completed' && security.complete && security.observations.some(item => item.status === 'potentially_vulnerable'), revisions: publicRevisions, rollbackCommands, stateVersion: this.tasks.stateVersion(hostId, taskId), fingerprint: planFingerprint(task.plan), rollbackFingerprint: planFingerprint(task.plan?.revertCommands), reviewedRollbackFingerprint: rollback ? planFingerprint(rollback.plan) : null }
+    const artifactCleanup = this.tasks.artifactCleanupState?.(hostId, taskId) ?? []
+    return { ...this.sanitize({ version: 1, hostId, task, artifactCleanup, control: this.tasks.control(hostId, taskId), commands: this.tasks.executionState(hostId, taskId), rollbackAvailable: !artifactCleanup.length && Boolean(task.plan?.revertCommands?.length || rollback) }), securityRemediationAvailable: task.status === 'completed' && security.complete && security.observations.some(item => item.status === 'potentially_vulnerable'), revisions: publicRevisions, rollbackCommands, stateVersion: this.tasks.stateVersion(hostId, taskId), fingerprint: planFingerprint(task.plan), rollbackFingerprint: planFingerprint(task.plan?.revertCommands), reviewedRollbackFingerprint: rollback ? planFingerprint(rollback.plan) : null }
+  }
+
+  async taskArtifacts (hostId, taskId) {
+    this.assertHost(hostId)
+    const snapshot = await this.withAdmin(hostId, admin => admin.inspectTaskArtifacts({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId }))
+    return { ...this.sanitize(snapshot), fingerprint: snapshot.fingerprint, stateVersion: this.tasks.stateVersion(hostId, taskId) }
+  }
+
+  async removeArtifacts (hostId, taskId, expectedVersion, fingerprint, approved) {
+    this.checkVersion(hostId, taskId, expectedVersion)
+    return this.withMutationAdmin(hostId, taskId, async admin => {
+      this.checkVersion(hostId, taskId, expectedVersion)
+      const result = await admin.removeTaskArtifacts({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, fingerprint, approved })
+      this.record({ type: 'task_artifacts_removed', hostId, taskId })
+      return this.sanitize(result)
+    })
   }
 
   assertHost (hostId) {
@@ -259,7 +276,7 @@ export class OperatorController {
       const control = this.tasks.control(hostId, taskId)
       if (control.action === 'abort') throw new Error('execution was aborted; request a reviewed revision')
       this.tasks.setControl(hostId, taskId, 'run', originalControl.version)
-      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, requireRevert: remainingChanges && !oneWayMaintenance, approve: async command => !commandIds || commandIds.includes(command.id), onProgress, executionObserver: event => { if (event.type === 'command_prepared') this.tasks.markRunning(hostId, taskId) }, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
+      const results = await admin.execute({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, plan: task.plan, requireRevert: remainingChanges && !oneWayMaintenance, approve: async command => !commandIds || commandIds.includes(command.id), onProgress: event => { this.record({ type: 'task_progress', hostId, taskId, event }); return onProgress?.(event) }, executionObserver: event => { if (event.type === 'command_prepared') this.tasks.markRunning(hostId, taskId) }, onResult: result => this.tasks.appendResult(hostId, taskId, result) })
       const saved = this.tasks.saveResults(hostId, taskId, results)
       if (saved.status === 'completed') {
         try { await completeTaskReport({ admin, settings: this.settings, passphrase: this.passphrase, serverId: hostId, task: this.tasks.get(hostId, taskId), onProgress }) } catch { this.record({ type: 'report_unavailable', hostId, taskId, message: 'Assessment unavailable; authoritative command outcomes remain recorded' }) }

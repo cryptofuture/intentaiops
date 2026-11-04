@@ -353,6 +353,7 @@ test('read-only UI preferences and session restoration retain CSRF and instance 
   assert.equal((await fetch(first.origin + '/preferences', { method: 'POST', headers, body: JSON.stringify(value) })).status, 200)
   assert.equal((await fetch(first.origin + '/preferences', { method: 'POST', headers: { ...headers, 'X-Intent-CSRF': '' }, body: JSON.stringify(value) })).status, 403)
   assert.equal((await fetch(first.origin + '/operation', { method: 'POST', headers, body: JSON.stringify({ action: 'prepare', requestKey: 'readonly-prepare-01', hostId: 'host', request: 'Inspect' }) })).status, 403)
+  assert.equal((await fetch(first.origin + '/operation', { method: 'POST', headers, body: JSON.stringify({ action: 'remove-artifacts', requestKey: 'readonly-cleanup-01', hostId: 'host', taskId: 1, approved: true }) })).status, 403)
   assert.equal((await fetch(first.origin + '/preferences', { headers: { ...headers, Origin: 'https://attacker.invalid' } })).status, 403)
   const task = controller.tasks.create('host', 'Inspect paginated fixture')
   for (let i = 0; i < 25; i++) controller.tasks.appendResult('host', task.id, { id: 'result-' + i, status: 'completed', result: { exitCode: 0, stdout: 'private-output-marker', stderr: 'private-error-marker' } })

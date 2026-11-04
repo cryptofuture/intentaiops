@@ -4,6 +4,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { EXECUTION_EVENTS, journalMetadata, planFingerprint } from './execution-journal.js'
 import { resolveServerDirectory } from './server-id.js'
+import { taskArtifactPaths } from './remote-task-artifacts.js'
 
 const DATABASE_FILE = 'tasks.sqlite3'
 const KINDS = new Set(['ai', 'catalog', 'consultation'])
@@ -403,6 +404,33 @@ export class TaskStore {
     })
   }
 
+  artifactCleanupState (serverId, taskId) {
+    return this.withDatabase(serverId, database => {
+      const history = []; const seen = new Set()
+      let id = taskId
+      while (id) {
+        if (seen.has(id) || seen.size >= 100) throw new Error('Invalid retry history')
+        seen.add(id)
+        const task = this.getFromDatabase(database, id)
+        history.push(task); id = task.retryOfTaskId
+      }
+      const paths = taskArtifactPaths(history)
+      return paths.length ? database.prepare(`SELECT path, bytes, status FROM task_artifact_cleanups WHERE path IN (${paths.map(() => '?').join(',')})`).all(...paths) : []
+    })
+  }
+
+  assertArtifactsAvailable (serverId, taskId) {
+    if (this.artifactCleanupState(serverId, taskId).length) throw new Error('Remote task artifacts were removed or cleanup is uncertain. Saved execution and rollback cannot be reused; prepare new work after inspecting the host')
+  }
+
+  recordArtifactCleanup (serverId, taskId, entries, status) {
+    if (!['dispatched', 'removed', 'unknown'].includes(status)) throw new Error('Invalid artifact cleanup status')
+    return this.withDatabase(serverId, database => database.transaction(() => {
+      for (const entry of entries) database.prepare('INSERT INTO task_artifact_cleanups(path, task_id, bytes, status) VALUES(?,?,?,?) ON CONFLICT(path) DO UPDATE SET task_id=excluded.task_id, bytes=excluded.bytes, status=excluded.status').run(entry.path, taskId, entry.bytes, status)
+      if (status === 'dispatched') database.prepare("INSERT INTO task_controls(task_id, version, action) VALUES(?,1,'pause') ON CONFLICT(task_id) DO UPDATE SET version=version+1, action='pause'").run(taskId)
+    }).immediate())
+  }
+
   appendResult (serverId, taskId, result) {
     return this.withDatabase(serverId, database => {
       const existing = this.getFromDatabase(database, taskId)
@@ -562,6 +590,7 @@ export class TaskStore {
         CREATE TABLE IF NOT EXISTS execution_leases (
           task_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, fingerprint TEXT NOT NULL, expires_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS task_artifact_cleanups (path TEXT PRIMARY KEY, task_id INTEGER NOT NULL, bytes INTEGER NOT NULL, status TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS tasks (
           id INTEGER PRIMARY KEY,
           request TEXT NOT NULL,

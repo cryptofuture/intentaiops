@@ -2161,10 +2161,24 @@ async function browseTaskHistory ({ ui, admin, settings, passphrase, serverId, s
   const task = admin.getTask(serverId, selected)
   renderTaskRecord(ui, task)
   const actions = taskHistoryActions(task, { catalogTask: Boolean(task.catalogId) })
+  if (task.plan) actions.unshift({ label: 'Remote task storage: inspect usage and remove backup files', value: 'artifacts' })
   if (task.plan) actions.unshift({ label: 'Operator controls: inspect, pause, revise and resume', value: 'operator' })
   if (task.plan && ['running', 'partial', 'failed'].includes(task.status)) actions.unshift({ label: 'Inspect durable execution and recovery', value: 'recover' })
   const action = await ui.choose('History action', actions)
-  if (action === 'operator') {
+  if (action === 'artifacts') {
+    try {
+      const snapshot = await admin.inspectTaskArtifacts({ settings, passphrase, serverId, taskId: task.id })
+      ui.heading('Remote task storage')
+      for (const entry of snapshot.entries) ui.line(entry.path, `${entry.bytes.toLocaleString('en-US')} ${snapshot.sizeKind}`)
+      ui.line('Total', `${snapshot.totalBytes.toLocaleString('en-US')} ${snapshot.sizeKind}`)
+      ui.warn(snapshot.warning)
+      if (snapshot.entries.length && await ui.confirm('Permanently remove the displayed remote directories and lose their rollback backups?', false)) {
+        await admin.removeTaskArtifacts({ settings, passphrase, serverId, taskId: task.id, fingerprint: snapshot.fingerprint, approved: true })
+        ui.success('Remote artifacts removed. Local history retained; saved rollback is disabled.')
+      }
+    } catch (error) { ui.error(error.message) }
+    await ui.pause()
+  } else if (action === 'operator') {
     const controller = new OperatorController({ dataRoot: admin.dataRoot, settings, passphrase, tasks: admin.tasks, adminFor: async () => admin })
     await manageExecution({ ui, controller, serverId, taskId: task.id })
   } else if (action === 'recover') {
@@ -2617,6 +2631,7 @@ export function renderResults (ui, results, heading = 'Execution results') {
 }
 
 function renderTaskProgress (ui, event) {
+  if (event.type === 'transfer_progress') { ui.output.write(`\n[SCP / ${event.commandId}] ${event.message}\n`); return }
   if (event.type === 'security_report') { ui.heading('Security recommendations'); writeWrapped(ui, event.message); return }
   const prefix = event.phase === 'execution-retry' ? `Retry / ${event.commandId}` : event.phase === 'execution-diagnostics' ? `Evidence / ${event.commandId} / ${event.outcome}` : event.phase === 'execution-recovery' ? `Recovery / ${event.commandId}` : event.type === 'reasoning' ? 'Codex reasoning' : `Codex ${event.type}`
   ui.output.write(`\n${ui.paint('muted', `[${prefix}]`)} ${event.message}\n`)

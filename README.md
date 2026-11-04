@@ -276,6 +276,16 @@ The plan shows both paths and whether remote deletion is requested. “Local hom
 
 Downloads currently support Linux, FreeBSD, and macOS SSH targets. Choose an existing, non-hidden directory within your local home; symlinks and existing destination files are rejected. Windows targets and Kubernetes transfers are not supported. Interrupted transfers require inspection, never automatic replay. If cleanup is uncertain, keep the verified local file and inspect the remote source before continuing. Deleted sources have no automatic rollback.
 
+SCP execution shows local file growth in bytes and percent, then a separate checksum-verification phase. This is not a network-throughput counter. The same progress is available in the browser task view.
+
+### Free space used by old task backups
+
+Open **Task history and reverts**, select a task, then **Remote task storage: inspect usage and remove backup files**. The browser task view has **Remote task storage → Inspect disk usage**. Inspection lists known task-state directories and their sizes without deleting anything, including directories shared with earlier retry attempts.
+
+Review the paths and explicitly confirm **Remove remote artifacts** to delete them. This permanently removes backup archives and reversal files, not the local history, recovery signing keys, or installed application data outside those directories. Saved execution and rollback that depend on those files are then blocked. Do not remove a directory still used by a running application. Active or uncertain work must be finished or reconciled first.
+
+Unix sizes report allocated bytes; Windows reports logical file bytes. Shared blocks, filesystem snapshots and hard links mean this is not a guarantee of reclaimable disk space. Unknown cleanup outcomes are recorded, never retried automatically. Kubernetes task storage cleanup is not supported by this host workflow.
+
 ## Execution recovery and operator console
 
 Intent AI Ops records execution progress so you can inspect interrupted work and continue without repeating confirmed completed commands. You stay in control: AI suggestions never execute without your approval.

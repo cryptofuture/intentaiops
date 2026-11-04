@@ -124,6 +124,23 @@ test('AdminService routes a reviewed download through the shared handler, not re
   assert.equal(await readFile(f.localPath, 'utf8'), 'backup payload\0with binary bytes')
 })
 
+test('SCP reports live local file growth followed by separate checksum verification', { skip: process.platform !== 'linux' }, async t => {
+  const f = await fixture(t)
+  const events = []
+  f.ssh.download = async (_url, source, destination) => {
+    await writeFile(destination, 'backup')
+    await new Promise(resolve => setTimeout(resolve, 1150))
+    await copyFile(source, destination)
+  }
+  await downloadRemoteFile({ ...f, onProgress: event => events.push(event) })
+  assert.ok(events.some(event => event.phase === 'download' && event.localBytes > 0 && event.localBytes < event.totalBytes))
+  assert.equal(events[0].localBytes, 0)
+  assert.equal(events.at(-2).phase, 'verify')
+  assert.equal(events.at(-1).phase, 'verified')
+  assert.ok(events.every(event => event.type === 'transfer_progress' && event.commandId === 'download' && event.percent >= 0 && event.percent <= 100))
+  assert.ok(!JSON.stringify(events).includes('with binary bytes'))
+})
+
 test('destination races and unsupported targets cannot cause remote deletion', { skip: process.platform !== 'linux' }, async t => {
   const f = await fixture(t, true)
   f.ssh.download = async (_url, source, destination) => { await copyFile(source, destination); await writeFile(f.localPath, 'another task won this filename') }

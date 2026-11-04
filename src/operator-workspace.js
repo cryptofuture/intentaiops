@@ -13,6 +13,7 @@ import { OperatorShells } from './operator-shells.js'
 const actions = new Set(['prepare', 'execute', 'host-connect', 'host-disconnect', 'host-add', 'host-edit', 'host-remove', 'stage2-activate', 'stage2-update', 'stage2-deactivate', 'propose', 'refresh-catalog', 'approve', 'resume', 'rollback', 'reconcile', 'resolve', 'analyze', 'pause', 'abort', 'prepare-remote-recovery', 'execute-remote-recovery', 'run-resume', 'run-pause'])
 for (const action of ['cluster-prepare', 'cluster-execute', 'cluster-pause', 'cluster-abort', 'cluster-prepare-recovery']) actions.add(action)
 actions.add('remediate-security')
+actions.add('remove-artifacts')
 export class OperatorWorkspace {
   constructor ({ controller, hosts, metrics }) {
     this.controller = controller; this.hosts = hosts; this.metrics = metrics; this.pending = new Map(); this.stopping = false
@@ -56,7 +57,7 @@ export class OperatorWorkspace {
     for (const key of ['hostId', 'catalogId']) if (body[key] !== undefined && body[key] !== null && (typeof body[key] !== 'string' || !/^[a-z0-9_-]{1,128}$/u.test(body[key]))) throw new Error(`Invalid ${key}`)
     for (const key of ['taskId', 'runId', 'revisionId', 'retryOfTaskId', 'retryOfRunId']) if (body[key] !== undefined && (!Number.isSafeInteger(body[key]) || body[key] < 1)) throw new Error(`Invalid ${key}`)
     if (body.serverIds !== undefined && (!Array.isArray(body.serverIds) || !body.serverIds.length || body.serverIds.length > 32 || new Set(body.serverIds).size !== body.serverIds.length || body.serverIds.some(id => typeof id !== 'string' || !/^[a-z0-9_-]{1,128}$/u.test(id)))) throw new Error('Select distinct configured hosts')
-    if (['execute', 'resume', 'rollback', 'approve', 'resolve', 'execute-remote-recovery', 'run-resume', 'stage2-activate', 'stage2-update', 'stage2-deactivate', 'host-remove', 'host-edit'].includes(body.action) && body.approved !== true) throw new Error('Explicit approval required')
+    if (['execute', 'resume', 'rollback', 'approve', 'resolve', 'execute-remote-recovery', 'run-resume', 'stage2-activate', 'stage2-update', 'stage2-deactivate', 'host-remove', 'host-edit', 'remove-artifacts'].includes(body.action) && body.approved !== true) throw new Error('Explicit approval required')
     const digest = planFingerprint(body)
     const result = this.controller.database(db => db.transaction(() => {
       const existing = db.prepare('SELECT id,digest,status FROM web_operations WHERE request_key=?').get(body.requestKey)
@@ -120,6 +121,7 @@ export class OperatorWorkspace {
     if (b.action === 'cluster-prepare-recovery') return c.kubernetesTasks.prepareRecovery(b.clusterId, b.executionId)
     const args = [b.hostId, b.taskId, b.expectedVersion]
     if (b.action === 'prepare') return this.prepare(b)
+    if (b.action === 'remove-artifacts') return c.removeArtifacts(...args, b.fingerprint, b.approved)
     if (b.action === 'execute' || b.action === 'resume') return c.resume(...args, b.fingerprint, undefined, b.commandIds)
     if (b.action === 'pause' || b.action === 'abort') return c.control(b.hostId, b.taskId, b.action, b.expectedVersion)
     if (b.action === 'approve') return c.approve(b.hostId, b.taskId, b.revisionId, b.expectedVersion, b.fingerprint)

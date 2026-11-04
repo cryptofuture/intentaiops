@@ -23,6 +23,7 @@ import { startExecutionHeartbeat } from './execution-heartbeat.js'
 import { guardAdminMutations } from './host-mutation-ownership.js'
 import { recordApplicationSecurity } from './software-security.js'
 import { downloadRemoteFile } from './local-file-transfer.js'
+import { taskArtifactPaths, artifactUsageCommand, parseArtifactUsage, artifactRemovalCommand } from './remote-task-artifacts.js'
 
 const REMOTE_RECOVERY_EXECUTION = Symbol('reviewed remote common-task recovery')
 
@@ -353,9 +354,10 @@ export class AdminService {
   }
 
   async execute ({ settings, passphrase, serverId, taskId, plan, approve, onResult, onProgress, beforeCommand, requireRevert = true, executionObserver, recoveryAuthorization }) {
+    if (taskId !== undefined) this.tasks.assertArtifactsAvailable?.(serverId, taskId)
     const server = await this.serverSecrets({ settings, passphrase, serverId })
     const rules = await this.workspace.loadRules(serverId)
-    const download = item => downloadRemoteFile({ ssh: this.ssh, netdata: this.netdata(server), connectionUrl: server.connectionUrl, item })
+    const download = (item, options) => downloadRemoteFile({ ssh: this.ssh, netdata: this.netdata(server), connectionUrl: server.connectionUrl, item, onProgress: options.onProgress })
     if (taskId === undefined) return executeApprovedPlan({ plan, policy: rules.policy, netdata: this.netdata(server), download, approve, onResult, onProgress, requireRevert })
     const recoveryState = this.remoteRecovery.get(settings.servers?.[serverId]?.hostFingerprint, taskId)
     if (recoveryState?.manifest.recoveryId && recoveryAuthorization !== REMOTE_RECOVERY_EXECUTION) throw new Error('Use remote common-task recovery to recheck the source head, baseline and ownership before execution')
@@ -431,6 +433,7 @@ export class AdminService {
   }
 
   async revertTask ({ settings, passphrase, serverId, taskId, reviewedPlan, approve, onResult, onProgress }) {
+    this.tasks.assertArtifactsAvailable?.(serverId, taskId)
     const task = this.tasks.get(serverId, taskId)
     if (task.catalogId === 'intent-ai-ops-windows' && ((reviewedPlan ?? task.plan)?.modifiedFiles ?? []).some(file => path.win32.normalize(file).replace(/[\\/]+$/u, '').toLowerCase() === 'c:\\programdata\\intentaiops')) throw new Error('Legacy Windows CLI rollback targets the recovery ledger parent; prepare a separately reviewed cleanup that preserves Recovery')
     if (!reviewedPlan && (!task.plan || !Array.isArray(task.plan.revertCommands) || task.plan.revertCommands.length === 0)) {
@@ -561,6 +564,52 @@ export class AdminService {
 
   listTasks (serverId, options) {
     return this.tasks.list(serverId, options)
+  }
+
+  async inspectTaskArtifacts ({ settings, passphrase, serverId, taskId }) {
+    const history = this.getTaskRetryHistory(serverId, taskId, { limit: 100 })
+    if (!history.length || history[0].retryOfTaskId) throw new Error('Complete retry history is required for artifact inspection')
+    const server = await this.serverSecrets({ settings, passphrase, serverId })
+    const client = this.netdata(server)
+    const platform = (await client.health()).platform
+    if (!['linux', 'freebsd', 'macos', 'windows'].includes(platform)) throw new Error('Task artifact cleanup requires a supported SSH host; Kubernetes cleanup is not supported')
+    const paths = taskArtifactPaths(history).filter(path => platform === 'windows' ? path.startsWith('C:/') : path.startsWith('/'))
+    let entries = []
+    if (paths.length) {
+      const result = await client.runCommand(artifactUsageCommand(paths, platform), { timeoutSeconds: 60 })
+      if (result.exitCode !== 0 || result.timedOut) throw new Error('Task storage inspection unavailable: unsafe paths, mounts, permissions or unsupported tools')
+      entries = parseArtifactUsage(result.stdout, paths, platform)
+    }
+    return { taskId, platform, entries, totalBytes: entries.reduce((sum, entry) => sum + entry.bytes, 0), sizeKind: platform === 'windows' ? 'logical bytes' : 'allocated bytes', fingerprint: planFingerprint({ platform, entries, plans: history.map(task => [task.id, planFingerprint(task.plan)]) }), warning: 'Permanently deletes these remote task directories, including backup archives and reversal files. Saved rollback/recovery will no longer work. This does not uninstall applications or remove local history. Review whether an application still uses files in these directories.' }
+  }
+
+  async removeTaskArtifacts ({ settings, passphrase, serverId, taskId, fingerprint, approved }) {
+    if (approved !== true) throw new Error('Explicit task artifact removal approval is required')
+    const task = this.tasks.get(serverId, taskId)
+    const history = this.getTaskRetryHistory(serverId, taskId, { limit: 100 })
+    if (history.some(task => ['planning', 'running', 'reverting'].includes(task.status) || [...this.tasks.executionState(serverId, task.id), ...this.tasks.rollbackState(serverId, task.id)].some(command => command.status === 'uncertain'))) throw new Error('Reconcile or finish active/uncertain work before removing task artifacts')
+    const lease = this.tasks.acquireExecution(serverId, taskId, task.plan)
+    const heartbeat = startExecutionHeartbeat(this.tasks, serverId, taskId, lease.owner)
+    try {
+      const snapshot = await this.inspectTaskArtifacts({ settings, passphrase, serverId, taskId })
+      if (snapshot.fingerprint !== fingerprint) throw new Error('Task storage changed; inspect usage and approve the current directories again')
+      if (!snapshot.entries.length) throw new Error('No known remote task directories to remove')
+      heartbeat.check()
+      this.tasks.recordArtifactCleanup(serverId, taskId, snapshot.entries, 'dispatched')
+      this.tasks.appendProgress(serverId, taskId, { type: 'task_artifact_cleanup', message: 'Remote artifact removal dispatched; rollback is disabled until independently reviewed.', entries: snapshot.entries })
+      const server = await this.serverSecrets({ settings, passphrase, serverId })
+      try {
+        const result = await this.netdata(server).runCommand(artifactRemovalCommand(snapshot.entries, snapshot.platform), { timeoutSeconds: 300 })
+        heartbeat.check()
+        if (result.exitCode !== 0 || result.timedOut) throw new Error('Task artifact cleanup failed or was partial; inspect remote directories. No automatic retry was performed')
+        this.tasks.recordArtifactCleanup(serverId, taskId, snapshot.entries, 'removed')
+        this.tasks.appendProgress(serverId, taskId, { type: 'task_artifact_cleanup', message: 'Remote task artifacts removed. Local history retained; saved rollback/recovery is no longer available.' })
+        return { taskId, removed: snapshot.entries.map(entry => entry.path), bytesBefore: snapshot.totalBytes, historyRetained: true, rollbackAvailable: false }
+      } catch (error) {
+        this.tasks.recordArtifactCleanup(serverId, taskId, snapshot.entries, 'unknown')
+        throw error
+      }
+    } finally { heartbeat.stop(); this.tasks.releaseExecution(serverId, taskId, lease.owner) }
   }
 
   getTask (serverId, taskId) {

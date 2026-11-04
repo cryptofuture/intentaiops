@@ -1,5 +1,5 @@
 import { constants, createReadStream } from 'node:fs'
-import { chmod, link, lstat, mkdtemp, open, realpath, rm } from 'node:fs/promises'
+import { chmod, link, lstat, mkdtemp, open, realpath, rm, stat } from 'node:fs/promises'
 import { createHash, randomBytes } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
@@ -41,7 +41,7 @@ identity() {
 }`
 }
 
-export async function downloadRemoteFile ({ ssh, netdata, connectionUrl, item }) {
+export async function downloadRemoteFile ({ ssh, netdata, connectionUrl, item, onProgress = async _event => {} }) {
   const transfer = validateFileTransfer(item.fileTransfer)
   const parent = path.dirname(transfer.localPath)
   if (await realpath(parent) !== parent) throw new Error('Local download directory must not contain symlinks')
@@ -80,7 +80,21 @@ printf 'WEBMINAI_TRANSFER %s %s\\n' "$hash" "$before"`, { timeoutSeconds: Math.c
     const [, expectedHash, expectedIdentity] = match
     localDirectory = await mkdtemp(path.join(parent, '.intentaiops-download-'))
     const temporary = path.join(localDirectory, 'payload')
-    await ssh.download(connectionUrl, payload, temporary, { timeoutMs: item.timeoutMs })
+    const totalBytes = Number(expectedIdentity.split(':')[2])
+    if (!Number.isSafeInteger(totalBytes) || totalBytes < 0) throw new Error('Invalid source size; source preserved')
+    const report = async (phase, localBytes) => {
+      const percent = totalBytes ? Math.min(100, Math.floor(localBytes / totalBytes * 100)) : phase === 'verified' ? 100 : 0
+      return onProgress({ type: 'transfer_progress', phase, commandId: item.id, localBytes, totalBytes, percent, message: `${phase === 'download' ? 'SCP local file' : phase === 'verify' ? 'Verifying SHA-256' : 'Local file verified'}: ${percent}% (${localBytes.toLocaleString('en-US')} / ${totalBytes.toLocaleString('en-US')} bytes)${phase === 'download' ? ' (checksum pending)' : ''}` })
+    }
+    await report('download', 0)
+    let pending; let progressError
+    const timer = setInterval(() => {
+      if (pending) return
+      pending = stat(temporary).then(info => report('download', info.size)).catch(error => { if (error.code !== 'ENOENT') progressError = error }).finally(() => { pending = null })
+    }, 1000)
+    try { await ssh.download(connectionUrl, payload, temporary, { timeoutMs: item.timeoutMs }) } finally { clearInterval(timer); await pending }
+    if (progressError) throw progressError
+    await report('verify', (await stat(temporary)).size)
     const file = await open(temporary, constants.O_RDONLY | constants.O_NOFOLLOW)
     try {
       if (!(await file.stat()).isFile()) throw new Error('Downloaded payload is not a regular file')
@@ -95,6 +109,7 @@ printf 'WEBMINAI_TRANSFER %s %s\\n' "$hash" "$before"`, { timeoutSeconds: Math.c
       const handle = await open(parent, 'r')
       try { await handle.sync() } finally { await handle.close() }
     }
+    await report('verified', totalBytes)
     staged = false
     const cleaned = await cleanup()
     if (cleaned.exitCode !== 0 || cleaned.timedOut) throw new Error(`Local file saved, but remote staging cleanup was not confirmed at ${directory}; source preserved`)
