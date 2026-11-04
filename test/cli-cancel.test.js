@@ -8,9 +8,49 @@ test('elevation reuses a verified SSH password and falls back to the normal prom
   let probes = 0
   const saved = async () => { probes++; return 'verified password' }
   assert.deepEqual(await chooseElevation(ui, { hasSudo: true }, saved), { elevation: 'sudo-password', sudoPassword: 'verified password' })
-  assert.deepEqual(await chooseElevation(ui, { hasSudo: true }, async () => null), { elevation: 'sudo-password', sudoPassword: 'different sudo password' })
+  assert.deepEqual(await chooseElevation(ui, { hasSudo: true }, async password => password ?? null), { elevation: 'sudo-password', sudoPassword: 'different sudo password' })
   for (const capabilities of [{ isRoot: true }, { hasPasswordlessSudo: true }, { hasPasswordlessDoas: true }, { platform: { os: 'windows' }, isAdministrator: true }]) await chooseElevation(ui, capabilities, saved)
   assert.equal(probes, 1)
+})
+
+test('elevation validates and saves entered passwords, reprompting only after rejection', async () => {
+  const ui = quietUi({ secrets: ['wrong', 'right'] })
+  ui.warn = () => {}
+  const candidates = []
+  const elevation = await chooseElevation(ui, { hasSudo: true }, async password => {
+    candidates.push(password)
+    return password === 'right' ? password : null
+  })
+  assert.deepEqual(candidates, [undefined, 'wrong', 'right'])
+  assert.deepEqual(elevation, { elevation: 'sudo-password', sudoPassword: 'right' })
+})
+
+test('Netdata claiming reuses the saved host sudo password without an elevation prompt', async () => {
+  const ui = quietUi({ answers: ['https://app.netdata.cloud'], confirm: true })
+  const prompts = []
+  ui.secret = async label => {
+    prompts.push(label)
+    return prompts.length === 1 ? '' : prompts.length === 2 ? 'a'.repeat(48) : ''
+  }
+  ui.ask = async label => label.startsWith('Claim URL') ? 'https://app.netdata.cloud' : '11111111-2222-3333-4444-555555555555'
+  let claimed = false
+  await claimNetdataCloud({
+    ui,
+    settings: {},
+    passphrase: 'vault',
+    serverId: 'host',
+    status: { capabilities: { hasNetdata: true, hasSudo: true }, cloud: { claimed: false } },
+    admin: {
+      savedSudoPassword: async () => 'saved sudo password',
+      claimNetdataCloud: async args => {
+        claimed = true
+        assert.equal(args.sudoPassword, 'saved sudo password')
+        return { cloud: { status: 'online' } }
+      }
+    }
+  })
+  assert.equal(claimed, true)
+  assert.ok(!prompts.includes('Sudo password'))
 })
 
 test('vault unlock retries only authentication failures and retains the final cause', async () => {

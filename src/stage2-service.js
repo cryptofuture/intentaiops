@@ -366,12 +366,19 @@ export class Stage2Service {
     return parseInstallerResult(result.stdout)
   }
 
-  async savedSudoPassword ({ connectionUrl, authentication, sshCredential }) {
-    if (authentication !== 'password' || typeof sshCredential !== 'string' || !sshCredential || /[\0\r\n]/u.test(sshCredential)) return null
-    try {
-      const result = await this.ssh.execute(connectionUrl, "sudo -k -S -p '' -v", { input: `${sshCredential}\n`, timeoutMs: 15000 })
-      return result.code === 0 ? sshCredential : null
-    } catch { return null }
+  async savedSudoPassword ({ connectionUrl, authentication, sshCredential, sudoPassword }, candidate) {
+    const candidates = candidate === undefined ? [sudoPassword, authentication !== 'key' ? sshCredential : null] : [candidate]
+    for (const password of new Set(candidates)) {
+      if (typeof password !== 'string' || !password || /[\0\r\n]/u.test(password)) continue
+      try {
+        const result = await this.ssh.execute(connectionUrl, "LC_ALL=C sudo -k -S -p '' -v", { input: `${password}\n`, timeoutMs: 15000 })
+        if (result.code === 0) return password
+        if (!sudoAuthenticationRejected({ result })) throw new Error('Unable to verify sudo authentication')
+      } catch (error) {
+        if (!sudoAuthenticationRejected(error)) throw new Error('Unable to verify sudo authentication; check the SSH connection and sudo policy')
+      }
+    }
+    return null
   }
 
   async capabilities ({ connectionUrl, platformHint }) {
@@ -560,6 +567,10 @@ export class Stage2Service {
   trace (phase, message) {
     if (this.debug) this.onDebug({ phase, message })
   }
+}
+
+export function sudoAuthenticationRejected (error) {
+  return error?.result?.code === 1 && /(?:Sorry, try again\.|sudo: (?:\d+ incorrect password attempts?|no password was provided|a password is required|authentication failure))/u.test(error.result.stderr ?? '')
 }
 
 function delay (milliseconds) {

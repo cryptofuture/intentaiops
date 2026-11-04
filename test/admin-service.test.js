@@ -8,23 +8,25 @@ test('sudo reuse remembers successful verification and clears it after rejection
   const context = {
     serverSecrets: async () => ({ sshCredential: 'saved password' }),
     stage2: { savedSudoPassword: async () => password },
-    settings: { setServerSudoMatchesSsh: async args => updates.push(args) }
+    settings: { setServerSudoCredential: async args => updates.push(args) }
   }
   const args = { settings: {}, passphrase: 'vault', serverId: 'host' }
   assert.equal(await AdminService.prototype.savedSudoPassword.call(context, args), password)
   password = null
   assert.equal(await AdminService.prototype.savedSudoPassword.call(context, args), null)
-  assert.deepEqual(updates.map(update => update.matches), [true, null])
+  assert.deepEqual(updates.map(update => update.sudoPassword), ['saved password', null])
   assert.ok(updates.every(update => update.serverId === 'host' && update.sshCredential === 'saved password'))
 })
 
 test('failed lifecycle operations invalidate matching sudo reuse without replay', async () => {
   let resets = 0; let attempts = 0
-  const context = { settings: { setServerSudoMatchesSsh: async args => { assert.equal(args.matches, null); resets++ } } }
+  const context = { settings: { setServerSudoCredential: async args => { assert.equal(args.sudoPassword, null); resets++ } } }
   const args = { settings: {}, passphrase: 'vault', serverId: 'host', server: { sudoMatchesSsh: true, sshCredential: 'password' }, elevation: 'sudo-password', sudoPassword: 'password' }
-  const failure = new Error('remote operation failed')
+  const failure = Object.assign(new Error('remote operation failed'), { result: { code: 1, stderr: 'sudo: 1 incorrect password attempt' } })
   await assert.rejects(AdminService.prototype.runElevatedLifecycle.call(context, args, async () => { attempts++; throw failure }), error => error === failure)
   assert.equal(attempts, 1)
+  assert.equal(resets, 1)
+  await assert.rejects(AdminService.prototype.runElevatedLifecycle.call(context, args, async () => { throw new Error('download failed') }), /download failed/u)
   assert.equal(resets, 1)
   assert.equal(await AdminService.prototype.runElevatedLifecycle.call(context, args, async () => 'ok'), 'ok')
   assert.equal(resets, 1)

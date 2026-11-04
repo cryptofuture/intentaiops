@@ -8,7 +8,7 @@ import { executeApprovedPlan, validateCommandPlan } from './plan-validator.js'
 import { LinuxHostContextService } from './linux-host-context.js'
 import { ServerWorkspace } from './server-workspace.js'
 import { SettingsStore } from './settings-store.js'
-import { Stage2Service } from './stage2-service.js'
+import { Stage2Service, sudoAuthenticationRejected } from './stage2-service.js'
 import { SystemSsh } from './system-ssh.js'
 import { TaskStore } from './task-store.js'
 import { planFingerprint } from './execution-journal.js'
@@ -130,19 +130,19 @@ export class AdminService {
 
   async runElevatedLifecycle ({ settings, passphrase, serverId, server, elevation, sudoPassword }, operation) {
     try { return await operation() } catch (error) {
-      if (elevation === 'sudo-password' && server.sudoMatchesSsh && sudoPassword === server.sshCredential) {
+      if (elevation === 'sudo-password' && sudoAuthenticationRejected(error)) {
         try {
-          await this.settings.setServerSudoMatchesSsh({ settings, passphrase, serverId, sshCredential: server.sshCredential, matches: null })
+          await this.settings.setServerSudoCredential({ settings, passphrase, serverId, sshCredential: server.sshCredential, sudoPassword: null })
         } catch (resetError) { throw new AggregateError([error, resetError], 'Operation failed and sudo reuse status could not be reset') }
       }
       throw error
     }
   }
 
-  async savedSudoPassword ({ settings, passphrase, serverId }) {
+  async savedSudoPassword ({ settings, passphrase, serverId }, candidate) {
     const server = await this.serverSecrets({ settings, passphrase, serverId })
-    const password = await this.stage2.savedSudoPassword(server)
-    await this.settings.setServerSudoMatchesSsh({ settings, passphrase, serverId, sshCredential: server.sshCredential, matches: password ? true : null })
+    const password = await this.stage2.savedSudoPassword(server, candidate)
+    await this.settings.setServerSudoCredential({ settings, passphrase, serverId, sshCredential: server.sshCredential, sudoPassword: password })
     return password
   }
 

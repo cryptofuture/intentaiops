@@ -313,17 +313,18 @@ export class SettingsStore {
     await this.save(settings)
   }
 
-  async setServerSudoMatchesSsh ({ settings, passphrase, serverId, sshCredential, matches }) {
+  async setServerSudoCredential ({ settings, passphrase, serverId, sshCredential, sudoPassword }) {
     validateServerId(serverId)
-    if (matches !== true && matches !== null) throw new TypeError('sudo match must be confirmed or unknown')
+    if (sudoPassword !== null && (typeof sudoPassword !== 'string' || !sudoPassword || /[\0\r\n]/u.test(sudoPassword))) throw new TypeError('a single-line sudo password is required')
     const server = settings.servers[serverId]
     if (!server) throw new Error(`unknown server: ${serverId}`)
     const key = await deriveVaultKey(passphrase, settings.kdf)
     try {
       const decrypted = decryptJson(key, serverId, server.secret)
       if (decrypted.sshCredential !== sshCredential) throw new Error('SSH credential changed during sudo verification')
-      if ((decrypted.sudoMatchesSsh ?? null) === matches) return
-      server.secret = encryptJson(key, serverId, { ...decrypted, sudoMatchesSsh: matches })
+      const matches = sudoPassword !== null && sudoPassword === decrypted.sshCredential ? true : null
+      if ((decrypted.sudoPassword ?? null) === sudoPassword && (decrypted.sudoMatchesSsh ?? null) === matches) return
+      server.secret = encryptJson(key, serverId, { ...decrypted, sudoPassword, sudoMatchesSsh: matches })
     } finally {
       key.fill(0)
     }

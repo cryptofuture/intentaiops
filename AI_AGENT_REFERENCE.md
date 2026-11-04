@@ -464,7 +464,7 @@ Up/Down select | Enter open | Esc disconnect
 If the SSH account is root, no sudo prompt is needed. With passwordless sudo, activation proceeds automatically. Otherwise Intent AI Ops asks for the sudo password with hidden input:
 
 ```text
-› This account needs a sudo password for host changes. It is used once and never saved.
+› Enter the sudo password for this host. It will be verified and saved encrypted in your vault. Leave it blank to cancel.
 Sudo password: ••••••••••••
 Install/activate Netdata and the Intent AI Ops plugin? [Y/n]: y
 › Activating Stage 2 and verifying its Netdata function API...

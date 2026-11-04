@@ -10,14 +10,38 @@ test('saved SSH passwords are checked once over stdin without logging or command
   const service = new Stage2Service({ ssh: { async execute (...args) { calls.push(args); return { code: 0 } } } })
   const server = { connectionUrl: 'ssh://host.example', authentication: 'password', sshCredential: 'saved secret' }
   assert.equal(await service.savedSudoPassword(server), 'saved secret')
-  assert.deepEqual(calls, [[server.connectionUrl, "sudo -k -S -p '' -v", { input: 'saved secret\n', timeoutMs: 15000 }]])
-  for (const authentication of ['key', 'auto', undefined]) assert.equal(await service.savedSudoPassword({ ...server, authentication }), null)
+  assert.deepEqual(calls, [[server.connectionUrl, "LC_ALL=C sudo -k -S -p '' -v", { input: 'saved secret\n', timeoutMs: 15000 }]])
+  assert.equal(await service.savedSudoPassword({ ...server, authentication: 'key' }), null)
   for (const sshCredential of ['', null, 'bad\npassword']) assert.equal(await service.savedSudoPassword({ ...server, sshCredential }), null)
   assert.equal(calls.length, 1)
-  service.ssh.execute = async () => ({ code: 1 })
+  assert.equal(await service.savedSudoPassword({ ...server, authentication: 'auto' }), 'saved secret')
+  service.ssh.execute = async () => ({ code: 1, stderr: 'sudo: 1 incorrect password attempt' })
   assert.equal(await service.savedSudoPassword(server), null)
   service.ssh.execute = async () => { throw new Error('denied or disconnected') }
-  assert.equal(await service.savedSudoPassword(server), null)
+  await assert.rejects(service.savedSudoPassword(server), /check the SSH connection/u)
+})
+
+test('sudo verification prefers a saved sudo password and never repeats a rejected candidate', async () => {
+  const inputs = []
+  const service = new Stage2Service({
+    ssh: {
+      async execute (_url, _command, options) {
+        inputs.push(options.input)
+        if (options.input === 'right\n') return { code: 0 }
+        throw Object.assign(new Error('SSH command failed'), { result: { code: 1, stderr: 'Sorry, try again.\nsudo: no password was provided' } })
+      }
+    }
+  })
+  const server = { connectionUrl: 'ssh://host', authentication: 'auto', sshCredential: 'right', sudoPassword: 'wrong' }
+  assert.equal(await service.savedSudoPassword(server), 'right')
+  assert.deepEqual(inputs, ['wrong\n', 'right\n'])
+  inputs.length = 0
+  assert.equal(await service.savedSudoPassword({ ...server, sshCredential: 'wrong' }), null)
+  assert.deepEqual(inputs, ['wrong\n'])
+  inputs.length = 0
+  assert.equal(await service.savedSudoPassword(server, 'wrong'), null)
+  assert.deepEqual(inputs, ['wrong\n'])
+  assert.equal(await service.savedSudoPassword({ ...server, authentication: 'key', sudoPassword: 'right' }), 'right')
 })
 
 test('stage 2 rejects invalid readiness polling configuration', () => {
