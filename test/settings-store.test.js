@@ -12,6 +12,25 @@ import { TaskStore } from '../src/task-store.js'
 
 const PASSPHRASE = 'correct horse battery staple'
 
+test('sudo password match is encrypted, survives reload, and resets with SSH credential changes', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-sudo-settings-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new SettingsStore(root)
+  const settings = await store.initialize()
+  const args = { settings, passphrase: PASSPHRASE, serverId: 'host' }
+  await store.addServer({ ...args, connectionUrl: 'ssh://host.example', authentication: 'password', sshCredential: 'secret', hostFingerprint: `SHA256:${'a'.repeat(64)}` })
+  await store.setServerSudoMatchesSsh({ ...args, sshCredential: 'secret', matches: true })
+  assert.equal((await store.decryptServer({ ...args, settings: await store.load() })).sudoMatchesSsh, true)
+  assert.ok(!(await readFile(store.settingsPath, 'utf8')).includes('sudoMatchesSsh'))
+  await store.setServerSudoMatchesSsh({ ...args, sshCredential: 'secret', matches: null })
+  assert.equal((await store.decryptServer(args)).sudoMatchesSsh, null)
+  await store.setServerSudoMatchesSsh({ ...args, sshCredential: 'secret', matches: true })
+  await store.setServerSshCredential({ ...args, sshCredential: 'replacement' })
+  assert.equal((await store.decryptServer(args)).sudoMatchesSsh, null)
+  await assert.rejects(store.setServerSudoMatchesSsh({ ...args, sshCredential: 'secret', matches: true }), /credential changed/u)
+  await assert.rejects(store.setServerSudoMatchesSsh({ ...args, sshCredential: 'replacement', matches: 'yes' }), /confirmed or unknown/u)
+})
+
 test('concurrent host refreshes sharing settings do not conflict or lose either history', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'intent-settings-shared-'))
   t.after(() => rm(root, { recursive: true, force: true }))

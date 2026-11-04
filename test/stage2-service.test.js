@@ -5,6 +5,21 @@ import path from 'node:path'
 import test from 'node:test'
 import { Stage2Service } from '../src/stage2-service.js'
 
+test('saved SSH passwords are checked once over stdin without logging or command interpolation', async () => {
+  const calls = []
+  const service = new Stage2Service({ ssh: { async execute (...args) { calls.push(args); return { code: 0 } } } })
+  const server = { connectionUrl: 'ssh://host.example', authentication: 'password', sshCredential: 'saved secret' }
+  assert.equal(await service.savedSudoPassword(server), 'saved secret')
+  assert.deepEqual(calls, [[server.connectionUrl, "sudo -k -S -p '' -v", { input: 'saved secret\n', timeoutMs: 15000 }]])
+  for (const authentication of ['key', 'auto', undefined]) assert.equal(await service.savedSudoPassword({ ...server, authentication }), null)
+  for (const sshCredential of ['', null, 'bad\npassword']) assert.equal(await service.savedSudoPassword({ ...server, sshCredential }), null)
+  assert.equal(calls.length, 1)
+  service.ssh.execute = async () => ({ code: 1 })
+  assert.equal(await service.savedSudoPassword(server), null)
+  service.ssh.execute = async () => { throw new Error('denied or disconnected') }
+  assert.equal(await service.savedSudoPassword(server), null)
+})
+
 test('stage 2 rejects invalid readiness polling configuration', () => {
   for (const readinessAttempts of [0, -1, 1.5, NaN, Infinity, -Infinity]) {
     assert.throws(

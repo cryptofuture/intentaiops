@@ -306,7 +306,24 @@ export class SettingsStore {
     const key = await deriveVaultKey(passphrase, settings.kdf)
     try {
       const decrypted = decryptJson(key, serverId, server.secret)
-      server.secret = encryptJson(key, serverId, { ...decrypted, sshCredential })
+      server.secret = encryptJson(key, serverId, { ...decrypted, sshCredential, sudoMatchesSsh: null })
+    } finally {
+      key.fill(0)
+    }
+    await this.save(settings)
+  }
+
+  async setServerSudoMatchesSsh ({ settings, passphrase, serverId, sshCredential, matches }) {
+    validateServerId(serverId)
+    if (matches !== true && matches !== null) throw new TypeError('sudo match must be confirmed or unknown')
+    const server = settings.servers[serverId]
+    if (!server) throw new Error(`unknown server: ${serverId}`)
+    const key = await deriveVaultKey(passphrase, settings.kdf)
+    try {
+      const decrypted = decryptJson(key, serverId, server.secret)
+      if (decrypted.sshCredential !== sshCredential) throw new Error('SSH credential changed during sudo verification')
+      if ((decrypted.sudoMatchesSsh ?? null) === matches) return
+      server.secret = encryptJson(key, serverId, { ...decrypted, sudoMatchesSsh: matches })
     } finally {
       key.fill(0)
     }

@@ -81,7 +81,7 @@ export class AdminService {
 
   async activate ({ settings, passphrase, serverId, elevation, sudoPassword, installNetdata = true }) {
     const server = await this.serverSecrets({ settings, passphrase, serverId })
-    const result = await this.stage2.activate({ ...server, elevation, sudoPassword, installNetdata })
+    const result = await this.runElevatedLifecycle({ settings, passphrase, serverId, server, elevation, sudoPassword }, () => this.stage2.activate({ ...server, elevation, sudoPassword, installNetdata }))
     await this.settings.setStage2State({
       settings,
       serverId,
@@ -101,12 +101,12 @@ export class AdminService {
     sudoPassword
   }) {
     const server = await this.serverSecrets({ settings, passphrase, serverId })
-    const result = await this.stage2.deactivate({
+    const result = await this.runElevatedLifecycle({ settings, passphrase, serverId, server, elevation, sudoPassword }, () => this.stage2.deactivate({
       ...server,
       removeManagedNetdata,
       elevation,
       sudoPassword
-    })
+    }))
     await this.settings.setStage2State({
       settings,
       serverId,
@@ -118,14 +118,32 @@ export class AdminService {
 
   async claimNetdataCloud ({ settings, passphrase, serverId, claimToken, claimUrl, roomIds, elevation, sudoPassword }) {
     const server = await this.serverSecrets({ settings, passphrase, serverId })
-    return this.stage2.claim({
+    return this.runElevatedLifecycle({ settings, passphrase, serverId, server, elevation, sudoPassword }, () => this.stage2.claim({
       connectionUrl: server.connectionUrl,
       claimToken,
       claimUrl,
       roomIds,
       elevation,
       sudoPassword
-    })
+    }))
+  }
+
+  async runElevatedLifecycle ({ settings, passphrase, serverId, server, elevation, sudoPassword }, operation) {
+    try { return await operation() } catch (error) {
+      if (elevation === 'sudo-password' && server.sudoMatchesSsh && sudoPassword === server.sshCredential) {
+        try {
+          await this.settings.setServerSudoMatchesSsh({ settings, passphrase, serverId, sshCredential: server.sshCredential, matches: null })
+        } catch (resetError) { throw new AggregateError([error, resetError], 'Operation failed and sudo reuse status could not be reset') }
+      }
+      throw error
+    }
+  }
+
+  async savedSudoPassword ({ settings, passphrase, serverId }) {
+    const server = await this.serverSecrets({ settings, passphrase, serverId })
+    const password = await this.stage2.savedSudoPassword(server)
+    await this.settings.setServerSudoMatchesSsh({ settings, passphrase, serverId, sshCredential: server.sshCredential, matches: password ? true : null })
+    return password
   }
 
   async capabilities ({ settings, passphrase, serverId }) {

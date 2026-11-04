@@ -2,6 +2,34 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AdminService } from '../src/admin-service.js'
 
+test('sudo reuse remembers successful verification and clears it after rejection', async () => {
+  const updates = []
+  let password = 'saved password'
+  const context = {
+    serverSecrets: async () => ({ sshCredential: 'saved password' }),
+    stage2: { savedSudoPassword: async () => password },
+    settings: { setServerSudoMatchesSsh: async args => updates.push(args) }
+  }
+  const args = { settings: {}, passphrase: 'vault', serverId: 'host' }
+  assert.equal(await AdminService.prototype.savedSudoPassword.call(context, args), password)
+  password = null
+  assert.equal(await AdminService.prototype.savedSudoPassword.call(context, args), null)
+  assert.deepEqual(updates.map(update => update.matches), [true, null])
+  assert.ok(updates.every(update => update.serverId === 'host' && update.sshCredential === 'saved password'))
+})
+
+test('failed lifecycle operations invalidate matching sudo reuse without replay', async () => {
+  let resets = 0; let attempts = 0
+  const context = { settings: { setServerSudoMatchesSsh: async args => { assert.equal(args.matches, null); resets++ } } }
+  const args = { settings: {}, passphrase: 'vault', serverId: 'host', server: { sudoMatchesSsh: true, sshCredential: 'password' }, elevation: 'sudo-password', sudoPassword: 'password' }
+  const failure = new Error('remote operation failed')
+  await assert.rejects(AdminService.prototype.runElevatedLifecycle.call(context, args, async () => { attempts++; throw failure }), error => error === failure)
+  assert.equal(attempts, 1)
+  assert.equal(resets, 1)
+  assert.equal(await AdminService.prototype.runElevatedLifecycle.call(context, args, async () => 'ok'), 'ok')
+  assert.equal(resets, 1)
+})
+
 test('legacy Windows CLI rollback cannot delete the recovery parent', async () => {
   for (const root of ['C:\\ProgramData\\IntentAIOps', 'c:/programdata/intentaiops/']) {
     let remote = false

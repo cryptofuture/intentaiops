@@ -144,7 +144,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
   let selectedHostId = null
 
   if (cliOptions.console) {
-    const hosts = new OperatorHosts({ factory: hostSessions, settingsStore, workspace, settings, tasks: taskStore, passphrase, credential: capabilities => chooseElevation(ui, capabilities), notify: event => controller?.record(event) })
+    const hosts = new OperatorHosts({ factory: hostSessions, settingsStore, workspace, settings, tasks: taskStore, passphrase, credential: (capabilities, savedPassword) => chooseElevation(ui, capabilities, savedPassword), notify: event => controller?.record(event) })
     const controller = new OperatorController({
       dataRoot,
       settings,
@@ -1043,7 +1043,12 @@ async function updatePluginFleet ({ context, serverIds, debug }) {
           const observed = await stage2.probe(server)
           if (observed.status === 'active') currentVersion = observed.health.version ?? null
         }
-        const elevation = await chooseElevation(ui, capabilities)
+        const elevation = await chooseElevation(ui, capabilities, async () => {
+          const password = await stage2.savedSudoPassword(server)
+          await settingsStore.setServerSudoMatchesSsh({ settings, passphrase, serverId, sshCredential: server.sshCredential, matches: password ? true : null })
+          server.sudoMatchesSsh = password ? true : null
+          return password
+        })
         if (!elevation) continue
         const state = currentVersion === PLUGIN_VERSION
           ? `v${currentVersion} (current)`
@@ -1079,6 +1084,9 @@ async function updatePluginFleet ({ context, serverIds, debug }) {
         ui.success(`[${entry.serverId}] ${pluginActionLabel(result)}; Netdata preserved.`)
         return { ...entry, result }
       } catch (error) {
+        if (entry.server.sudoMatchesSsh && entry.elevation.elevation === 'sudo-password') {
+          await settingsStore.setServerSudoMatchesSsh({ settings, passphrase, serverId: entry.serverId, sshCredential: entry.server.sshCredential, matches: null })
+        }
         renderOperationError(ui, `[${entry.serverId}] Plugin update failed`, error, debug)
         return { ...entry, error }
       } finally {
@@ -1847,7 +1855,7 @@ export async function claimNetdataCloud ({ ui, admin, settings, passphrase, serv
   ui.line('Room IDs', details.roomIds)
   ui.line('Claim token', 'provided (hidden)')
   if (status.cloud.claimed) ui.warn(`This Agent is already connected with status ${status.cloud.status}; claiming will replace claim.conf.`)
-  const elevation = await chooseElevation(ui, status.capabilities)
+  const elevation = await chooseElevation(ui, status.capabilities, () => admin.savedSudoPassword({ settings, passphrase, serverId }))
   if (!elevation) return
   if (!await ui.confirm(`Connect ${serverId} to Netdata Cloud using these details?`, false)) return
   try {
@@ -1886,7 +1894,7 @@ async function activate ({
     await ui.pause()
     return
   }
-  const elevation = await chooseElevation(ui, capabilities)
+  const elevation = await chooseElevation(ui, capabilities, () => admin.savedSudoPassword({ settings, passphrase, serverId }))
   if (!elevation) return
   const description = installNetdata
     ? `Install/activate Netdata and the ${PRODUCT_NAME} plugin?`
@@ -1912,7 +1920,7 @@ async function deactivate ({
   removeManagedNetdata,
   debug
 }) {
-  const elevation = await chooseElevation(ui, capabilities)
+  const elevation = await chooseElevation(ui, capabilities, () => admin.savedSudoPassword({ settings, passphrase, serverId }))
   if (!elevation) return
   const description = removeManagedNetdata
     ? `Remove the plugin and Netdata only if ${PRODUCT_NAME} installed Netdata?`
@@ -1933,7 +1941,7 @@ async function deactivate ({
   await ui.pause()
 }
 
-export async function chooseElevation (ui, capabilities) {
+export async function chooseElevation (ui, capabilities, savedPassword = async () => null) {
   if (capabilities.platform?.os === 'windows' && capabilities.isAdministrator) {
     return { elevation: 'windows-admin' }
   }
@@ -1941,6 +1949,8 @@ export async function chooseElevation (ui, capabilities) {
   if (capabilities.hasPasswordlessSudo) return { elevation: 'sudo-n' }
   if (capabilities.hasPasswordlessDoas) return { elevation: 'doas-n' }
   if (capabilities.hasSudo) {
+    const saved = await savedPassword()
+    if (saved) return { elevation: 'sudo-password', sudoPassword: saved }
     ui.info('This account needs a sudo password for host changes. It is used once and never saved. Leave it blank to cancel.')
     const sudoPassword = await ui.secret('Sudo password')
     if (!sudoPassword) return null

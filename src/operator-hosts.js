@@ -101,7 +101,7 @@ export class OperatorHosts {
         return await this.terminal(hostId, async () => {
           const args = { settings: this.settings, passphrase: this.passphrase, serverId: hostId }
           const capabilities = await lease.admin.capabilities(args)
-          const elevation = await this.credential(capabilities)
+          const elevation = await this.credential(capabilities, () => lease.admin.savedSudoPassword(args))
           if (!elevation) throw new Error('Operator cancelled elevation')
           this.checkVersion(body)
           const result = body.action === 'stage2-deactivate' ? await lease.admin.deactivate({ ...args, ...elevation }) : await lease.admin.activate({ ...args, ...elevation, installNetdata: body.action === 'stage2-activate' })

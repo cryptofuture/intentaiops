@@ -3,6 +3,16 @@ import test from 'node:test'
 import { addHost, addKubernetesCluster, changeVaultPassphrase, chooseElevation, claimNetdataCloud, redactHealthText, unlock } from '../src/cli.js'
 import { VaultAuthenticationError } from '../src/crypto-vault.js'
 
+test('elevation reuses a verified SSH password and falls back to the normal prompt', async () => {
+  const ui = quietUi({ secrets: ['different sudo password'] })
+  let probes = 0
+  const saved = async () => { probes++; return 'verified password' }
+  assert.deepEqual(await chooseElevation(ui, { hasSudo: true }, saved), { elevation: 'sudo-password', sudoPassword: 'verified password' })
+  assert.deepEqual(await chooseElevation(ui, { hasSudo: true }, async () => null), { elevation: 'sudo-password', sudoPassword: 'different sudo password' })
+  for (const capabilities of [{ isRoot: true }, { hasPasswordlessSudo: true }, { hasPasswordlessDoas: true }, { platform: { os: 'windows' }, isAdministrator: true }]) await chooseElevation(ui, capabilities, saved)
+  assert.equal(probes, 1)
+})
+
 test('vault unlock retries only authentication failures and retains the final cause', async () => {
   const errors = []
   const ui = quietUi({ secrets: ['wrong passphrase one', 'wrong passphrase two', 'wrong passphrase three'] })

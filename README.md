@@ -227,7 +227,7 @@ If another CLI or console saves settings, a stale instance will ask you to resta
 ## SSH and secret protection
 
 - **Codex runs locally.** Intent AI Ops uses your signed-in Codex CLI directly, so it needs no separate OpenAI API key.
-- **Secrets stay protected.** SSH connections and saved credentials are encrypted in a strong local vault. Saving an SSH password or key passphrase is optional and disabled by default. One-time sudo passwords are never saved.
+- **Secrets stay protected.** SSH connections and saved credentials are encrypted in a strong local vault. Saving an SSH password or key passphrase is optional and disabled by default. For password-authenticated hosts, Intent AI Ops checks the saved SSH password once for sudo before asking you. Rejected passwords fall back to the normal prompt; key passphrases and automatic-authentication credentials are not tried. One-time sudo passwords are never saved.
 - **AI receives no secrets.** Sensitive values are removed from inventory, diagnostics, logs, and task history before context reaches Codex. The AI never receives your vault, SSH credentials, connection strings, private keys, tokens, or generated application passwords.
 
 Intent AI Ops uses the system OpenSSH client. Temporary hosts disappear when Intent AI Ops exits, while their task history can be safely reattached if the same machine is added again.

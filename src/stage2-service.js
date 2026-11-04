@@ -366,6 +366,14 @@ export class Stage2Service {
     return parseInstallerResult(result.stdout)
   }
 
+  async savedSudoPassword ({ connectionUrl, authentication, sshCredential }) {
+    if (authentication !== 'password' || typeof sshCredential !== 'string' || !sshCredential || /[\0\r\n]/u.test(sshCredential)) return null
+    try {
+      const result = await this.ssh.execute(connectionUrl, "sudo -k -S -p '' -v", { input: `${sshCredential}\n`, timeoutMs: 15000 })
+      return result.code === 0 ? sshCredential : null
+    } catch { return null }
+  }
+
   async capabilities ({ connectionUrl, platformHint }) {
     let result
     if (platformHint === 'windows') {
