@@ -224,6 +224,8 @@ The dashboard also lets you set one global administrator email. Verified applica
 
 The default is **`gpt-6.1-sol` with `low` reasoning**. Choose **Set Codex model** on the dashboard to load your installed Codex CLI's model catalog, including hidden entries, and select from that model's supported reasoning levels. Catalog presence does not guarantee account access or provider capacity. `mimo-v2.6-pro` also supports selection with `low`, `medium`, or `high` through your configured local `mimo` profile; its responses are validated against the JSON schema locally. Settings are saved for subsequent tasks; existing saved selections are preserved. If discovery fails, settings remain unchanged. Model discovery requires a Codex version supporting `codex debug models`.
 
+Each planning, routing or consultation request allows up to 15 minutes for third-party model IDs such as MiMo, and five minutes for OpenAI-style `gpt-`, `o1`-style and `codex` model IDs. This is a bounded local wait, not a remote command timeout. Provider-side limits can still end a request earlier; timed-out responses are not accepted or automatically retried.
+
 Choose **Controls** to configure wrapping menu navigation, optional `j`/`k` navigation, number shortcuts, shortcut hints, and automatic/color/monochrome output. These preferences are also saved in `settings.json`.
 
 If another CLI or console saves settings, a stale instance will ask you to restart instead of overwriting those changes. Restart all running instances after upgrading to this protection. Existing vaults and host configurations remain compatible.

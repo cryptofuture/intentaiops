@@ -15,6 +15,28 @@ class CodexPlanner extends ProductionCodexPlanner {
   }
 }
 
+test('third-party planners get fifteen minutes without changing OpenAI deadlines or retrying timed-out requests', async t => {
+  const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-timeout-'))
+  t.after(() => rm(serverDirectory, { recursive: true, force: true }))
+  for (const [model, timeoutMs] of [['gpt-6.1-sol', 300000], ['o3', 300000], ['codex-mini-latest', 300000], ['mimo-v2.6-pro', 900000], ['claude-example', 900000], ['provider/custom-model', 900000]]) {
+    for (const timedOut of [false, true]) {
+      let calls = 0
+      const planner = new CodexPlanner({
+        model,
+        runner: async (_binary, _args, options) => {
+          calls++
+          assert.equal(options.timeoutMs, timeoutMs)
+          return { code: 0, stdout: '{}', stderr: '', timedOut }
+        }
+      })
+      const result = planner.runStructured({ serverDirectory, inventory: {}, policy: {}, prompt: 'fixture', schemaPath: planner.schemaPath, outputName: 'fixture.json', failureLabel: 'planning' })
+      if (timedOut) await assert.rejects(result, new RegExp(`timed out after ${timeoutMs / 1000} seconds`))
+      else assert.equal(await result, '{}')
+      assert.equal(calls, 1)
+    }
+  }
+})
+
 test('planner exposes the current local home and prepares reviewed transfers instead of remote SCP shell commands', async () => {
   const transfer = { remotePath: '/var/lib/webminai/task-state/3/applications-backup.tar.gz', localPath: path.join(os.homedir(), 'applications-backup.tar.gz'), removeSource: true }
   const planner = new CodexPlanner()

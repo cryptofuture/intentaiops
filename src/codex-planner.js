@@ -292,9 +292,10 @@ export class CodexPlanner {
         : null
       if (progress) args.push('--json', '--output-last-message', lastMessagePath)
       args.push('-')
+      const timeoutMs = /^(?:gpt-|o[1-9](?:-|$)|codex(?:-|$))/u.test(this.model) ? 5 * 60 * 1000 : 15 * 60 * 1000
       const result = await this.runner(this.codexBinary, args, {
         input: plannerPrompt,
-        timeoutMs: 5 * 60 * 1000,
+        timeoutMs,
         maxOutputBytes: 2 * 1024 * 1024,
         cwd: jobDirectory,
         env: environment,
@@ -302,7 +303,7 @@ export class CodexPlanner {
         onStderr: chunk => progress?.stderr(chunk)
       })
       progress?.flush()
-      if (result.timedOut === true) throw new Error(`Codex ${failureLabel} timed out after 300 seconds; no final response was accepted`)
+      if (result.timedOut === true) throw new Error(`Codex ${failureLabel} timed out after ${timeoutMs / 1000} seconds; no final response was accepted`)
       if (result.signal) throw new Error(`Codex ${failureLabel} was interrupted (${result.signal}); no final response was accepted`)
       if (result.code !== 0) throw new Error(`Codex ${failureLabel} failed: ${sanitizePlannerString(result.stderr.trim() || progressError || `exit code ${result.code}`).slice(0, 1000)}`)
 
