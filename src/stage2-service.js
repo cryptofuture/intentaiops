@@ -3,6 +3,9 @@ import { fileURLToPath } from 'node:url'
 import { NetdataClient } from './netdata-client.js'
 import { validateClaimDetails } from './netdata-claim.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
+import { replaceLinuxMachineId } from './linux-machine-identity.js'
+import { replaceFreeBsdHostId } from './freebsd-machine-identity.js'
+import { replaceHostEnrollment } from './host-enrollment.js'
 import {
   createRemoteTemporaryDirectory,
   detectPlatform,
@@ -379,6 +382,47 @@ export class Stage2Service {
       }
     }
     return null
+  }
+
+  async replaceLinuxMachineId ({ connectionUrl, expectedFingerprint, elevation, sudoPassword }) {
+    return replaceLinuxMachineId({
+      ssh: this.ssh,
+      connectionUrl,
+      expectedFingerprint,
+      runElevated: script => {
+        const elevated = elevationCommand('/bin/sh', elevation, sudoPassword)
+        return this.ssh.execute(connectionUrl, elevated.command, { input: `${elevated.inputPrefix}${script}`, timeoutMs: 30000 })
+      }
+    })
+  }
+
+  async replaceFreeBsdHostId ({ connectionUrl, expectedFingerprint, elevation, sudoPassword }) {
+    return replaceFreeBsdHostId({
+      ssh: this.ssh,
+      connectionUrl,
+      expectedFingerprint,
+      runElevated: script => {
+        const elevated = elevationCommand('/bin/sh', elevation, sudoPassword)
+        return this.ssh.execute(connectionUrl, elevated.command, { input: `${elevated.inputPrefix}${script}`, timeoutMs: 30000 })
+      }
+    })
+  }
+
+  async replaceHostEnrollment ({ connectionUrl, platform, expectedFingerprint, elevation, sudoPassword }) {
+    return replaceHostEnrollment({
+      ssh: this.ssh,
+      connectionUrl,
+      platform,
+      expectedFingerprint,
+      runElevated: request => {
+        if (platform === 'windows') {
+          if (elevation !== 'windows-admin') throw new Error('Windows host enrollment requires administrator approval')
+          return this.ssh.execute(connectionUrl, request.command, { input: request.input, timeoutMs: 30000 })
+        }
+        const elevated = elevationCommand(request.command, elevation, sudoPassword)
+        return this.ssh.execute(connectionUrl, elevated.command, { input: `${elevated.inputPrefix}${request.input}`, timeoutMs: 30000 })
+      }
+    })
   }
 
   async capabilities ({ connectionUrl, platformHint }) {

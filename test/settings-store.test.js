@@ -12,6 +12,20 @@ import { TaskStore } from '../src/task-store.js'
 
 const PASSPHRASE = 'correct horse battery staple'
 
+test('different machines can save the same SSH password without conflicting or sharing history', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-second-host-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const store = new SettingsStore(root)
+  const settings = await store.initialize()
+  for (const [serverId, hex] of [['first', 'a'], ['second', 'b']]) {
+    await store.addServer({ settings, passphrase: PASSPHRASE, serverId, connectionUrl: `ssh://admin@${serverId}.test`, authentication: 'password', sshCredential: 'shared lab password', hostFingerprint: `SHA256:${hex.repeat(64)}` })
+  }
+  const reloaded = await store.load()
+  assert.notEqual(reloaded.servers.first.historyId, reloaded.servers.second.historyId)
+  for (const serverId of ['first', 'second']) assert.equal((await store.decryptServer({ settings: reloaded, passphrase: PASSPHRASE, serverId })).sshCredential, 'shared lab password')
+  assert.ok(!(await readFile(store.settingsPath, 'utf8')).includes('shared lab password'))
+})
+
 test('sudo password match is encrypted, survives reload, and resets with SSH credential changes', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'intent-sudo-settings-'))
   t.after(() => rm(root, { recursive: true, force: true }))

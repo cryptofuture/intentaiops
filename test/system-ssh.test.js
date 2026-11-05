@@ -246,6 +246,7 @@ test('host history fingerprints hash stable machine identity and support Windows
     runner: async (command, args) => {
       calls++
       if (calls === 1) return { code: 1, stdout: '', stderr: 'not a POSIX shell' }
+      if (calls === 3) return { code: 0, stdout: 'MISSING\n', stderr: '' }
       assert.match(args.at(-1), /MachineGuid/)
       return { code: 0, stdout: `${windowsIdentity}\r\n`, stderr: '' }
     }

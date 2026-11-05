@@ -5,14 +5,14 @@ import { withHostMutation, assertHostMutationReady } from './host-mutation-owner
 import { planFingerprint } from './execution-journal.js'
 
 export class OperatorHosts {
-  constructor ({ factory, settingsStore, workspace, settings, tasks, passphrase, credential, notify = () => {} }) {
-    Object.assign(this, { factory, settingsStore, workspace, settings, tasks, passphrase, credential, notify })
+  constructor ({ factory, settingsStore, workspace, settings, tasks, passphrase, credential, prepareIdentity, notify = () => {} }) {
+    Object.assign(this, { factory, settingsStore, workspace, settings, tasks, passphrase, credential, prepareIdentity, notify })
     this.sessions = new Map(); this.connecting = new Map(); this.states = new Map(); this.prompt = Promise.resolve(); this.closing = false
   }
 
   terminal (hostId, operation) {
     const promise = this.prompt.catch(() => {}).then(async () => {
-      this.notify({ type: 'terminal_input', hostId, state: 'may-require-input', message: 'Check the launch terminal for SSH or elevation prompts' })
+      this.notify({ type: 'terminal_input', hostId, state: 'may-require-input', message: 'Check the launch terminal for SSH, enrollment confirmation or elevation prompts' })
       try { return await operation() } finally { this.notify({ type: 'terminal_input', hostId, state: 'finished' }) }
     })
     this.prompt = promise.catch(() => {})
@@ -65,8 +65,15 @@ export class OperatorHosts {
         if (body.action === 'host-add' && old) throw new Error('Host already exists')
         if (body.action === 'host-edit' && !old) throw new Error('Unknown host')
         const session = await this.factory.openSsh({ connectionUrl, authentication: body.authentication ?? 'auto' })
+        let prepared
         try {
-          const hostFingerprint = await session.ssh.hostFingerprint(connectionUrl)
+          prepared = body.action === 'host-add' && this.prepareIdentity ? await this.prepareIdentity({ ssh: session.ssh, connectionUrl, serverId: hostId }) : null
+          if (body.action === 'host-add' && this.prepareIdentity && !prepared) throw new Error('Operator cancelled host enrollment')
+          const hostFingerprint = prepared?.hostFingerprint ?? await session.ssh.hostFingerprint(connectionUrl)
+          if (body.action === 'host-add' && !this.prepareIdentity && session.ssh.hostIdentity) {
+            const identity = await session.ssh.hostIdentity(connectionUrl)
+            if (['macos', 'windows'].includes(identity.platform) && !identity.enrollmentId) throw new Error('Host enrollment requires confirmation in the launch terminal; use CLI Add host')
+          }
           const admin = this.sessions.get(hostId)?.admin
           if (old && admin?.tasks.interruptedTasks(hostId).length) throw new Error('Inspect interrupted work before editing its connection')
           return await this.configure(hostId, async () => {
@@ -75,13 +82,17 @@ export class OperatorHosts {
             try {
               const method = body.temporary ? 'addTemporaryServer' : 'addServer'
               await this.settingsStore[method]({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, connectionUrl, authentication: body.authentication ?? 'auto', hostFingerprint })
+              if (prepared?.sudoPassword) {
+                await this.settingsStore.setServerSudoCredential({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, sshCredential: null, sudoPassword: prepared.sudoPassword })
+                prepared.sudoPassword = null
+              }
             } catch (error) { if (old) this.settings.servers[hostId] = old; throw error }
             const historyId = this.settings.servers[hostId].historyId
             this.workspace.setDirectoryAlias(hostId, historyId)
             await this.workspace.ensureInitialized(hostId, rootExecutionPolicy())
             return { hostId, verified: true, historyRetained: true, stage2: 'inactive', message: 'Identity verified; Stage 2 authorization must be activated for this connection' }
           })
-        } finally { await session.close() }
+        } finally { if (prepared) prepared.sudoPassword = null; await session.close() }
       })
     }
     if (!Object.hasOwn(this.settings.servers, hostId)) throw new Error('Unknown host')

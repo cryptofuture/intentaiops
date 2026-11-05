@@ -26,6 +26,7 @@ import { parseSshCommand } from './ssh-command.js'
 import { ServerWorkspace } from './server-workspace.js'
 import { validateServerId } from './server-id.js'
 import { SettingsStore } from './settings-store.js'
+import { prepareHostIdentity } from './host-identity-setup.js'
 import { TaskStore } from './task-store.js'
 import { OperatorController } from './operator-controller.js'
 import { startOperatorConsole } from './operator-console.js'
@@ -35,7 +36,7 @@ import { OperatorMetrics } from './operator-metrics.js'
 import { Stage2Service, sudoAuthenticationRejected } from './stage2-service.js'
 import { SystemSsh } from './system-ssh.js'
 import { runInteractiveProcess } from './process-runner.js'
-import { updateIntentAiOps } from './self-update.js'
+import { updateIntentAiOps, checkStartupUpdate, rememberPackageUpdate } from './self-update.js'
 import { TerminalUi } from './terminal-ui.js'
 import { FALLBACK_ADMIN_EMAIL, normalizeAdminEmailPreset } from './application-defaults.js'
 import { CLI_NAME, DATA_DIRECTORY_NAME, LEGACY_DATA_DIRECTORY_NAME, PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_URL } from './product.js'
@@ -89,7 +90,11 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
   }
   if (cliOptions.update) {
     ui.info(`Updating ${PRODUCT_NAME} from the official repository...`)
-    await selfUpdate()
+    const result = await selfUpdate()
+    if (result?.sha256) {
+      const dataRoot = path.resolve(cliOptions.dataRoot ?? await resolveDefaultDataRoot(os.homedir()))
+      await rememberPackageUpdate(dataRoot, { installedSha256: result.sha256, observedSha256: result.sha256 })
+    }
     ui.success(`${PRODUCT_NAME} was updated successfully. Run ${CLI_NAME} again to start the new version.`)
     return
   }
@@ -98,6 +103,12 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
   }
 
   const dataRoot = path.resolve(cliOptions.dataRoot ?? await resolveDefaultDataRoot(os.homedir()))
+  try {
+    if (await checkStartupUpdate({ dataRoot, ui, update: selfUpdate })) return
+  } catch (error) {
+    if (error.code === 'PACKAGE_UPDATE_FAILED') throw error
+    ui.warn('Update check unavailable; continuing without updating.')
+  }
   const settingsStore = new SettingsStore(dataRoot)
   const unlocked = await unlock(ui, settingsStore)
   const settings = unlocked.settings
@@ -144,7 +155,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
   let selectedHostId = null
 
   if (cliOptions.console) {
-    const hosts = new OperatorHosts({ factory: hostSessions, settingsStore, workspace, settings, tasks: taskStore, passphrase, credential: (capabilities, savedPassword) => chooseElevation(ui, capabilities, savedPassword), notify: event => controller?.record(event) })
+    const hosts = new OperatorHosts({ factory: hostSessions, settingsStore, workspace, settings, tasks: taskStore, passphrase, credential: (capabilities, savedPassword) => chooseElevation(ui, capabilities, savedPassword), prepareIdentity: options => prepareHostIdentity({ ...options, ui, settingsStore, settings, passphrase, chooseElevation, enrollmentOnly: true }), notify: event => controller?.record(event) })
     const controller = new OperatorController({
       dataRoot,
       settings,
@@ -554,13 +565,22 @@ export async function addHost ({ context, temporary = false }) {
   ui.info('Testing the connection. OpenSSH may ask to trust the host and request a password or key passphrase.')
   let session
   let hostFingerprint
+  let bootstrapSudoPassword = null
   try {
     session = await (baseSsh.acquireSession ?? baseSsh.openInteractiveSession).call(baseSsh, connectionUrl, { authentication })
     const check = await session.ssh.execute(connectionUrl, 'echo WEBMINAI_SSH_OK')
     if (check.stdout.trim() !== 'WEBMINAI_SSH_OK') throw new Error('unexpected SSH test response')
-    hostFingerprint = await session.ssh.hostFingerprint(connectionUrl)
+    const prepared = await prepareHostIdentity({ ui, ssh: session.ssh, connectionUrl, serverId, settingsStore, settings, passphrase, chooseElevation })
+    if (!prepared) return null
+    hostFingerprint = prepared.hostFingerprint
+    bootstrapSudoPassword = prepared.sudoPassword
     ui.success('SSH connection succeeded.')
   } catch (error) {
+    if (error.code === 'HOST_IDENTITY_CONFLICT') {
+      ui.error(`Could not add host: ${error.message}`)
+      await ui.pause()
+      return null
+    }
     ui.error(`SSH test failed: ${error.message}`)
     await ui.pause()
     return
@@ -592,6 +612,10 @@ export async function addHost ({ context, temporary = false }) {
       sshCredential,
       hostFingerprint
     })
+    if (bootstrapSudoPassword) {
+      await settingsStore.setServerSudoCredential({ settings, passphrase, serverId, sshCredential, sudoPassword: bootstrapSudoPassword })
+      bootstrapSudoPassword = null
+    }
     workspace.setDirectoryAlias(serverId, entry.historyId)
     await workspace.ensureInitialized(serverId, rootExecutionPolicy({
       maxCommands: 20,

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdtemp, rm, writeFile, readFile, mkdir, rename } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -13,11 +13,49 @@ const MAX_INSTALLER_BYTES = 1024 * 1024
 const MAX_PACKAGE_BYTES = 128 * 1024 * 1024
 const MAX_CHECKSUM_BYTES = 4096
 
+export async function rememberPackageUpdate (dataRoot, state) {
+  await mkdir(dataRoot, { recursive: true, mode: 0o700 })
+  const file = path.join(dataRoot, 'package-update.json')
+  const temporary = `${file}.${randomUUID()}.tmp`
+  try { await writeFile(temporary, JSON.stringify(state) + '\n', { mode: 0o600, flag: 'wx' }); await rename(temporary, file) } finally { await rm(temporary, { force: true }) }
+}
+
+export async function checkStartupUpdate ({ dataRoot, ui, update = updateIntentAiOps, fetchChecksum = globalThis.fetch }) {
+  const file = path.join(dataRoot, 'package-update.json')
+  let saved
+  try { saved = JSON.parse(await readFile(file, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  const response = await fetchChecksum(PACKAGE_CHECKSUM_URL, { signal: AbortSignal.timeout(3000), redirect: 'follow' })
+  if (!response?.ok) throw new Error(`update checksum download failed with HTTP ${response?.status ?? 'unknown'}`)
+  const manifest = Buffer.from(await response.arrayBuffer())
+  if (manifest.length > MAX_CHECKSUM_BYTES) throw new Error('update checksum is too large')
+  const current = parsePackageChecksum(manifest)
+  let baseline = saved?.installedSha256 ?? saved?.observedSha256
+  if (!baseline) {
+    try { baseline = createHash('sha256').update(await readFile(new URL('../dist/intent-ai-ops.tgz', import.meta.url))).digest('hex') } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
+  const persist = state => rememberPackageUpdate(dataRoot, state)
+  if (!saved) await persist({ observedSha256: baseline ?? current, installedSha256: null })
+  if (!baseline) {
+    return false
+  }
+  if (baseline === current) return false
+  ui.info(`A different Intent AI Ops package is available (SHA-256 ${current}).`)
+  ui.info(process.platform === 'win32' ? `Installer: irm ${WINDOWS_UPDATE_URL}` : `Installer: curl -fsSL ${POSIX_UPDATE_URL}`)
+  if (!await ui.confirm('Install this package now using the official checksum-verified installer?', false)) return false
+  try { await update({ expectedChecksum: current }) } catch (cause) {
+    throw Object.assign(new Error(`Update installer failed: ${cause.message}`, { cause }), { code: 'PACKAGE_UPDATE_FAILED' })
+  }
+  await persist({ observedSha256: current, installedSha256: current })
+  ui.success('Intent AI Ops updated. Restart it to load the new version.')
+  return true
+}
+
 export async function updateIntentAiOps ({
   platform = process.platform,
   fetchInstaller = globalThis.fetch,
   runInstaller = runInstallerProcess,
-  temporaryRoot = os.tmpdir()
+  temporaryRoot = os.tmpdir(),
+  expectedChecksum
 } = {}) {
   if (typeof fetchInstaller !== 'function') throw new TypeError('self-update requires fetch support')
   const windows = platform === 'win32'
@@ -30,6 +68,7 @@ export async function updateIntentAiOps ({
   const source = installerBytes.toString('utf8')
   validateInstaller(source, { windows })
   validatePackageChecksum(packageBytes, checksumBytes)
+  if (expectedChecksum && parsePackageChecksum(checksumBytes) !== expectedChecksum) throw new Error('update package changed after confirmation; check again before installing')
 
   const temporary = await mkdtemp(path.join(temporaryRoot, 'intentaiops-update-'))
   const installer = path.join(temporary, windows ? 'install.ps1' : 'install.sh')
@@ -48,7 +87,7 @@ export async function updateIntentAiOps ({
   } finally {
     await rm(temporary, { recursive: true, force: true })
   }
-  return { url, packageUrl: PACKAGE_UPDATE_URL }
+  return { url, packageUrl: PACKAGE_UPDATE_URL, sha256: parsePackageChecksum(checksumBytes) }
 }
 
 async function download (fetchResource, url, label, maximumBytes) {
@@ -67,11 +106,16 @@ function validateInstaller (source, { windows }) {
 }
 
 function validatePackageChecksum (packageBytes, checksumBytes) {
+  const expected = parsePackageChecksum(checksumBytes)
+  const actual = createHash('sha256').update(packageBytes).digest('hex')
+  if (actual !== expected) throw new Error('update package SHA-256 verification failed')
+}
+
+function parsePackageChecksum (checksumBytes) {
   const manifest = checksumBytes.toString('utf8').trim()
   const match = /^([a-f0-9]{64})\s+\*?intent-ai-ops\.tgz$/iu.exec(manifest)
   if (!match) throw new Error('downloaded update checksum has an invalid format')
-  const actual = createHash('sha256').update(packageBytes).digest('hex')
-  if (actual !== match[1].toLowerCase()) throw new Error('update package SHA-256 verification failed')
+  return match[1].toLowerCase()
 }
 
 async function runInstallerProcess (command, args, environmentOverrides = {}) {

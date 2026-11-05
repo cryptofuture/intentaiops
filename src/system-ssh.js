@@ -6,6 +6,7 @@ import { parseSshConnection, sshTarget } from './connection.js'
 import { runInteractiveProcess, runProcess } from './process-runner.js'
 import { setTimeout as delay } from 'node:timers/promises'
 import { SshSessionManager, normalizeSshTransport } from './ssh-session-manager.js'
+import { hostIdentityFingerprint, readHostEnrollment } from './host-enrollment.js'
 
 const SAFE_UNIX_REMOTE_COPY_PATH = /^\/tmp\/webminai\.[A-Za-z0-9]+\/[A-Za-z0-9._-]+$/
 const SAFE_WINDOWS_REMOTE_COPY_PATH = /^C:\/Windows\/Temp\/webminai\.[A-Za-z0-9]+\/[A-Za-z0-9._-]+$/i
@@ -255,7 +256,7 @@ export class SystemSsh {
     return { ssh, multiplexed: false, get closed () { return closed }, async close () { closed = true; ssh.credential = null } }
   }
 
-  async hostFingerprint (connectionUrl) {
+  async nativeHostIdentity (connectionUrl) {
     const posix = "case \"$(uname -s 2>/dev/null)\" in Linux) printf 'linux:'; if [ -r /etc/machine-id ]; then tr -d '[:space:]' < /etc/machine-id; else tr -d '[:space:]' < /var/lib/dbus/machine-id; fi ;; FreeBSD) printf 'freebsd:'; sysctl -n kern.hostuuid 2>/dev/null || hostid ;; Darwin) printf 'macos:'; ioreg -rd1 -c IOPlatformExpertDevice | sed -n 's/.*IOPlatformUUID.*= *\"\\([^\"]*\\)\".*/\\1/p' ;; *) exit 78 ;; esac"
     let identity
     try {
@@ -267,7 +268,18 @@ export class SystemSsh {
     if (!/^(?:freebsd|linux|macos|windows):[A-Za-z0-9._{}-]{8,256}$/u.test(identity)) {
       throw new Error('SSH host did not expose a stable machine identity for history association')
     }
-    return `SHA256:${createHash('sha256').update(identity, 'utf8').digest('hex')}`
+    return identity
+  }
+
+  async hostIdentity (connectionUrl) {
+    const native = await this.nativeHostIdentity(connectionUrl)
+    const platform = native.split(':')[0]
+    const enrollmentId = ['macos', 'windows'].includes(platform) ? await readHostEnrollment(this, connectionUrl, platform) : null
+    return { platform, enrollmentId, fingerprint: hostIdentityFingerprint(native, enrollmentId) }
+  }
+
+  async hostFingerprint (connectionUrl) {
+    return (await this.hostIdentity(connectionUrl)).fingerprint
   }
 
   async runWithAskpass (command, args, credential, options = {}) {

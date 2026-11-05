@@ -559,14 +559,18 @@ function vaultUpgradeRequired (settings) {
     settings.kdf.maxmem < DEFAULT_SCRYPT_KDF.maxmem
 }
 
-function registerFingerprint (settings, serverId, fingerprint, preferredHistoryId = null) {
+export function assertHostFingerprintAvailable (settings, serverId, fingerprint) {
   validateFingerprint(fingerprint)
-  settings.hostHistories ??= {}
   for (const [configuredId, configured] of Object.entries(settings.servers)) {
     if (configuredId !== serverId && configured.hostFingerprint === fingerprint) {
-      throw new Error(`host is already configured as ${configuredId}`)
+      throw Object.assign(new Error(`host is already configured as ${configuredId}. This connection reports the same machine identity, not a duplicate password. To change its saved password, use that host's settings. If these are different machines, check for a cloned machine ID or copied enrollment record before adding them; their histories must not be merged.`), { code: 'HOST_IDENTITY_CONFLICT', existingServerId: configuredId })
     }
   }
+}
+
+function registerFingerprint (settings, serverId, fingerprint, preferredHistoryId = null) {
+  assertHostFingerprintAvailable(settings, serverId, fingerprint)
+  settings.hostHistories ??= {}
   const now = new Date().toISOString()
   const existing = settings.hostHistories[fingerprint]
   const historyId = existing?.historyId ?? preferredHistoryId ?? historyIdForFingerprint(fingerprint)

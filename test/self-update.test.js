@@ -8,6 +8,7 @@ import {
   PACKAGE_CHECKSUM_URL,
   PACKAGE_UPDATE_URL,
   POSIX_UPDATE_URL,
+  checkStartupUpdate,
   updateIntentAiOps,
   WINDOWS_UPDATE_URL
 } from '../src/self-update.js'
@@ -15,6 +16,44 @@ import {
 const posixInstaller = '#!/bin/sh\nINTENTAI_OPS_PACKAGE_URL=https://example.test/package.tgz\n'
 const windowsInstaller = "$ErrorActionPreference = 'Stop'\n$env:INTENTAI_OPS_PACKAGE_URL = 'test'\n"
 const packageBytes = Buffer.from('verified package fixture')
+
+test('startup remembers the observed checksum, preserves declined updates and records only successful installation', async t => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'intentaiops-startup-update-'))
+  t.after(() => rm(dataRoot, { recursive: true, force: true }))
+  const { writeFile } = await import('node:fs/promises')
+  const file = path.join(dataRoot, 'package-update.json')
+  const previous = '1'.repeat(64)
+  const current = '2'.repeat(64)
+  await writeFile(file, JSON.stringify({ observedSha256: previous }))
+  let approved = false; let updates = 0
+  const options = {
+    dataRoot,
+    ui: { info () {}, success () {}, confirm: async (_question, defaultValue) => { assert.equal(defaultValue, false); return approved } },
+    fetchChecksum: async () => ({ ok: true, arrayBuffer: async () => Buffer.from(`${current}  intent-ai-ops.tgz\n`) }),
+    update: async ({ expectedChecksum }) => { assert.equal(expectedChecksum, current); updates++ }
+  }
+  assert.equal(await checkStartupUpdate(options), false)
+  assert.equal(updates, 0)
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).observedSha256, previous)
+  approved = true
+  await assert.rejects(checkStartupUpdate({ ...options, update: async () => { throw new Error('installer failed') } }), /installer failed/u)
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).observedSha256, previous)
+  assert.equal(await checkStartupUpdate(options), true)
+  assert.equal(updates, 1)
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).installedSha256, current)
+  assert.equal(await checkStartupUpdate(options), false)
+  assert.equal(updates, 1)
+})
+
+test('startup rejects malformed checksums without requesting approval', async t => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'intentaiops-startup-update-'))
+  t.after(() => rm(dataRoot, { recursive: true, force: true }))
+  await assert.rejects(checkStartupUpdate({ dataRoot, ui: { confirm: () => assert.fail('invalid manifest') }, fetchChecksum: async () => ({ ok: true, arrayBuffer: async () => Buffer.from('invalid') }) }), /invalid format/u)
+})
+
+test('an update published after confirmation cannot be installed under the earlier approval', async () => {
+  await assert.rejects(updateIntentAiOps({ expectedChecksum: '0'.repeat(64), fetchInstaller: successfulFetcher(posixInstaller), runInstaller: () => assert.fail('must not install') }), /changed after confirmation/u)
+})
 
 test('self-update verifies the package and runs the POSIX bootstrap with the local archive', async t => {
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'intentaiops-update-test-'))
@@ -41,7 +80,7 @@ test('self-update verifies the package and runs the POSIX bootstrap with the loc
   assert.equal(invocation.source, posixInstaller)
   assert.deepEqual(invocation.package, packageBytes)
   assert.match(invocation.environment.INTENTAI_OPS_PACKAGE_URL, /intent-ai-ops\.tgz$/u)
-  assert.deepEqual(result, { url: POSIX_UPDATE_URL, packageUrl: PACKAGE_UPDATE_URL })
+  assert.deepEqual(result, { url: POSIX_UPDATE_URL, packageUrl: PACKAGE_UPDATE_URL, sha256: createHash('sha256').update(packageBytes).digest('hex') })
   assert.deepEqual(await readdir(temporaryRoot), [])
 })
 
