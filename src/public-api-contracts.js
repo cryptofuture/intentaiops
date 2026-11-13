@@ -67,6 +67,7 @@
  * @property {CommandPlanItem[]} revertCommands
  * @property {string[]} [warnings]
  * @property {boolean} [requiresConfirmation]
+ * @property {boolean} [discoveryOnly]
  * @property {object} [compatibilityManifest]
  * @property {object} [foundationComposition]
  */

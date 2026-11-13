@@ -20,6 +20,7 @@ export function validateCommandPlan (plan, policy = {}, { requireRevert = true }
     throw new TypeError('plan must be an object')
   }
   const candidate = /** @type {Record<string, any>} */ (plan)
+  if (candidate.discoveryOnly !== undefined && typeof candidate.discoveryOnly !== 'boolean') throw new TypeError('discoveryOnly must be boolean')
   if (typeof candidate.summary !== 'string' || !candidate.summary.trim() || !Array.isArray(candidate.commands) || !Array.isArray(candidate.revertCommands)) {
     throw new TypeError('plan requires a summary and commands array')
   }
@@ -42,6 +43,7 @@ export function validateCommandPlan (plan, policy = {}, { requireRevert = true }
   }
   validateCommandItems(candidate.commands, { policy, maxTimeoutMs, maxJobTimeoutMs, deniedPatterns, graph: 'commands' })
   validateCommandItems(candidate.revertCommands, { policy, maxTimeoutMs, maxJobTimeoutMs, deniedPatterns, graph: 'revertCommands' })
+  if (candidate.discoveryOnly && (!candidate.commands.length || candidate.commands.some(item => item.risk !== 'read') || candidate.revertCommands.length)) throw new Error('discovery-only plans require read-only commands and no rollback')
   if (requireRevert && candidate.commands.some(item => item.risk !== 'read' && item.executionMode !== 'download') && candidate.revertCommands.length === 0) {
     throw new Error('a changing plan requires revert commands')
   }

@@ -55,11 +55,11 @@ export class OperatorController {
     return snapshot
   }
 
-  sanitize (value) {
+  sanitize (value, { includeOutput = false } = {}) {
     const cleaned = sanitizePlannerData(value)
     const visit = item => {
       if (Array.isArray(item)) return item.map(visit)
-      if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !key.endsWith('Json')).map(([key, entry]) => [key, /^(?:stdout|stderr)$/iu.test(key) ? '[remote output withheld from public diagnostics]' : visit(entry)]))
+      if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).filter(([key]) => !key.endsWith('Json')).map(([key, entry]) => [key, !includeOutput && /^(?:stdout|stderr)$/iu.test(key) ? '[remote output withheld from public diagnostics]' : visit(entry)]))
       return typeof item === 'string' && this.passphrase ? item.split(this.passphrase).join('[redacted]') : item
     }
     return visit(cleaned)
@@ -185,7 +185,21 @@ export class OperatorController {
     return this.propose(hostId, taskId, securityRemediationInstructions(task.results), expectedVersion, false, true)
   }
 
-  async propose (hostId, taskId, instructions, expectedVersion, rollback = false, security = false) {
+  async proposeDiscovery (hostId, taskId) {
+    const task = this.tasks.get(hostId, taskId)
+    if (task.kind !== 'ai' || task.plan?.discoveryOnly !== true || task.status !== 'completed') return null
+    const state = this.tasks.executionState(hostId, taskId)
+    if (!state.length || state.some(command => command.status !== 'completed')) return null
+    if (this.tasks.control(hostId, taskId).action !== 'run' || this.tasks.rollbackState(hostId, taskId).some(command => command.status !== 'pending')) return null
+    const version = this.tasks.stateVersion(hostId, taskId)
+    const revisions = this.tasks.revisions(hostId, taskId)
+    const existing = revisions.find(revision => !revision.approved && revision.stateVersion === version)
+    if (existing) return { revisionId: existing.id }
+    if (revisions.filter(revision => revision.approved && revision.plan.discoveryOnly).length >= 3) throw new Error('Discovery stage limit reached; inspect evidence and request an explicit revision')
+    return this.propose(hostId, taskId, 'Discovery completed successfully. Use its recorded observations to fulfill the ORIGINAL request now. Recheck exact resource identity before changing it. Do not expand scope or guess unresolved targets. Do not repeat completed discovery commands. Return discoveryOnly false when the remaining plan fulfills the request.', version, false, false, true)
+  }
+
+  async propose (hostId, taskId, instructions, expectedVersion, rollback = false, security = false, discovery = false) {
     this.checkVersion(hostId, taskId, expectedVersion)
     if (typeof instructions !== 'string' || !instructions.trim() || instructions.length > 8192) throw new TypeError('revision instructions must contain 1-8192 characters')
     const evidence = this.inspect(hostId, taskId)
@@ -195,7 +209,7 @@ export class OperatorController {
       const completedIds = evidence.commands.filter(command => command.status === 'completed').map(command => command.commandId)
       const executedIds = new Set(evidence.commands.filter(command => command.status !== 'pending').map(command => command.commandId))
       this.record({ type: 'revision_planning', hostId, taskId })
-      let replacement = await admin.plan({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, request: this.sanitize(task.request), taskId, catalogId: task.catalogId, requireRevert: !rollback, previousAttempts: [this.sanitize({ ...task, executionEvidence: evidence })], retryInstructions: `${this.sanitize(instructions)}\n${rollback ? 'Propose ONLY rollback commands as the forward commands, in rollback order. Revert only confirmed completed changes. Never include rollback for uncertain or failed commands without separately verified evidence.' : 'Generate only replacement UNEXECUTED work. Use new command IDs. Do not repeat completed changes. Preserve cumulative rollback coverage for original completed changes and replacement work.'} Completed IDs: ${completedIds.join(', ')}. Return self-contained dependencies.`, onProgress: event => this.record({ type: 'planner_progress', hostId, taskId, event }) })
+      let replacement = await admin.plan({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, request: this.sanitize(task.request), taskId, catalogId: task.catalogId, requireRevert: !rollback, previousAttempts: [this.sanitize({ ...task, executionEvidence: evidence }, { includeOutput: discovery })], retryInstructions: `${this.sanitize(instructions)}\n${rollback ? 'Propose ONLY rollback commands as the forward commands, in rollback order. Revert only confirmed completed changes. Never include rollback for uncertain or failed commands without separately verified evidence.' : 'Generate only replacement UNEXECUTED work. Use new command IDs. Do not repeat completed changes. Preserve cumulative rollback coverage for original completed changes and replacement work.'} Completed IDs: ${completedIds.join(', ')}. Return self-contained dependencies.`, onProgress: event => this.record({ type: 'planner_progress', hostId, taskId, event }) })
       if (!replacement.commands.length) throw new Error(`No executable replacement commands were proposed; original plan is unchanged. ${String(this.sanitize(replacement.summary ?? '')).slice(0, 1000)}`)
       if (replacement.commands.some(command => executedIds.has(command.id))) throw new Error('replacement reuses an executed command ID')
       if (security) {
@@ -265,7 +279,7 @@ export class OperatorController {
     if (commandIds !== undefined && (!Array.isArray(commandIds) || !commandIds.length || new Set(commandIds).size !== commandIds.length || commandIds.some(id => !task.plan.commands.some(command => command.id === id)))) throw new Error('Invalid per-command review')
     if (['running', 'reverting', 'partial', 'failed'].includes(task.status) && !this.tasks.executionEvents(hostId, taskId).length) throw new Error('legacy interrupted execution has no journal; operator investigation required')
     const originalControl = this.tasks.control(hostId, taskId)
-    return this.withMutationAdmin(hostId, taskId, async admin => {
+    const outcome = await this.withMutationAdmin(hostId, taskId, async admin => {
       this.checkVersion(hostId, taskId, expectedVersion)
       await admin.reconcileTask({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, taskId, onProgress })
       const state = this.tasks.executionState(hostId, taskId)
@@ -289,6 +303,11 @@ export class OperatorController {
       this.record({ type: 'execution_finished', hostId, taskId, status: saved.status })
       return this.inspect(hostId, taskId)
     })
+    if (outcome.task.plan?.discoveryOnly && outcome.task.status === 'completed') {
+      try { await this.proposeDiscovery(hostId, taskId) } catch { this.record({ type: 'discovery_continuation_unavailable', hostId, taskId, message: 'Discovery evidence is saved. Inspect it and request a revision; no further commands ran.' }) }
+      return this.inspect(hostId, taskId)
+    }
+    return outcome
   }
 
   async run (options) {

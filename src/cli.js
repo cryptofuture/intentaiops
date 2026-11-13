@@ -37,6 +37,7 @@ import { Stage2Service, sudoAuthenticationRejected } from './stage2-service.js'
 import { SystemSsh } from './system-ssh.js'
 import { runInteractiveProcess } from './process-runner.js'
 import { updateIntentAiOps, checkStartupUpdate, rememberPackageUpdate } from './self-update.js'
+import { planFingerprint } from './execution-journal.js'
 import { TerminalUi } from './terminal-ui.js'
 import { FALLBACK_ADMIN_EMAIL, normalizeAdminEmailPreset } from './application-defaults.js'
 import { CLI_NAME, DATA_DIRECTORY_NAME, LEGACY_DATA_DIRECTORY_NAME, PRODUCT_NAME, PRODUCT_TAGLINE, PRODUCT_URL } from './product.js'
@@ -2093,6 +2094,7 @@ async function runTask ({
     const savedResults = (healthTask || updateTask) ? results.map(sanitizeHealthResult) : results
     admin.saveTaskResults(serverId, task.id, savedResults)
     renderResults(ui, savedResults)
+    if (plan.discoveryOnly && admin.getTask(serverId, task.id).status === 'completed') await manageExecution({ ui, controller, serverId, taskId: task.id, initialAction: 'continue-discovery' })
     if (admin.tasks.control(serverId, task.id).action !== 'run') await manageExecution({ ui, controller, serverId, taskId: task.id })
     if (controller.inspect(serverId, task.id).securityRemediationAvailable && await ui.confirm('Security issues were detected. Prepare and review updates now?', false)) await manageExecution({ ui, controller, serverId, taskId: task.id, initialAction: 'remediate-security' })
     const reportResults = completedReportResults(admin.getTask(serverId, task.id))
@@ -2271,6 +2273,7 @@ export async function manageExecution ({ ui, controller, serverId, taskId, initi
       { label: 'Pause at next command boundary', value: 'pause' },
       { label: 'Ask Codex a read-only question', value: 'analyze' },
       { label: 'Revise remaining steps', value: 'propose' },
+      ...(localTask.plan?.discoveryOnly && localTask.status === 'completed' ? [{ label: 'Use discovery results to finish the original task', value: 'continue-discovery' }] : []),
       ...(view.securityRemediationAvailable ? [{ label: 'Patch detected security issues: prepare, review and execute', value: 'remediate-security' }] : []),
       ...(refreshableCatalog ? [{ label: `Refresh remaining ${catalogPlatform} catalog steps`, value: 'refresh-catalog' }] : []),
       { label: 'Propose rollback of confirmed changes', value: 'propose-rollback' },
@@ -2309,6 +2312,17 @@ export async function manageExecution ({ ui, controller, serverId, taskId, initi
         ui.output.write(`${JSON.stringify(proposal.differences, null, 2)}\n`)
         renderPlan(ui, controller.tasks.revisions(serverId, taskId).find(revision => revision.id === proposal.revisionId).plan)
         if (await ui.confirm('Approve this replacement plan exactly as shown?', false)) controller.approve(serverId, taskId, proposal.revisionId, proposal.expectedVersion, proposal.fingerprint)
+      } else if (action === 'continue-discovery') {
+        ui.info('Discovery is complete. Preparing remaining work in this same task; new commands require separate approval.')
+        const proposal = await controller.proposeDiscovery(serverId, taskId)
+        if (!proposal) throw new Error('Discovery must finish successfully before preparing remaining work')
+        const revision = controller.tasks.revisions(serverId, taskId).find(item => item.id === proposal.revisionId)
+        renderPlan(ui, revision.plan)
+        if (!await ui.confirm('Approve and execute this follow-up plan exactly as shown?', false)) return
+        controller.approve(serverId, taskId, revision.id, revision.stateVersion, planFingerprint(revision.plan))
+        const current = controller.inspect(serverId, taskId)
+        const result = await controller.resume(serverId, taskId, current.stateVersion, current.fingerprint, event => renderTaskProgress(ui, event))
+        if (result.task.plan?.discoveryOnly && result.task.status === 'completed') initialAction = 'continue-discovery'
       } else if (action === 'remediate-security') {
         ui.info('Preparing actual updates against fresh host inventory. No new command runs without approval.')
         const proposal = await controller.proposeSecurityRemediation(serverId, taskId, view.stateVersion)

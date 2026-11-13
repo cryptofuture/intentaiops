@@ -186,6 +186,27 @@ test('local operator reviews show stored commands rather than sanitized browser 
   }
 })
 
+test('CLI presents follow-up work immediately and requires its own confirmation', async () => {
+  for (const approved of [false, true]) {
+    const { ui, output } = plainUi()
+    const remaining = plan()
+    let executed = 0; let decisions = 0
+    ui.confirm = async question => { assert.match(question, /follow-up plan/u); assert.ok(output.text.includes(remaining.summary)); return approved }
+    ui.choose = async () => null
+    ui.pause = async () => {}
+    const controller = {
+      tasks: { get: () => ({ kind: 'ai', plan: { ...remaining, discoveryOnly: true }, status: 'completed' }), revisions: () => [{ id: 7, stateVersion: 'state', plan: remaining }] },
+      inspect: () => ({ task: { status: 'completed' }, commands: [], revisions: [], stateVersion: 'state', fingerprint: 'decision' }),
+      proposeDiscovery: async () => ({ revisionId: 7 }),
+      approve: () => { decisions++ },
+      resume: async () => { executed++; return { task: { status: 'completed', plan: remaining } } }
+    }
+    await manageExecution({ ui, controller, serverId: 'host', taskId: 1, initialAction: 'continue-discovery' })
+    assert.equal(decisions, approved ? 1 : 0)
+    assert.equal(executed, approved ? 1 : 0)
+  }
+})
+
 test('CLI pause refreshes live progress without weakening abort or execution decisions', async () => {
   for (const action of ['pause', 'abort']) {
     const { ui } = plainUi()

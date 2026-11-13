@@ -523,6 +523,10 @@ test('Codex planner reads bounded verified candidate intelligence for custom tas
   assert.match(prompt, /verified-candidate-context\.json/u)
   assert.match(prompt, /Do not turn the custom task into the referenced application deployment/u)
   assert.match(prompt, /use the user preset owner@example\.test/u)
+  const discovery = prompt.split('\n').find(line => line.includes('Set discoveryOnly true ONLY'))
+  assert.match(discovery, /any supported host task/u)
+  assert.match(discovery, /separate operator approval/u)
+  assert.doesNotMatch(discovery, /docker|container/iu)
   assert.deepEqual(planned.commands[0].source, { type: 'ai-planned' })
 })
 

@@ -16,6 +16,70 @@ import { CodexPlanner } from '../src/codex-planner.js'
 const command = id => ({ id, command: `echo ${id}`, purpose: 'Inspect', risk: 'read', timeoutMs: 1000, requiresSudo: false, dependsOn: [] })
 const plan = ids => ({ summary: 'Inspect', changeOverview: 'Inspect state', modifiedFiles: [], commands: ids.map(command), revertCommands: [] })
 
+test('approved discovery proposes same-task remaining work without inheriting approval or repeating discovery', async t => {
+  const { controller, tasks, task, admin, calls } = await fixture(t)
+  tasks.savePlan('host', task.id, { ...plan(['discover']), discoveryOnly: true })
+  admin.plan = async options => {
+    assert.equal(options.taskId, task.id)
+    assert.equal(options.previousAttempts[0].results[0].result.stdout, 'ok')
+    assert.match(options.retryInstructions, /ORIGINAL request/u)
+    return { ...plan(['remove-confirmed-container']), discoveryOnly: false }
+  }
+  const original = controller.inspect('host', task.id)
+  const discovered = await controller.resume('host', task.id, original.stateVersion, original.fingerprint)
+  assert.deepEqual(calls, ['echo discover'])
+  assert.equal(discovered.task.id, task.id)
+  assert.equal(discovered.task.status, 'completed')
+  const revision = discovered.revisions.find(item => !item.approved)
+  assert.ok(revision)
+  assert.deepEqual(revision.plan.commands.map(item => item.id), ['discover', 'remove-confirmed-container'])
+  assert.equal(revision.plan.discoveryOnly, false)
+  assert.equal(await controller.proposeDiscovery('host', task.id).then(item => item.revisionId), revision.id)
+  await assert.rejects(controller.resume('host', task.id, discovered.stateVersion, discovered.fingerprint), /already completed/u)
+  controller.approve('host', task.id, revision.id, discovered.stateVersion, revision.fingerprint)
+  const approved = controller.inspect('host', task.id)
+  await assert.rejects(controller.resume('host', task.id, original.stateVersion, original.fingerprint), /stale/u)
+  const final = await controller.resume('host', task.id, approved.stateVersion, approved.fingerprint)
+  assert.equal(final.task.status, 'completed')
+  assert.deepEqual(calls, ['echo discover', 'echo remove-confirmed-container'])
+  assert.equal(controller.inspect('host', task.id).task.results[0].result.stdout, '[remote output withheld from public diagnostics]')
+})
+
+test('failed discovery and ordinary inspection never prepare automatic follow-up work', async t => {
+  const { controller, tasks, task, admin } = await fixture(t)
+  let proposals = 0
+  admin.plan = async () => { proposals++; return plan(['unexpected']) }
+  let view = controller.inspect('host', task.id)
+  await controller.resume('host', task.id, view.stateVersion, view.fingerprint)
+  assert.equal(proposals, 0)
+  const second = tasks.create('host', 'Remove a container')
+  tasks.savePlan('host', second.id, { ...plan(['discover']), discoveryOnly: true })
+  admin.netdata = () => ({ runCommand: async () => ({ exitCode: 1, stdout: '', stderr: 'inspection failed' }) })
+  view = controller.inspect('host', second.id)
+  await controller.resume('host', second.id, view.stateVersion, view.fingerprint)
+  assert.equal(proposals, 0)
+  assert.equal(await controller.proposeDiscovery('host', second.id), null)
+})
+
+test('discovery metadata cannot label changing commands or rollback as read-only discovery', () => {
+  assert.throws(() => validateCommandPlan({ ...plan(['inspect']), discoveryOnly: 'true' }), /must be boolean/u)
+  assert.throws(() => validateCommandPlan({ ...plan(['inspect']), discoveryOnly: true, commands: [{ ...command('change'), risk: 'change' }] }, {}, { requireRevert: false }), /read-only/u)
+  assert.throws(() => validateCommandPlan({ ...plan(['inspect']), discoveryOnly: true, revertCommands: [command('rollback')] }), /no rollback/u)
+  assert.throws(() => validateCommandPlan({ ...plan([]), discoveryOnly: true }), /read-only/u)
+})
+
+test('follow-up planning failure preserves completed discovery without executing or approving new work', async t => {
+  const { controller, tasks, task, admin, calls } = await fixture(t)
+  tasks.savePlan('host', task.id, { ...plan(['discover']), discoveryOnly: true })
+  admin.plan = async () => { throw new Error('provider unavailable') }
+  const view = controller.inspect('host', task.id)
+  const result = await controller.resume('host', task.id, view.stateVersion, view.fingerprint)
+  assert.equal(result.task.status, 'completed')
+  assert.deepEqual(calls, ['echo discover'])
+  assert.equal(result.revisions.length, 0)
+  assert.equal(tasks.get('host', task.id).results[0].status, 'completed')
+})
+
 test('remote recovery options use verified platform capabilities instead of assuming Linux', async t => {
   const { controller, admin } = await fixture(t)
   const execution = { platform: 'windows' }

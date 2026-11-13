@@ -76,8 +76,9 @@
     }
   },
   "additionalProperties": false,
-  "required": ["summary", "changeOverview", "modifiedFiles", "assumptions", "commands", "revertCommands", "warnings", "requiresConfirmation"],
+  "required": ["summary", "changeOverview", "modifiedFiles", "assumptions", "commands", "revertCommands", "warnings", "requiresConfirmation", "discoveryOnly"],
   "properties": {
+    "discoveryOnly": { "type": "boolean" },
     "summary": { "type": "string", "minLength": 1 },
     "changeOverview": { "type": "string", "minLength": 1 },
     "modifiedFiles": {

@@ -246,6 +246,8 @@ Intent AI Ops uses the system OpenSSH client. Temporary hosts disappear when Int
 
 ## Giving tasks and using history
 
+**Discovery and action stay in one task.** If a changing request needs investigation first, such as identifying a Docker container before removing it, review and approve the read-only discovery plan. After it succeeds, Intent AI Ops proposes the remaining work under the same task number using the recorded evidence. Review and approve that follow-up separately. Completed discovery commands are preserved and are not repeated. In the browser, open **Review remaining work**, approve the revision, then review and resume. Failed or uncertain discovery never triggers automatic continuation; if planning fails, the evidence stays available for a later revision. Inspection-only requests do not trigger a changing follow-up.
+
 Add a saved or temporary host by giving it a name and pasting the SSH command that already works for you, for example:
 
 ```text
