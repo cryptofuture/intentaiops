@@ -5,6 +5,26 @@ import path from 'node:path'
 import test from 'node:test'
 import { Stage2Service } from '../src/stage2-service.js'
 
+test('claim ID lookup falls back to ACLK state when the info API omits an ID', async () => {
+  const id = '53aa76c2-8af5-448f-849a-b16872cc4ba1'
+  const server = { connectionUrl: 'ssh://host.example' }
+  const service = new Stage2Service({
+    ssh: {
+      async execute (url, command) {
+        assert.equal(url, server.connectionUrl)
+        assert.equal(command, 'netdatacli aclk-state')
+        return { stdout: `Claimed: Yes\r\nClaimed Id: ${id}\r\nOnline: Yes\r\n` }
+      }
+    }
+  })
+  service.cloudStatus = async () => ({ id: 0, status: 'online' })
+  assert.equal(await service.cloudClaimId(server), id)
+  service.cloudStatus = async () => { throw new Error('info unavailable') }
+  assert.equal(await service.cloudClaimId(server), id)
+  service.ssh.execute = async () => ({ stdout: 'Claimed: No\n' })
+  assert.equal(await service.cloudClaimId(server), null)
+})
+
 test('saved SSH passwords are checked once over stdin without logging or command interpolation', async () => {
   const calls = []
   const service = new Stage2Service({ ssh: { async execute (...args) { calls.push(args); return { code: 0 } } } })

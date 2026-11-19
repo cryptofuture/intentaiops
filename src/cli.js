@@ -1655,10 +1655,9 @@ async function runConnectedHostSession ({
       if (selected === 'check-claim-id') {
         ui.heading('Netdata Cloud claim ID')
         try {
-          const cloud = await stage2.cloudStatus(server)
-          ui.line('Claim ID', typeof cloud.id === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(cloud.id) && /[1-9a-f]/iu.test(cloud.id) ? cloud.id : 'Not reported by Netdata')
+          ui.line('Claim ID', await stage2.cloudClaimId(server) ?? 'Not reported by Netdata')
         } catch {
-          ui.warn('Could not read Netdata Cloud status from this host.')
+          ui.warn('Could not read the claim ID. If Netdata requires elevated access, check Claimed Id with sudo netdatacli aclk-state on the host.')
         }
         await ui.pause()
       }

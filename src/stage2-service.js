@@ -339,6 +339,15 @@ export class Stage2Service {
     }
   }
 
+  async cloudClaimId ({ connectionUrl }) {
+    const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(value) && value !== '00000000-0000-0000-0000-000000000000' ? value : null
+    const cloud = await this.cloudStatus({ connectionUrl }).catch(() => null)
+    const id = uuid(cloud?.id)
+    if (id) return id
+    const { stdout } = await this.ssh.execute(connectionUrl, 'netdatacli aclk-state', { timeoutMs: 10000, maxOutputBytes: 16384 })
+    return uuid(/^Claimed Id:[ \t]*([a-f0-9-]+)[ \t]*\r?$/imu.exec(stdout)?.[1])
+  }
+
   async waitForCloudClaim (connectionUrl) {
     let cloud
     for (let attempt = 1; attempt <= this.readinessAttempts; attempt++) {
