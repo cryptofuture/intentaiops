@@ -132,6 +132,25 @@ test('Add Host prompts for a missing identity, honors a port override and cleans
   await assert.rejects(stat(temporaryIdentity), { code: 'ENOENT' })
 })
 
+test('Add Host saves a key-authenticated host when the optional passphrase is blank', async () => {
+  const context = addHostContext({
+    answers: ['alpha', 'ssh admin@alpha.test'],
+    choices: ['key', 'save'],
+    open: async () => ({
+      ssh: { execute: async () => ({ stdout: 'WEBMINAI_SSH_OK' }), hostFingerprint: async () => `SHA256:${'a'.repeat(64)}` },
+      close: async () => {}
+    })
+  })
+  context.settingsStore.addServer = async options => {
+    assert.equal(options.authentication, 'key')
+    assert.equal(options.sshCredential, null)
+    return { historyId: 'alpha' }
+  }
+  context.workspace.setDirectoryAlias = () => {}
+  context.workspace.ensureInitialized = async () => {}
+  assert.equal(await addHost({ context }), 'alpha')
+})
+
 test('Add Host can cancel at the SSH destination or authentication steps', async () => {
   let opened = 0
   const destination = await addHost({

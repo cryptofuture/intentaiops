@@ -614,9 +614,8 @@ export async function addHost ({ context, temporary = false }) {
     ])
     if (credentialMode === null) return null
     const sshCredential = credentialMode === 'save'
-      ? await ui.secret('SSH password or private-key passphrase (blank cancels)')
+      ? (await ui.secret('SSH password or private-key passphrase (blank skips)')) || null
       : null
-    if (credentialMode === 'save' && !sshCredential) return null
 
     try {
       const add = temporary
