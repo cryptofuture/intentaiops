@@ -21,7 +21,7 @@ test('dashboard actions preserve zero, one, multiple, and recent-host availabili
     'browse-hosts', 'multi-history', 'add', 'add-temporary', 'add-kubernetes', 'codex-settings', 'controls', 'application-defaults', 'change-passphrase', 'quit'
   ])
   assert.deepEqual(values(mainActionOptions({ hostCount: 2 })), [
-    'browse-hosts', 'multi-task', 'multi-plugin', 'multi-history', 'add', 'add-temporary', 'add-kubernetes', 'codex-settings', 'controls', 'application-defaults', 'change-passphrase', 'quit'
+    'browse-hosts', 'multi-task', 'multi-verified', 'multi-plugin', 'multi-history', 'add', 'add-temporary', 'add-kubernetes', 'codex-settings', 'controls', 'application-defaults', 'change-passphrase', 'quit'
   ])
   assert.equal(mainActionOptions({ hostCount: 1, recentServerId: 'alpha' })[0].value, 'host:alpha')
   assert.deepEqual(values(mainActionOptions({ hostCount: 0, clusterCount: 1 })).slice(0, 2), [

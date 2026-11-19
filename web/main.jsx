@@ -53,14 +53,29 @@ function Composer ({ hosts, initialHost, api, submit, close, actions }) {
   const [catalog, setCatalog] = useState([])
   const [catalogId, setCatalogId] = useState('')
   const [error, setError] = useState('')
-  useEffect(() => { let active = true; setCatalog([]); if (selected.length === 1) api('/catalog?host=' + encodeURIComponent(selected[0])).then(value => { if (active) setCatalog(value) }).catch(e => { if (active) setError(e.message) }); return () => { active = false } }, [selected.join('|')])
+  const targetKey = selected.join('|')
+  const [catalogKey, setCatalogKey] = useState(null)
+  useEffect(() => {
+    if (kind !== 'catalog' || !selected.length) return
+    let active = true
+    setCatalogKey(null)
+    setCatalogId('')
+    setError('')
+    Promise.all(selected.map(host => api('/catalog?host=' + encodeURIComponent(host)))).then(lists => {
+      if (!active) return
+      setCatalog(lists[0].filter(task => task.eligible && lists.every(list => list.some(item => item.id === task.id && item.eligible))))
+      setCatalogKey(targetKey)
+    }).catch(error => { if (active) setError(error.message) })
+    return () => { active = false }
+  }, [kind, targetKey])
+  const chosen = catalogKey === targetKey ? catalog.find(task => task.id === catalogId) : null
   return (
     <Modal title='Prepare a task' close={close}><p>Preparation saves a plan. No command runs until you review and approve it.</p>
       <fieldset><legend>Explicit target selection</legend>{hosts.map(host => <label class='check' key={host.id}><input type='checkbox' checked={selected.includes(host.id)} onChange={e => setSelected(e.target.checked ? [...selected, host.id] : selected.filter(id => id !== host.id))} />{host.id}</label>)}</fieldset>
       <label>Task type<select value={kind} onChange={e => setKind(e.target.value)}><option value='ai'>Natural-language task</option><option value='consultation'>Read-only consultation</option><option value='catalog'>Verified common task</option></select></label>
-      {kind === 'catalog' && <label>Eligible task (select one host to discover)<select value={catalogId} onChange={e => { setCatalogId(e.target.value); setRequest(catalog.find(t => t.id === e.target.value)?.label ?? '') }}><option value=''>Choose a task</option>{catalog.map(task => <option key={task.id} value={task.id} disabled={!task.eligible}>{task.label}{!task.eligible ? ' · ' + task.reason : ''}</option>)}</select></label>}
-      <label>{kind === 'consultation' ? 'Question' : 'Request'}<textarea rows={5} value={request} onInput={e => setRequest(e.target.value)} placeholder='Describe the intended outcome, constraints and verification…' /></label>
-      {error && <p role='alert'>{error}</p>}<footer><Button onClick={close}>Cancel</Button><Button primary disabled={!actions || !selected.length || !request.trim() || (kind === 'catalog' && !catalogId) || (kind === 'consultation' && selected.length !== 1)} onClick={() => submit({ action: 'prepare', serverIds: selected, request, ...(kind === 'catalog' ? { catalogId } : {}), consultation: kind === 'consultation' }).then(close).catch(e => setError(e.message))}>Prepare for review</Button></footer>
+      {kind === 'catalog' && <label>Verified task eligible on every selected host<select disabled={catalogKey !== targetKey} value={chosen?.id ?? ''} onChange={e => setCatalogId(e.target.value)}><option value=''>{!selected.length ? 'Select target hosts' : catalogKey !== targetKey ? 'Checking host eligibility…' : catalog.length ? 'Choose a task' : 'No verified tasks shared by these hosts'}</option>{(catalogKey === targetKey ? catalog : []).map(task => <option key={task.id} value={task.id}>{task.label}</option>)}</select></label>}
+      {kind !== 'catalog' && <label>{kind === 'consultation' ? 'Question' : 'Request'}<textarea rows={5} value={request} onInput={e => setRequest(e.target.value)} placeholder='Describe the intended outcome, constraints and verification…' /></label>}
+      {error && <p role='alert'>{error}</p>}<footer><Button onClick={close}>Cancel</Button><Button primary disabled={!actions || !selected.length || (kind === 'catalog' ? !chosen : !request.trim()) || (kind === 'consultation' && selected.length !== 1)} onClick={() => submit({ action: 'prepare', serverIds: selected, request: kind === 'catalog' ? chosen.label : request, ...(kind === 'catalog' ? { catalogId: chosen.id } : {}), consultation: kind === 'consultation' }).then(close).catch(e => setError(e.message))}>Prepare for review</Button></footer>
     </Modal>
   )
 }

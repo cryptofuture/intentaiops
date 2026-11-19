@@ -333,6 +333,24 @@ test('read-only consultation displays its saved answer without execution control
   expect(tasks.allExecutionEvents('fixture', task.id)).toEqual([])
 })
 
+test('multi-host verified task picker only offers tasks eligible on every selected host', async ({ page }) => {
+  await page.route('**/catalog?host=*', async route => {
+    const host = new URL(route.request().url()).searchParams.get('host')
+    await route.fulfill({ json: [{ id: 'shared', label: 'Shared task', eligible: true }, { id: 'one-host', label: 'Single host task', eligible: host === 'fixture' }] })
+  })
+  await page.goto(server.url)
+  await page.getByRole('button', { name: 'New task' }).click()
+  await page.getByLabel('Task type').selectOption('catalog')
+  await page.getByRole('checkbox', { name: 'fixture', exact: true }).check()
+  const picker = page.getByLabel('Verified task eligible on every selected host')
+  await picker.selectOption('one-host')
+  await page.getByRole('checkbox', { name: 'other', exact: true }).check()
+  await expect(picker.getByRole('option', { name: 'Single host task' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Prepare for review' })).toBeDisabled()
+  await picker.selectOption('shared')
+  await expect(page.getByRole('button', { name: 'Prepare for review' })).toBeEnabled()
+})
+
 test('multi-host browser preparation persists separate unapproved plans and canary continuation halts safely', async ({ page }) => {
   await page.goto(server.url)
   await page.getByRole('button', { name: 'New task' }).click()

@@ -249,8 +249,8 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
       await browseKubernetesClusters({ context })
       continue
     }
-    if (selected === 'multi-task') {
-      await runMultiHostTaskMenu({ context, serverIds, debug: cliOptions.debug })
+    if (selected === 'multi-task' || selected === 'multi-verified') {
+      await runMultiHostTaskMenu({ context, serverIds, debug: cliOptions.debug, verified: selected === 'multi-verified' })
       continue
     }
     if (selected === 'multi-history') {
@@ -945,12 +945,16 @@ function resolveLocalPath (value) {
   return path.resolve(value)
 }
 
-async function runMultiHostTaskMenu ({ context, serverIds, debug }) {
+async function runMultiHostTaskMenu ({ context, serverIds, debug, verified = false }) {
   const { ui, settingsStore, workspace, baseSsh, settings, passphrase, applicationDefaults } = context
   ui.clear()
   ui.banner('Parallel multi-host task')
   const selectedHosts = await selectConfiguredHosts({ context, serverIds, title: 'Select target hosts' })
   if (selectedHosts.length === 0) return
+  if (verified) {
+    await executeMultiHostRun({ ui, settingsStore, workspace, baseSsh, settings, passphrase, debug, serverIds: selectedHosts, kind: 'catalog', catalogId: null, applicationDefaults })
+    return
+  }
   const history = new MultiHostRunStore(settingsStore.dataRoot).list({ limit: 30 })
   let request = await ui.editor('Multi-host AI-assisted task', {
     history,
@@ -1189,6 +1193,33 @@ async function executeMultiHostRun ({
     let effectiveKind = kind
     let effectiveCatalogId = catalogId
     const planningHints = {}
+    if (kind === 'catalog' && !catalogId) {
+      let common
+      try {
+        for (const serverId of serverIds) {
+          const admin = await adminFor(serverId)
+          const connection = { settings, passphrase, serverId }
+          const [{ platform }, inventory] = await Promise.all([admin.capabilities(connection), admin.refreshInventory(connection)])
+          const eligible = eligibleInteractiveCommonTasks({ platform: platform.os, inventory })
+          common = common ? common.filter(task => eligible.some(candidate => candidate.id === task.id)) : eligible
+          planningHints[serverId] = { inventory }
+        }
+      } catch {
+        ui.warn('Could not verify eligibility for every selected host. No task was created.')
+        return
+      }
+      if (!common?.length) {
+        ui.warn('No verified task is shared by all selected hosts. Try selecting hosts with compatible platforms and runtimes.')
+        return
+      }
+      const task = await ui.searchChoose('Verified tasks eligible on every selected host', [
+        ...common.map(task => ({ label: `${task.label} — ${task.description}`, value: task })),
+        { label: 'Back', value: null }
+      ])
+      if (!task) return
+      effectiveCatalogId = task.id
+      request = task.label
+    }
     if (kind === 'ai' && retryOfRunId === null) {
       ui.info('Asking Codex whether the request matches or can reuse a verified common task for each host platform...')
       const routed = await Promise.allSettled(serverIds.map(async serverId => {

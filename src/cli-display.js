@@ -8,6 +8,7 @@ export function mainActionOptions ({ hostCount, clusterCount = 0, recentServerId
   if (recentServerId) actions.push({ label: `Reconnect to ${recentServerId}`, value: `host:${recentServerId}` })
   if (hostCount > 0) actions.push({ label: `Browse/search hosts (${hostCount})`, value: 'browse-hosts', focusRows: true })
   if (hostCount > 1) actions.push({ label: 'Run one task on multiple hosts', value: 'multi-task' })
+  if (hostCount > 1) actions.push({ label: 'Run a verified task on multiple hosts', value: 'multi-verified' })
   if (hostCount > 1) actions.push({ label: 'Install/update plugin on multiple hosts', value: 'multi-plugin' })
   if (clusterCount > 0) actions.push({ label: `Browse Kubernetes clusters (${clusterCount})`, value: 'browse-kubernetes' })
   actions.push({ label: 'Multi-host run history', value: 'multi-history' })
