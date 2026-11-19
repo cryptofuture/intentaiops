@@ -1959,7 +1959,7 @@ async function activate ({
   if (!await ui.confirm(description, true)) return
   ui.info('Activating Stage 2 and verifying its Netdata function API...')
   try {
-    const result = await admin.activate({ settings, passphrase, serverId, installNetdata, ...elevation })
+    const result = await admin.activate({ settings, passphrase, serverId, installNetdata, ...elevation, confirmOffline: () => ui.confirm('The host could not download the Netdata installer. Download the official offline installer locally, transfer it, and install it on this host?', false) })
     ui.success(`Stage 2 is active; plugin ${pluginActionLabel(result)}.`)
   } catch (error) {
     renderOperationError(ui, 'Activation failed', error, debug)

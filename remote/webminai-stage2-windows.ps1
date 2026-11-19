@@ -7,14 +7,17 @@ param(
     [string]$PluginSource,
 
     [Parameter(Position = 2)]
-    [ValidateSet('install-if-needed', 'require-existing', 'keep-netdata', 'remove-managed')]
+    [ValidateSet('install-if-needed', 'install-offline', 'require-existing', 'keep-netdata', 'remove-managed')]
     [string]$Mode = 'keep-netdata',
 
     [Parameter(Position = 3)]
     [string]$PluginVersion,
 
     [Parameter(Position = 4)]
-    [string]$CommandRunnerSource
+    [string]$CommandRunnerSource,
+
+    [Parameter(Position = 5)]
+    [string]$OfflineMsiHash
 )
 
 $ErrorActionPreference = 'Stop'
@@ -133,13 +136,25 @@ function Set-RestrictedAcl([string]$Path, [switch]$Directory) {
 function Install-Netdata {
     $msi = Join-Path $env:TEMP ('webminai-netdata-' + [guid]::NewGuid().ToString('N') + '.msi')
     try {
-        $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
-        if (Test-Path -LiteralPath $curl -PathType Leaf) {
-            & $curl --fail --silent --show-error --location --connect-timeout 15 --max-time 600 --output $msi $NetdataDownload
-            if ($LASTEXITCODE -ne 0) { throw "Netdata download failed with curl exit code $LASTEXITCODE" }
+        if ($Mode -eq 'install-offline') {
+            $source = Join-Path (Split-Path -Parent $PluginSource) 'netdata-x64.msi'
+            if ($OfflineMsiHash -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $OfflineMsiHash) { throw 'Netdata offline MSI checksum verification failed' }
+            Copy-Item -LiteralPath $source -Destination $msi -ErrorAction Stop
+            if ((Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash -ne $OfflineMsiHash) { throw 'Netdata offline MSI checksum verification failed' }
         } else {
-            $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest -UseBasicParsing -Uri $NetdataDownload -OutFile $msi -TimeoutSec 600 -ErrorAction Stop
+            $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+            if (Test-Path -LiteralPath $curl -PathType Leaf) {
+                & $curl --fail --silent --show-error --location --connect-timeout 15 --max-time 600 --output $msi $NetdataDownload
+                if ($LASTEXITCODE -in @(5, 6, 7, 28, 35, 52, 56)) { throw 'INTENT_NETDATA_MSI_NETWORK_FAILURE' }
+                if ($LASTEXITCODE -ne 0) { throw "Netdata download failed with curl exit code $LASTEXITCODE" }
+            } else {
+                $ProgressPreference = 'SilentlyContinue'
+                try { Invoke-WebRequest -UseBasicParsing -Uri $NetdataDownload -OutFile $msi -TimeoutSec 600 -ErrorAction Stop }
+                catch [System.Net.WebException] {
+                    if ($_.Exception.Status -in @('NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure', 'Timeout', 'SecureChannelFailure', 'ReceiveFailure')) { throw 'INTENT_NETDATA_MSI_NETWORK_FAILURE' }
+                    throw
+                }
+            }
         }
         $process = Start-Process msiexec.exe -ArgumentList @('/qn', '/i', ('"' + $msi + '"'), '/norestart') -Wait -PassThru
         if ($process.ExitCode -notin @(0, 3010)) { throw "Netdata MSI failed with exit code $($process.ExitCode)" }
@@ -207,6 +222,7 @@ function Invoke-Activate {
     New-Item -ItemType Directory -Force -Path $StateDirectory | Out-Null
     Set-RestrictedAcl $StateDirectory -Directory
     $hadNetdata = [bool](Get-NetdataService)
+    if ($Mode -eq 'install-offline' -and ($hadNetdata -or (Test-Path -LiteralPath $OwnershipMarker))) { throw 'Offline installation refuses to replace existing Netdata' }
     if (-not $hadNetdata) {
         if ($Mode -eq 'require-existing') { throw 'Netdata is required for plugin-only activation' }
         Install-Netdata

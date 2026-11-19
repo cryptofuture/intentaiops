@@ -366,13 +366,26 @@ install_netdata() {
     # managed reinstall so the installer can install and start them.
     systemctl unmask netdata.service netdata-updater.timer >/dev/null 2>&1 || true
   fi
-  curl --fail --silent --show-error --location \
-    --output "$temporary_directory/kickstart.sh" \
-    https://get.netdata.cloud/kickstart.sh
-  DISABLE_TELEMETRY=1 sh "$temporary_directory/kickstart.sh" \
-    --non-interactive \
-    --release-channel stable \
-    --no-updates
+  if [ "${netdata_mode:-}" = install-offline ]; then
+    bundle="$(dirname "$plugin_source")/netdata-offline"
+    DISABLE_TELEMETRY=1 sh "$bundle/kickstart.sh" --offline-install-source "$bundle" --non-interactive --release-channel stable --no-updates
+  else
+    curl_status=0
+    curl --fail --silent --show-error --location --connect-timeout 15 --max-time 60 \
+      --output "$temporary_directory/kickstart.sh" \
+      https://get.netdata.cloud/kickstart.sh || curl_status=$?
+    case "$curl_status" in
+      0) ;;
+      5|6|7|28|35|52|56)
+        echo 'INTENT_NETDATA_BOOTSTRAP_NETWORK_FAILURE' >&2
+        exit 42 ;;
+      *) exit "$curl_status" ;;
+    esac
+    DISABLE_TELEMETRY=1 sh "$temporary_directory/kickstart.sh" \
+      --non-interactive \
+      --release-channel stable \
+      --no-updates
+  fi
   mkdir -p "$STATE_DIR"
   chmod 0700 "$STATE_DIR"
   : > "$STATE_DIR/netdata-owned"
@@ -425,13 +438,17 @@ activate() {
 
   ownership=preexisting
   netdata_action=existing
+  if [ "$netdata_mode" = install-offline ] && { [ "$PLATFORM_ID" != linux ] || has_netdata || [ -e "$STATE_DIR/netdata-owned" ]; }; then
+    echo 'Offline installation requires Linux without an existing Netdata installation' >&2
+    exit 2
+  fi
   if [ -f "$STATE_DIR/netdata-owned" ]; then
     ownership=managed
   elif ! has_netdata; then
     if [ "$netdata_mode" = require-existing ]; then
       echo 'Netdata is not installed; plugin-only activation requires an existing Netdata installation' >&2
       exit 2
-    elif [ "$netdata_mode" = install-if-needed ]; then
+    elif [ "$netdata_mode" = install-if-needed ] || [ "$netdata_mode" = install-offline ]; then
       install_netdata
       mkdir -p "$STATE_DIR"
       chmod 0700 "$STATE_DIR"

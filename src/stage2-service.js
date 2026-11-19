@@ -2,6 +2,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { NetdataClient } from './netdata-client.js'
 import { validateClaimDetails } from './netdata-claim.js'
+import { transferNetdataOfflineBundle, transferNetdataOfflineMsi } from './netdata-offline.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
 import { replaceLinuxMachineId } from './linux-machine-identity.js'
 import { replaceFreeBsdHostId } from './freebsd-machine-identity.js'
@@ -77,7 +78,8 @@ export class Stage2Service {
     actionKey,
     elevation = 'sudo-n',
     sudoPassword,
-    installNetdata = true
+    installNetdata = true,
+    confirmOffline
   }) {
     const selectedPlugin = await this.selectPluginArtifact(connectionUrl)
     if (selectedPlugin.platform) {
@@ -89,6 +91,7 @@ export class Stage2Service {
         actionKey,
         elevation,
         installNetdata,
+        confirmOffline,
         selectedPlugin
       })
     }
@@ -104,25 +107,23 @@ export class Stage2Service {
       this.trace('copy', 'Copying native Netdata plugin')
       await this.ssh.copy(connectionUrl, selectedPlugin.path, pluginRemote)
       const netdataMode = installNetdata ? 'install-if-needed' : 'require-existing'
-      const elevated = elevationCommand(
-        `/bin/sh '${installerRemote}' activate '${pluginRemote}' ${netdataMode} '${this.pluginVersion}'`,
-        elevation,
-        sudoPassword
-      )
       this.trace('install', `Running installer with elevation mode: ${elevation}`)
       const installTimeoutMs = selectedPlugin.platform?.os === 'freebsd' && installNetdata
         ? 30 * 60 * 1000
         : 10 * 60 * 1000
       let result
+      const install = mode => {
+        const elevated = elevationCommand(`/bin/sh '${installerRemote}' activate '${pluginRemote}' ${mode} '${this.pluginVersion}'`, elevation, sudoPassword)
+        return this.ssh.execute(connectionUrl, elevated.command, { input: `${elevated.inputPrefix}${actionKey}\n`, timeoutMs: installTimeoutMs })
+      }
       try {
-        result = await this.ssh.execute(
-          connectionUrl,
-          elevated.command,
-          { input: `${elevated.inputPrefix}${actionKey}\n`, timeoutMs: installTimeoutMs }
-        )
+        result = await install(netdataMode)
       } catch (error) {
         this.trace('install-error', error.result?.stderr?.trim() || error.message)
-        throw error
+        if (!installNetdata || selectedPlugin.platform?.os !== 'linux' || error.result?.code !== 42 || !error.result.stderr?.split(/\r?\n/u).includes('INTENT_NETDATA_BOOTSTRAP_NETWORK_FAILURE') || !await confirmOffline?.()) throw error
+        this.trace('offline-install', 'Preparing and transferring the official Netdata offline bundle')
+        await transferNetdataOfflineBundle(this.ssh, connectionUrl, `${temporaryDirectory}/netdata-offline`, selectedPlugin.platform.architecture)
+        result = await install('install-offline')
       }
       this.trace('install-output', [result.stdout, result.stderr].filter(Boolean).join('\n').trim())
       const activation = parseInstallerResult(result.stdout)
@@ -139,7 +140,7 @@ export class Stage2Service {
     }
   }
 
-  async activateWindows ({ connectionUrl, actionKey, elevation, installNetdata, selectedPlugin }) {
+  async activateWindows ({ connectionUrl, actionKey, elevation, installNetdata, selectedPlugin, confirmOffline }) {
     if (elevation !== 'windows-admin') throw new Error('Windows Stage 2 activation requires an administrator SSH account')
     this.trace('create-temp', 'Creating restricted Windows temporary directory')
     const temporaryDirectory = await this.createRemoteTemporaryDirectory(connectionUrl, 'windows')
@@ -155,20 +156,27 @@ export class Stage2Service {
       this.trace('copy', 'Copying Windows command runner')
       await this.ssh.copy(connectionUrl, this.windowsCommandRunnerPath, commandRunnerRemote)
       const netdataMode = installNetdata ? 'install-if-needed' : 'require-existing'
-      const command = [
+      const install = (mode, digest) => this.ssh.execute(connectionUrl, [
         'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File',
         installerRemote,
         'Activate',
         pluginRemote,
-        netdataMode,
+        mode,
         this.pluginVersion,
-        commandRunnerRemote
-      ].join(' ')
-      this.trace('install', 'Running Windows installer as the administrator SSH identity')
-      const result = await this.ssh.execute(connectionUrl, command, {
+        commandRunnerRemote,
+        ...(digest ? [digest] : [])
+      ].join(' '), {
         input: `${actionKey}\n`,
         timeoutMs: 15 * 60 * 1000
       })
+      this.trace('install', 'Running Windows installer as the administrator SSH identity')
+      let result
+      try { result = await install(netdataMode) } catch (error) {
+        if (!installNetdata || error.result?.code !== 1 || !error.result.stderr?.includes('INTENT_NETDATA_MSI_NETWORK_FAILURE') || !await confirmOffline?.()) throw error
+        this.trace('offline-install', 'Downloading and transferring the official Netdata MSI')
+        const digest = await transferNetdataOfflineMsi(this.ssh, connectionUrl, `${temporaryDirectory}/netdata-x64.msi`)
+        result = await install('install-offline', digest)
+      }
       this.trace('install-output', [result.stdout, result.stderr].filter(Boolean).join('\n').trim())
       const activation = parseInstallerResult(result.stdout)
       return await this.verifyAndFinalizeActivation({

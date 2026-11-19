@@ -5,6 +5,46 @@ import path from 'node:path'
 import test from 'node:test'
 import { Stage2Service } from '../src/stage2-service.js'
 
+test('Windows offline fallback requires a download failure and operator confirmation', async () => {
+  for (const stderr of ['INTENT_NETDATA_MSI_NETWORK_FAILURE', 'Netdata MSI failed with exit code 1603']) {
+    const failure = Object.assign(new Error('fixture failure'), { result: { code: 1, stderr } })
+    let offers = 0
+    let copies = 0
+    const service = new Stage2Service({ ssh: { copy: async () => { copies++ }, execute: async () => { throw failure } } })
+    service.createRemoteTemporaryDirectory = async () => 'C:/Temp/webminai.fixture'
+    service.removeRemoteTemporaryDirectory = async () => {}
+    await assert.rejects(service.activateWindows({
+      connectionUrl: 'ssh://host.example',
+      actionKey: 'fixture',
+      elevation: 'windows-admin',
+      installNetdata: true,
+      selectedPlugin: { path: '/fixture/plugin.exe' },
+      confirmOffline: async () => { offers++; return false }
+    }), error => error === failure)
+    assert.equal(offers, stderr.startsWith('INTENT_') ? 1 : 0)
+    assert.equal(copies, 3)
+  }
+})
+
+test('offline installation is offered only for the remote bootstrap network failure', async () => {
+  for (const code of [42, 1, 255]) {
+    const failure = Object.assign(new Error('fixture failure'), { result: { code, stderr: 'INTENT_NETDATA_BOOTSTRAP_NETWORK_FAILURE\n' } })
+    let offers = 0
+    let cleaned = false
+    const service = new Stage2Service({ ssh: { copy: async () => {}, execute: async () => { throw failure } } })
+    service.selectPluginArtifact = async () => ({ path: '/fixture/plugin', platform: { os: 'linux', architecture: 'amd64' } })
+    service.createRemoteTemporaryDirectory = async () => '/tmp/webminai.fixture'
+    service.removeRemoteTemporaryDirectory = async () => { cleaned = true }
+    await assert.rejects(service.activate({
+      connectionUrl: 'ssh://host.example',
+      actionKey: 'fixture',
+      confirmOffline: async () => { offers++; return false }
+    }), error => error === failure)
+    assert.equal(offers, code === 42 ? 1 : 0)
+    assert.equal(cleaned, true)
+  }
+})
+
 test('claim ID lookup reads elevated ACLK state and sends the sudo password only on stdin', async () => {
   const id = '53aa76c2-8af5-448f-849a-b16872cc4ba1'
   const server = { connectionUrl: 'ssh://host.example', elevation: 'sudo-password', sudoPassword: 'fixture' }

@@ -81,9 +81,9 @@ export class AdminService {
     return entry
   }
 
-  async activate ({ settings, passphrase, serverId, elevation, sudoPassword, installNetdata = true }) {
+  async activate ({ settings, passphrase, serverId, elevation, sudoPassword, installNetdata = true, confirmOffline }) {
     const server = await this.serverSecrets({ settings, passphrase, serverId })
-    const result = await this.runElevatedLifecycle({ settings, passphrase, serverId, server, elevation, sudoPassword }, () => this.stage2.activate({ ...server, elevation, sudoPassword, installNetdata }))
+    const result = await this.runElevatedLifecycle({ settings, passphrase, serverId, server, elevation, sudoPassword }, () => this.stage2.activate({ ...server, elevation, sudoPassword, installNetdata, confirmOffline }))
     await this.settings.setStage2State({
       settings,
       serverId,
