@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
+import { normalizeSshKey } from '../src/vault-ssh-key.js'
 import { TerminalUi } from '../src/terminal-ui.js'
 
 test('terminal editor submits with Enter, inserts Shift+Enter, and recalls history', async () => {
@@ -167,6 +168,17 @@ test('hidden multiline editor accepts pasted kubeconfig without rendering it', a
   assert.match(output.text, /contents remain hidden/)
   assert.equal(input.isRaw, false)
   assert.equal(input.isPaused(), true)
+})
+
+test('hidden key paste accepts terminal carriage returns and bracketed paste markers', async () => {
+  const { input, output } = terminalPair()
+  const ui = new TerminalUi({ input, output })
+  const key = '-----BEGIN OPENSSH PRIVATE KEY-----\nYWJj\n-----END OPENSSH PRIVATE KEY-----\n'
+  const editing = ui.secretEditor('Paste SSH private key')
+  input.emit('data', Buffer.from('\x1b[200~' + key.replaceAll('\n', '\r') + '\x1b[201~'))
+  input.emit('data', Buffer.from('\x04'))
+  assert.equal(normalizeSshKey(await editing), key)
+  assert.doesNotMatch(output.text, /BEGIN OPENSSH|YWJj/u)
 })
 
 test('a hidden prompt render failure restores terminal state', async () => {

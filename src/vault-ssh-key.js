@@ -22,7 +22,7 @@ export async function promptSshKey (ui, connectionUrl, authentication) {
 
 export function normalizeSshKey (value) {
   if (typeof value !== 'string' || value.length > 65536) throw new Error('Invalid SSH private key format')
-  const key = value.replace(/\r\n/g, '\n').trim()
+  const key = value.replace(/\r\n?/g, '\n').trim()
   if (!/^-----BEGIN ((?:OPENSSH |RSA |EC |DSA |ENCRYPTED )?PRIVATE KEY)-----\n[A-Za-z0-9+/=\n]+\n-----END \1-----$/u.test(key)) throw new Error('Invalid SSH private key format')
   return key + '\n'
 }
