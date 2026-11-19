@@ -1655,9 +1655,10 @@ async function runConnectedHostSession ({
       if (selected === 'check-claim-id') {
         ui.heading('Netdata Cloud claim ID')
         try {
-          ui.line('Claim ID', await stage2.cloudClaimId(server) ?? 'Not reported by Netdata')
+          const elevation = await chooseElevation(ui, status.capabilities, password => admin.savedSudoPassword({ settings, passphrase, serverId }, password))
+          if (elevation) ui.line('Claim ID', await stage2.cloudClaimId({ ...server, ...elevation }) ?? 'Not reported by Netdata')
         } catch {
-          ui.warn('Could not read the claim ID. If Netdata requires elevated access, check Claimed Id with sudo netdatacli aclk-state on the host.')
+          ui.warn('Could not read the claim ID with elevated access. Check that Netdata is running and netdatacli is available on the host.')
         }
         await ui.pause()
       }

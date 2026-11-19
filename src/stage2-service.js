@@ -339,12 +339,10 @@ export class Stage2Service {
     }
   }
 
-  async cloudClaimId ({ connectionUrl }) {
+  async cloudClaimId ({ connectionUrl, elevation, sudoPassword }) {
     const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(value) && value !== '00000000-0000-0000-0000-000000000000' ? value : null
-    const cloud = await this.cloudStatus({ connectionUrl }).catch(() => null)
-    const id = uuid(cloud?.id)
-    if (id) return id
-    const { stdout } = await this.ssh.execute(connectionUrl, 'netdatacli aclk-state', { timeoutMs: 10000, maxOutputBytes: 16384 })
+    const { command, inputPrefix } = elevationCommand('netdatacli aclk-state', elevation === 'windows-admin' ? 'root' : elevation, sudoPassword)
+    const { stdout } = await this.ssh.execute(connectionUrl, command, { input: inputPrefix || undefined, timeoutMs: 10000, maxOutputBytes: 16384 })
     return uuid(/^Claimed Id:[ \t]*([a-f0-9-]+)[ \t]*\r?$/imu.exec(stdout)?.[1])
   }
 
