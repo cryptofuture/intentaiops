@@ -1,4 +1,5 @@
 import { access, readFile } from 'node:fs/promises'
+import { openVaultKeySession, promptSshKey } from './vault-ssh-key.js'
 import os from 'node:os'
 import path from 'node:path'
 import { listCommonTasks, listEligibleCommonTasks } from './common-tasks.js'
@@ -157,6 +158,7 @@ async function runCliSession ({ cliOptions, ui, selfUpdate, onTransport }) {
 
   if (cliOptions.console) {
     const hosts = new OperatorHosts({ factory: hostSessions, settingsStore, workspace, settings, tasks: taskStore, passphrase, credential: (capabilities, savedPassword) => chooseElevation(ui, capabilities, savedPassword), prepareIdentity: options => prepareHostIdentity({ ...options, ui, settingsStore, settings, passphrase, chooseElevation, enrollmentOnly: true }), notify: event => controller?.record(event) })
+    hosts.promptKey = (url, authentication) => promptSshKey(ui, url, authentication)
     const controller = new OperatorController({
       dataRoot,
       settings,
@@ -550,6 +552,13 @@ export async function addHost ({ context, temporary = false }) {
   let connectionUrl
   try {
     connectionUrl = parseSshCommand(command)
+    const url = new URL(connectionUrl)
+    const port = await ui.ask(`SSH port (blank keeps ${parseSshConnection(connectionUrl).port})`, { required: false })
+    if (port) {
+      if (!/^\d{1,5}$/u.test(port) || Number(port) < 1 || Number(port) > 65535) throw new Error('invalid SSH port')
+      url.port = String(Number(port))
+      connectionUrl = url.href
+    }
   } catch (error) {
     ui.error(error.message)
     await ui.pause()
@@ -559,6 +568,7 @@ export async function addHost ({ context, temporary = false }) {
     { label: 'SSH key or ssh-agent', value: 'key' },
     { label: 'Password (prompted by OpenSSH; never stored)', value: 'password' },
     { label: 'Automatic OpenSSH selection', value: 'auto' },
+    { label: 'Paste an SSH private key', value: 'paste-key' },
     { label: 'Cancel and return to dashboard', value: null }
   ])
   if (authentication === null) return null
@@ -568,72 +578,86 @@ export async function addHost ({ context, temporary = false }) {
   let hostFingerprint
   let bootstrapSudoPassword = null
   try {
-    session = await (baseSsh.acquireSession ?? baseSsh.openInteractiveSession).call(baseSsh, connectionUrl, { authentication })
-    const check = await session.ssh.execute(connectionUrl, 'echo WEBMINAI_SSH_OK')
-    if (check.stdout.trim() !== 'WEBMINAI_SSH_OK') throw new Error('unexpected SSH test response')
-    const prepared = await prepareHostIdentity({ ui, ssh: session.ssh, connectionUrl, serverId, settingsStore, settings, passphrase, chooseElevation })
-    if (!prepared) return null
-    hostFingerprint = prepared.hostFingerprint
-    bootstrapSudoPassword = prepared.sudoPassword
-    ui.success('SSH connection succeeded.')
-  } catch (error) {
-    if (error.code === 'HOST_IDENTITY_CONFLICT') {
-      ui.error(`Could not add host: ${error.message}`)
+    const sshPrivateKey = await promptSshKey(ui, connectionUrl, authentication)
+    const method = sshPrivateKey ? 'key' : authentication
+    if (sshPrivateKey) {
+      const url = new URL(connectionUrl)
+      url.searchParams.delete('identity')
+      connectionUrl = url.href
+    }
+    try {
+      session = sshPrivateKey ? await openVaultKeySession(baseSsh, connectionUrl, sshPrivateKey) : await (baseSsh.acquireSession ?? baseSsh.openInteractiveSession).call(baseSsh, connectionUrl, { authentication: method })
+      const check = await session.ssh.execute(connectionUrl, 'echo WEBMINAI_SSH_OK')
+      if (check.stdout.trim() !== 'WEBMINAI_SSH_OK') throw new Error('unexpected SSH test response')
+      const prepared = await prepareHostIdentity({ ui, ssh: session.ssh, connectionUrl, serverId, settingsStore, settings, passphrase, chooseElevation })
+      if (!prepared) return null
+      hostFingerprint = prepared.hostFingerprint
+      bootstrapSudoPassword = prepared.sudoPassword
+      ui.success('SSH connection succeeded.')
+    } catch (error) {
+      if (error.code === 'HOST_IDENTITY_CONFLICT') {
+        ui.error(`Could not add host: ${error.message}`)
+        await ui.pause()
+        return null
+      }
+      ui.error(`SSH test failed: ${error.message}`)
       await ui.pause()
-      return null
+      return
+    } finally {
+      await session?.close()
     }
-    ui.error(`SSH test failed: ${error.message}`)
-    await ui.pause()
-    return
-  } finally {
-    await session?.close()
-  }
 
-  const credentialMode = await ui.choose(`Should ${PRODUCT_NAME} save an SSH password or private-key passphrase?`, [
-    { label: 'Do not save an SSH credential', value: 'none' },
-    { label: 'Save it encrypted with the vault passphrase', value: 'save' },
-    { label: 'Cancel without adding the host', value: null }
-  ])
-  if (credentialMode === null) return null
-  const sshCredential = credentialMode === 'save'
-    ? await ui.secret('SSH password or private-key passphrase (blank cancels)')
-    : null
-  if (credentialMode === 'save' && !sshCredential) return null
+    const credentialMode = await ui.choose(`Should ${PRODUCT_NAME} save an SSH password or private-key passphrase?`, [
+      { label: 'Do not save an SSH credential', value: 'none' },
+      { label: 'Save it encrypted with the vault passphrase', value: 'save' },
+      { label: 'Cancel without adding the host', value: null }
+    ])
+    if (credentialMode === null) return null
+    const sshCredential = credentialMode === 'save'
+      ? await ui.secret('SSH password or private-key passphrase (blank cancels)')
+      : null
+    if (credentialMode === 'save' && !sshCredential) return null
 
-  try {
-    const add = temporary
-      ? settingsStore.addTemporaryServer.bind(settingsStore)
-      : settingsStore.addServer.bind(settingsStore)
-    const entry = await add({
-      settings,
-      passphrase,
-      serverId,
-      connectionUrl,
-      authentication,
-      sshCredential,
-      hostFingerprint
-    })
-    if (bootstrapSudoPassword) {
-      await settingsStore.setServerSudoCredential({ settings, passphrase, serverId, sshCredential, sudoPassword: bootstrapSudoPassword })
-      bootstrapSudoPassword = null
+    try {
+      const add = temporary
+        ? settingsStore.addTemporaryServer.bind(settingsStore)
+        : settingsStore.addServer.bind(settingsStore)
+      const entry = await add({
+        settings,
+        passphrase,
+        serverId,
+        connectionUrl,
+        authentication: method,
+        sshCredential,
+        sshPrivateKey,
+        hostFingerprint
+      })
+      if (bootstrapSudoPassword) {
+        await settingsStore.setServerSudoCredential({ settings, passphrase, serverId, sshCredential, sudoPassword: bootstrapSudoPassword })
+        bootstrapSudoPassword = null
+      }
+      workspace.setDirectoryAlias(serverId, entry.historyId)
+      await workspace.ensureInitialized(serverId, rootExecutionPolicy({
+        maxCommands: 20,
+        maxTimeoutMs: 300000,
+        deniedPatterns: []
+      }))
+      ui.success(temporary
+        ? `Temporary host ${serverId} was added for this process; its task history is associated with its stable fingerprint.`
+        : `Host ${serverId} was saved and associated with its stable fingerprint.`)
+      ui.info(sshCredential ? 'The SSH credential is vault encrypted.' : 'No SSH credential was saved.')
+      await ui.pause()
+      return serverId
+    } catch (error) {
+      ui.error(`Could not add host: ${error.message}`)
     }
-    workspace.setDirectoryAlias(serverId, entry.historyId)
-    await workspace.ensureInitialized(serverId, rootExecutionPolicy({
-      maxCommands: 20,
-      maxTimeoutMs: 300000,
-      deniedPatterns: []
-    }))
-    ui.success(temporary
-      ? `Temporary host ${serverId} was added for this process; its task history is associated with its stable fingerprint.`
-      : `Host ${serverId} was saved and associated with its stable fingerprint.`)
-    ui.info(sshCredential ? 'The SSH credential is vault encrypted.' : 'No SSH credential was saved.')
     await ui.pause()
-    return serverId
+    return null
   } catch (error) {
-    ui.error(`Could not add host: ${error.message}`)
+    ui.error(error.message)
+    await ui.pause()
+    return null
   }
-  await ui.pause()
-  return null
 }
 
 export async function addKubernetesCluster ({ context }) {

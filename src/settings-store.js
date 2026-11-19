@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto'
+import { normalizeSshKey } from './vault-ssh-key.js'
 import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { access, mkdir, readFile } from 'node:fs/promises'
 import Database from 'better-sqlite3'
@@ -121,6 +122,7 @@ export class SettingsStore {
     connectionUrl,
     authentication = 'auto',
     sshCredential = null,
+    sshPrivateKey = null,
     hostFingerprint = null
   }) {
     return this.addServerEntry({
@@ -130,6 +132,7 @@ export class SettingsStore {
       connectionUrl,
       authentication,
       sshCredential,
+      sshPrivateKey,
       hostFingerprint,
       temporary: false
     })
@@ -142,6 +145,7 @@ export class SettingsStore {
     connectionUrl,
     authentication = 'auto',
     sshCredential = null,
+    sshPrivateKey = null,
     hostFingerprint
   }) {
     return this.addServerEntry({
@@ -151,6 +155,7 @@ export class SettingsStore {
       connectionUrl,
       authentication,
       sshCredential,
+      sshPrivateKey,
       hostFingerprint,
       temporary: true
     })
@@ -163,6 +168,7 @@ export class SettingsStore {
     connectionUrl,
     authentication,
     sshCredential,
+    sshPrivateKey,
     hostFingerprint,
     temporary
   }) {
@@ -191,6 +197,7 @@ export class SettingsStore {
           connectionUrl,
           authentication,
           sshCredential,
+          ...(sshPrivateKey ? { sshPrivateKey: normalizeSshKey(sshPrivateKey) } : {}),
           actionKey: randomBytes(32).toString('hex')
         })
       }

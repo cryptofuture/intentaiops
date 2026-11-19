@@ -3,6 +3,9 @@ import test from 'node:test'
 import { addHost, addKubernetesCluster, changeVaultPassphrase, chooseElevation, claimNetdataCloud, redactHealthText, unlock } from '../src/cli.js'
 import { VaultAuthenticationError } from '../src/crypto-vault.js'
 import { createHash } from 'node:crypto'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 
 test('elevation reuses a verified SSH password and falls back to the normal prompt', async () => {
   const ui = quietUi({ secrets: ['different sudo password'] })
@@ -99,6 +102,34 @@ test('Add Host returns immediately when the host name is blank', async () => {
   })
   assert.equal(result, null)
   assert.equal(opened, false)
+})
+
+test('Add Host prompts for a missing identity, honors a port override and cleans up on cancellation', { skip: process.platform === 'win32' }, async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'intent-key-test-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const key = '-----BEGIN OPENSSH PRIVATE KEY-----\nYWJj\n-----END OPENSSH PRIVATE KEY-----'
+  let opened = false
+  let temporaryIdentity
+  const context = addHostContext({
+    answers: ['alpha', `ssh -i ${root}/missing admin@alpha.test -p 2200`, '2222'],
+    choices: ['key', null],
+    open: async (destination, { authentication }) => {
+      const url = new URL(destination)
+      assert.equal(url.port, '2222')
+      assert.equal(authentication, 'key')
+      const identity = url.searchParams.get('identity')
+      temporaryIdentity = identity
+      assert.equal((await stat(identity)).mode & 0o777, 0o600)
+      assert.equal(await readFile(identity, 'utf8'), key + '\n')
+      opened = true
+      return { ssh: { execute: async () => ({ stdout: 'WEBMINAI_SSH_OK' }), hostFingerprint: async () => `SHA256:${'a'.repeat(64)}` }, close: async () => {} }
+    }
+  })
+  context.settingsStore.dataRoot = root
+  context.ui.secretEditor = async label => { assert.match(label, /not found/u); return key }
+  assert.equal(await addHost({ context }), null)
+  assert.ok(opened)
+  await assert.rejects(stat(temporaryIdentity), { code: 'ENOENT' })
 })
 
 test('Add Host can cancel at the SSH destination or authentication steps', async () => {

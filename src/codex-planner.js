@@ -18,7 +18,7 @@ import {
 } from './planner-platform-policy.js'
 
 export const CODEX_REASONING_EFFORTS = Object.freeze(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
-export const DEFAULT_CODEX_SETTINGS = Object.freeze({ model: 'gpt-6.1-sol', reasoningEffort: 'low' })
+export const DEFAULT_CODEX_SETTINGS = Object.freeze({ model: 'gpt-6.2-sol', reasoningEffort: 'low' })
 const CODEX_MODEL_PROFILES = Object.freeze({ 'mimo-v2.6-pro': 'mimo' })
 const PLANNER_DISABLED_FEATURES = ['shell_tool', 'unified_exec', 'shell_snapshot', 'apps', 'plugins', 'multi_agent', 'multi_agent_v2', 'browser_use', 'browser_use_external', 'computer_use', 'view_image', 'image_generation', 'hooks', 'workspace_dependencies', 'code_mode', 'memories', 'skill_search', 'skill_mcp_dependency_install', 'goals', 'default_mode_request_user_input']
 

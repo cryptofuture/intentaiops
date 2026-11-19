@@ -22,8 +22,9 @@ export function parseSshCommand (input) {
   while (tokens.length > 0) {
     const token = tokens.shift()
     if (!token.startsWith('-')) {
+      if (target) throw new TypeError('the SSH command must contain one host and no remote command')
       target = token
-      break
+      continue
     }
     if (['-4', '-6'].includes(token)) continue
     if (['-p', '-i', '-F', '-l'].includes(token)) {

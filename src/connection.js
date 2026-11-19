@@ -1,3 +1,6 @@
+import os from 'node:os'
+import path from 'node:path'
+
 const SAFE_USERNAME = /^[A-Za-z0-9][A-Za-z0-9._\\/-]{0,254}$/
 
 /**
@@ -47,6 +50,7 @@ function cleanPath (value) {
   if (value.includes('\0') || value.includes('\n') || value.includes('\r')) {
     throw new TypeError('SSH path option contains an invalid character')
   }
-  if (!value.startsWith('/')) throw new TypeError('SSH path option must be absolute')
+  if (value.startsWith('~/')) return path.join(os.homedir(), value.slice(2))
+  if (!path.isAbsolute(value)) throw new TypeError('SSH path option must be absolute')
   return value
 }

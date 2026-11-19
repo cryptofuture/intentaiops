@@ -892,7 +892,7 @@ export class TerminalUi {
       for (const line of normalizeLines(introLines)) this.output.write(`${line}\n`)
       if (introLines.length > 0) this.separator()
       this.info('Paste the complete value. Its contents remain hidden.')
-      this.output.write('\nKubeconfig captured (hidden)\n\n')
+      this.output.write('\nInput is hidden\n\n')
       this.renderKeyHints([['Ctrl+D', 'validate and continue'], ['Esc', 'cancel']])
     }
     const result = await this.readRawKey((string, key, finish) => {

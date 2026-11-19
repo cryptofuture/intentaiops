@@ -18,7 +18,7 @@ class CodexPlanner extends ProductionCodexPlanner {
 test('third-party planners get fifteen minutes without changing OpenAI deadlines or retrying timed-out requests', async t => {
   const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'intent-planner-timeout-'))
   t.after(() => rm(serverDirectory, { recursive: true, force: true }))
-  for (const [model, timeoutMs] of [['gpt-6.1-sol', 300000], ['o3', 300000], ['codex-mini-latest', 300000], ['mimo-v2.6-pro', 900000], ['claude-example', 900000], ['provider/custom-model', 900000]]) {
+  for (const [model, timeoutMs] of [['gpt-6.2-sol', 300000], ['o3', 300000], ['codex-mini-latest', 300000], ['mimo-v2.6-pro', 900000], ['claude-example', 900000], ['provider/custom-model', 900000]]) {
     for (const timedOut of [false, true]) {
       let calls = 0
       const planner = new CodexPlanner({
@@ -282,7 +282,7 @@ test('AI schema preserves reviewed bounded retries and normalizes nullable polic
 })
 
 test('Codex planner accepts catalog model identifiers and validates setting syntax', () => {
-  assert.equal(new CodexPlanner().model, 'gpt-6.1-sol')
+  assert.equal(new CodexPlanner().model, 'gpt-6.2-sol')
   assert.equal(new CodexPlanner().reasoningEffort, 'low')
   assert.throws(() => new CodexPlanner({ model: '--config=malicious' }), /invalid Codex model/u)
   assert.throws(() => new CodexPlanner({ model: 'model\ncontrol' }), /invalid Codex model/u)
@@ -301,7 +301,7 @@ test('Codex model discovery uses native capabilities, includes hidden models and
         code: 0,
         stdout: JSON.stringify({
           models: [
-            { slug: 'gpt-6.1-sol', supported_reasoning_levels: [{ effort: 'low' }, { effort: 'max' }], model_messages: { instructions_template: 'never expose catalog prompts' } },
+            { slug: 'gpt-6.2-sol', supported_reasoning_levels: [{ effort: 'low' }, { effort: 'max' }], model_messages: { instructions_template: 'never expose catalog prompts' } },
             { slug: 'gpt-hidden', visibility: 'hide', supported_reasoning_levels: [{ effort: 'none' }, { effort: 'ultra' }] }
           ]
         })
@@ -309,7 +309,7 @@ test('Codex model discovery uses native capabilities, includes hidden models and
     }
   })
   assert.deepEqual(await planner.listModels(), [
-    { model: 'gpt-6.1-sol', reasoningEfforts: ['low', 'max'] },
+    { model: 'gpt-6.2-sol', reasoningEfforts: ['low', 'max'] },
     { model: 'gpt-hidden', reasoningEfforts: ['none', 'ultra'] },
     { model: 'mimo-v2.6-pro', reasoningEfforts: ['low', 'medium', 'high'] }
   ])
@@ -530,7 +530,7 @@ test('Codex planner reads bounded verified candidate intelligence for custom tas
   assert.deepEqual(planned.commands[0].source, { type: 'ai-planned' })
 })
 
-test('Codex planner uses GPT-6.1 Sol low in an isolated sanitized job directory', async t => {
+test('Codex planner uses GPT-6.2 Sol low in an isolated sanitized job directory', async t => {
   const serverDirectory = await mkdtemp(path.join(os.tmpdir(), 'webminai-server-test-'))
   t.after(() => rm(serverDirectory, { recursive: true, force: true }))
   await writeFile(path.join(serverDirectory, 'context.md'), 'Role: web server\n')
@@ -583,7 +583,7 @@ test('Codex planner uses GPT-6.1 Sol low in an isolated sanitized job directory'
   assert.equal(result.commands[0].command, 'uptime')
   assert.equal(call.binary, 'codex')
   assert.deepEqual(call.args.slice(0, 3), ['--no-daemon', 'exec', '--cd'])
-  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6.1-sol')
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6.2-sol')
   assert.equal(call.args[call.args.indexOf('--config') + 1], 'model_reasoning_effort="low"')
   assert.ok(call.args.includes('approval_policy="never"'))
   assert.ok(call.args.includes('--strict-config'))

@@ -158,7 +158,7 @@ test('Codex model settings are validated and persisted', async t => {
   const store = new SettingsStore(root)
   const settings = await store.initialize()
 
-  assert.deepEqual(settings.codex, { model: 'gpt-6.1-sol', reasoningEffort: 'low' })
+  assert.deepEqual(settings.codex, { model: 'gpt-6.2-sol', reasoningEffort: 'low' })
   await store.setCodexSettings({ settings, model: 'gpt-5.6-terra', reasoningEffort: 'low' })
   assert.deepEqual((await store.load()).codex, { model: 'gpt-5.6-terra', reasoningEffort: 'low' })
   await store.setCodexSettings({ settings, model: 'mimo-v2.6-pro', reasoningEffort: 'high' })
@@ -316,6 +316,7 @@ test('settings store encrypts server secrets and preserves stage 2 state', async
 
   const connectionUrl = 'ssh://admin@example.test:2222?identity=%2Fkeys%2Fadmin'
   const sshCredential = 'private key passphrase / password'
+  const sshPrivateKey = '-----BEGIN OPENSSH PRIVATE KEY-----\nYWJj\n-----END OPENSSH PRIVATE KEY-----\n'
   const primaryFingerprint = `SHA256:${'11'.repeat(32)}`
   const entry = await store.addServer({
     settings,
@@ -323,6 +324,7 @@ test('settings store encrypts server secrets and preserves stage 2 state', async
     serverId: 'primary',
     connectionUrl,
     sshCredential,
+    sshPrivateKey,
     hostFingerprint: primaryFingerprint
   })
 
@@ -330,10 +332,12 @@ test('settings store encrypts server secrets and preserves stage 2 state', async
   assert.equal(raw.includes(connectionUrl), false)
   assert.equal(raw.includes('/keys/admin'), false)
   assert.equal(raw.includes(sshCredential), false)
+  assert.equal(raw.includes('OPENSSH PRIVATE KEY'), false)
   assert.equal((await stat(path.join(root, 'settings.json'))).mode & 0o777, 0o600)
   assert.equal(entry.secret.algorithm, 'aes-256-gcm')
 
   const reloaded = await store.load()
+  assert.equal((await store.decryptServer({ settings: reloaded, passphrase: 'correct horse battery staple', serverId: 'primary' })).sshPrivateKey, sshPrivateKey)
   assert.deepEqual(await store.decryptApplicationDefaults({
     settings: reloaded,
     passphrase: 'correct horse battery staple'

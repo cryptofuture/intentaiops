@@ -55,8 +55,8 @@ export class OperatorHosts {
     const { hostId } = body
     validateServerId(hostId)
     if (body.action === 'host-add' || body.action === 'host-edit') {
-      if (typeof body.connection !== 'string' || body.connection.length > 2048 || !['auto', 'key', 'password'].includes(body.authentication ?? 'auto')) throw new Error('Invalid SSH connection')
-      const connectionUrl = parseSshCommand(body.connection)
+      if (typeof body.connection !== 'string' || body.connection.length > 2048 || !['auto', 'key', 'password', 'paste-key'].includes(body.authentication ?? 'auto')) throw new Error('Invalid SSH connection')
+      let connectionUrl = parseSshCommand(body.connection)
       if (body.action === 'host-add' && this.settings.servers[hostId]) throw new Error('Host already exists')
       if (this.sessions.get(hostId)?.references || this.connecting.has(hostId)) throw new Error('Host is busy')
       return this.terminal(hostId, async () => {
@@ -64,7 +64,15 @@ export class OperatorHosts {
         const old = this.settings.servers[hostId]
         if (body.action === 'host-add' && old) throw new Error('Host already exists')
         if (body.action === 'host-edit' && !old) throw new Error('Unknown host')
-        const session = await this.factory.openSsh({ connectionUrl, authentication: body.authentication ?? 'auto' })
+        const sshPrivateKey = await this.promptKey?.(connectionUrl, body.authentication ?? 'auto')
+        if (body.authentication === 'paste-key' && !sshPrivateKey) throw new Error('Private key entry requires the launch terminal')
+        if (sshPrivateKey) {
+          const url = new URL(connectionUrl)
+          url.searchParams.delete('identity')
+          connectionUrl = url.href
+        }
+        const authentication = sshPrivateKey ? 'key' : body.authentication ?? 'auto'
+        const session = await this.factory.openSsh({ connectionUrl, authentication, sshPrivateKey })
         let prepared
         try {
           prepared = body.action === 'host-add' && this.prepareIdentity ? await this.prepareIdentity({ ssh: session.ssh, connectionUrl, serverId: hostId }) : null
@@ -81,7 +89,7 @@ export class OperatorHosts {
             if (old) delete this.settings.servers[hostId]
             try {
               const method = body.temporary ? 'addTemporaryServer' : 'addServer'
-              await this.settingsStore[method]({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, connectionUrl, authentication: body.authentication ?? 'auto', hostFingerprint })
+              await this.settingsStore[method]({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, connectionUrl, authentication, sshPrivateKey, hostFingerprint })
               if (prepared?.sudoPassword) {
                 await this.settingsStore.setServerSudoCredential({ settings: this.settings, passphrase: this.passphrase, serverId: hostId, sshCredential: null, sudoPassword: prepared.sudoPassword })
                 prepared.sudoPassword = null

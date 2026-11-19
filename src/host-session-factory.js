@@ -1,4 +1,5 @@
 import { AdminService } from './admin-service.js'
+import { openVaultKeySession } from './vault-ssh-key.js'
 import { CodexPlanner } from './codex-planner.js'
 import { Stage2Service } from './stage2-service.js'
 
@@ -61,6 +62,14 @@ export class HostSessionFactory {
   }
 
   async openSsh (server) {
+    if (server.sshPrivateKey) {
+      if (server.sshCredential) {
+        try { return await openVaultKeySession(this.baseSsh, server.connectionUrl, server.sshPrivateKey, { credential: server.sshCredential }) } catch {
+          this.onWarning('Saved key passphrase did not authenticate. Retrying with the normal OpenSSH prompt.')
+        }
+      }
+      return openVaultKeySession(this.baseSsh, server.connectionUrl, server.sshPrivateKey)
+    }
     const acquire = this.baseSsh.acquireSession?.bind(this.baseSsh) ?? this.baseSsh.openInteractiveSession.bind(this.baseSsh)
     if (server.sshCredential) {
       try {
