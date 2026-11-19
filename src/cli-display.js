@@ -28,6 +28,7 @@ export function connectedHostActionOptions ({ status, dockerPreference, temporar
     { label: 'Activate Stage 2 (install Netdata if needed)', value: 'activate' },
     { label: 'Install/update plugin only (keep existing Netdata)', value: 'activate-plugin' },
     { label: 'Connect existing Netdata to Netdata Cloud', value: 'claim-cloud' },
+    { label: 'Check Netdata Cloud claim ID', value: 'check-claim-id' },
     { label: 'Deactivate plugin and keep Netdata', value: 'deactivate', style: 'warning' },
     { label: `Remove plugin and ${PRODUCT_NAME}-managed Netdata`, value: 'remove', style: 'danger' },
     { label: `Set Docker preference (${dockerPreference})`, value: 'docker-preference' },

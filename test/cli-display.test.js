@@ -149,7 +149,7 @@ test('connected host actions preserve every operation and platform availability'
   }).map(option => option.value)
   const linux = values('linux')
   for (const action of [
-    'refresh', 'activate', 'activate-plugin', 'claim-cloud', 'deactivate', 'remove',
+    'refresh', 'activate', 'activate-plugin', 'claim-cloud', 'check-claim-id', 'deactivate', 'remove',
     'docker-preference', 'ssh-credential', 'common-application', 'task', 'history', 'remote-recovery', 'shell',
     'requirements', 'switch', 'forget-host', 'back'
   ]) assert.ok(linux.includes(action), `missing connected-host action: ${action}`)

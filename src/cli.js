@@ -1652,6 +1652,16 @@ async function runConnectedHostSession ({
         status = await readStatus(statusOptions())
         updateHostRuntime(context.hostRuntime, serverId, status)
       }
+      if (selected === 'check-claim-id') {
+        ui.heading('Netdata Cloud claim ID')
+        try {
+          const cloud = await stage2.cloudStatus(server)
+          ui.line('Claim ID', typeof cloud.id === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(cloud.id) && /[1-9a-f]/iu.test(cloud.id) ? cloud.id : 'Not reported by Netdata')
+        } catch {
+          ui.warn('Could not read Netdata Cloud status from this host.')
+        }
+        await ui.pause()
+      }
       if (selected === 'claim-cloud') {
         await claimNetdataCloud({ ui, admin, settings, passphrase, serverId, status, debug })
         status = await readStatus(statusOptions())
